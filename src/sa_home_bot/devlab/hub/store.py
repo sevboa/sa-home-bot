@@ -7,11 +7,12 @@ from pathlib import Path
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub import queue
+from sa_home_bot.devlab.hub import queue, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
 HUB_DB_NAME = "hub.sqlite"
+GIT_DIR_NAME = "git"
 TOKEN_BYTES = 32
 NAME_MAX_CHARS = 64
 
@@ -43,6 +44,7 @@ def new_token() -> str:
 class HubStore:
     def __init__(self, data_dir: Path) -> None:
         self._db = Database(data_dir / HUB_DB_NAME)
+        self.git_root = data_dir / GIT_DIR_NAME
         self.queue = queue.HubQueue(self._db)
 
     async def open(self) -> None:
@@ -52,6 +54,14 @@ class HubStore:
 
     async def close(self) -> None:
         await self._db.close()
+
+    async def add_project(self, name: str) -> Path:
+        name = await self.queue.add_project(name)
+        try:
+            return await repos.init_bare(self.git_root, name)
+        except (HubError, OSError):
+            await self.queue.remove_project(name)
+            raise
 
     async def issue_token(self, name: str, role: str) -> str:
         name = name.strip()

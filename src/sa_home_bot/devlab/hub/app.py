@@ -5,6 +5,7 @@ import logging
 from aiohttp import web
 
 from sa_home_bot.config import Settings
+from sa_home_bot.devlab.hub import git_http
 from sa_home_bot.devlab.hub.http import build_app
 from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
@@ -37,7 +38,9 @@ async def run_hub(settings: Settings) -> None:
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
-    runner = web.AppRunner(build_app(store))
+    app = build_app(store)
+    git_http.add_routes(app)
+    runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, host, cfg.port).start()
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)

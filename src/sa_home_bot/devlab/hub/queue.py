@@ -17,7 +17,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
-PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 JOB_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JOB_ID_LENGTH = 6
 JOB_ID_ATTEMPTS = 20
@@ -136,7 +136,7 @@ class HubQueue:
     async def add_project(self, name: str) -> str:
         name = name.strip()
         if not PROJECT_NAME_RE.match(name):
-            raise HubError("имя проекта: a-z, 0-9, точка, дефис, подчёркивание, до 64 символов")
+            raise HubError("имя проекта: a-z, 0-9, дефис, подчёркивание, до 64 символов")
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,))
             if await cur.fetchone():
@@ -145,6 +145,14 @@ class HubQueue:
                 "INSERT INTO projects (name, created) VALUES (?, ?)", (name, utc_now().isoformat())
             )
         return name
+
+    async def has_project(self, name: str) -> bool:
+        cur = await self._db.conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,))
+        return await cur.fetchone() is not None
+
+    async def remove_project(self, name: str) -> None:
+        async with self._tx() as conn:
+            await conn.execute("DELETE FROM projects WHERE name = ?", (name,))
 
     async def projects(self) -> list[str]:
         cur = await self._db.conn.execute("SELECT name FROM projects ORDER BY name")
