@@ -172,6 +172,11 @@ def test_read_power_events_sync_paginates(monkeypatch):
         return None
 
     monkeypatch.setattr(power_module, "_run", fake_run)
+    monkeypatch.setattr(
+        power_module,
+        "LAST_REQUIREMENT",
+        type("MockReq", (), {"available": lambda self: True})(),
+    )
 
     page1, has_next1 = read_power_events_sync(offset=0, limit=2)
     assert len(page1) == 2
