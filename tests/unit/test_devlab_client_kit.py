@@ -172,6 +172,53 @@ async def test_connect_installs_both_skills(tmp_path, capsys):
         assert installed.read_text().startswith(f"---\nname: {name}\n")
 
 
+async def run_connect(tmp_path, runner):
+    async def fetch(url, swarm_token):
+        return "dlh_secret"
+
+    return await devlab_connect.connect(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        token_path=str(tmp_path / "token"),
+        skills_dir=str(tmp_path / "skills"),
+        fetch=fetch,
+        runner=runner,
+        which=lambda name: "/bin/claude",
+    )
+
+
+async def test_connect_adds_mcp_once_when_server_absent(tmp_path, capsys):
+    calls = []
+
+    def runner(argv):
+        calls.append(argv[:3])
+        return 0
+
+    assert await run_connect(tmp_path, runner) == 0
+    assert calls == [["claude", "mcp", "add"]]
+    assert "/mcp" not in capsys.readouterr().out
+
+
+async def test_connect_replaces_existing_server(tmp_path, capsys):
+    calls = []
+
+    def runner(argv):
+        calls.append(argv[:3])
+        return 1 if len(calls) == 1 else 0
+
+    assert await run_connect(tmp_path, runner) == 0
+    assert calls == [["claude", "mcp", "add"], ["claude", "mcp", "remove"], ["claude", "mcp", "add"]]
+    out = capsys.readouterr().out
+    assert "/mcp" in out
+    assert "dlh_secret" not in out
+
+
+async def test_connect_add_failure_prints_manual_hint(tmp_path, capsys):
+    assert await run_connect(tmp_path, lambda argv: 1) == 1
+    out = capsys.readouterr().out
+    assert "$(cat " in out
+    assert "dlh_secret" not in out
+
+
 @pytest.mark.parametrize("name", devlab_connect.SKILL_NAMES)
 def test_repo_skill_symlink_is_the_packaged_one(name):
     link = ROOT / ".claude/skills" / name

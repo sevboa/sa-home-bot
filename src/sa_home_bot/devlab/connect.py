@@ -84,6 +84,10 @@ def mcp_add_command(url: str, token_path: Path) -> list[str]:
     ]
 
 
+def mcp_remove_command() -> list[str]:
+    return [CLAUDE_BINARY, "mcp", "remove", "--scope", "user", protocol.MCP_CLIENT_NAME]
+
+
 def mcp_add_hint(url: str, token_path: Path) -> str:
     return (
         f"{CLAUDE_BINARY} mcp add --scope user --transport http {protocol.MCP_CLIENT_NAME} "
@@ -142,9 +146,20 @@ async def connect(
         print(mcp_add_hint(url, path))
         return 0
     code = runner(mcp_add_command(url, path))
+    reregistered = False
+    if code != 0:
+        print(f"claude mcp add завершился с кодом {code}, пробую снять прежнюю запись")
+        if runner(mcp_remove_command()) == 0:
+            reregistered = True
+            code = runner(mcp_add_command(url, path))
     if code != 0:
         print(f"claude mcp add завершился с кодом {code}. Команда для ручного запуска:")
         print(mcp_add_hint(url, path))
         return code
+    if reregistered:
+        print(
+            f"Прежняя запись «{protocol.MCP_CLIENT_NAME}» заменена. "
+            f"В открытых сессиях Claude выполните /mcp и переподключите {protocol.MCP_CLIENT_NAME}"
+        )
     print(f"MCP «{protocol.MCP_CLIENT_NAME}» подключён: {url}{protocol.HTTP_MCP_PATH}")
     return 0
