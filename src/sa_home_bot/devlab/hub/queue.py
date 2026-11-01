@@ -456,6 +456,25 @@ class HubQueue:
         )
         return [_message(row) for row in await cur.fetchall()]
 
+    async def max_seq(self) -> int:
+        cur = await self._db.conn.execute("SELECT COALESCE(MAX(seq), 0) AS n FROM messages")
+        row = await cur.fetchone()
+        return row["n"] if row else 0
+
+    async def inbox_all(
+        self, since: int = 0, limit: int = DEFAULT_PAGE
+    ) -> list[tuple[Message, Job]]:
+        cur = await self._db.conn.execute(
+            "SELECT * FROM messages WHERE direction = ? AND seq > ? ORDER BY seq LIMIT ?",
+            (protocol.DIRECTION_TO_CLIENT, since, limit),
+        )
+        messages = [_message(row) for row in await cur.fetchall()]
+        jobs: dict[str, Job] = {}
+        for message in messages:
+            if message.job_id not in jobs:
+                jobs[message.job_id] = await self._load(self._db.conn, message.job_id)
+        return [(message, jobs[message.job_id]) for message in messages]
+
     async def ack(self, client: str, upto: int) -> int:
         async with self._tx() as conn:
             cur = await conn.execute(

@@ -24,6 +24,26 @@
 - `devlab/hub/app.py` — `run_hub` (сокет ноды, HTTP, фоновые `purge_loop` и `wake_loop`),
   `build_hub_app` — приложение со всеми маршрутами (его же собирает сквозной тест).
 
+## Действия владельца по proto (62.1, 2026-11-02)
+Бот-владелец видит ящик всех клиентов и отвечает за клиента задания. Это действия ноды
+`devlab_hub` (`protocol.ACTION_OWNER_*`), объявлены в `describe`, обрабатываются в
+`HubService._dispatch`:
+- `owner_inbox since limit`: `since < 0` — `{messages: [], cursor: max_seq}` (первый запуск бота,
+  историю не шлём); иначе сообщения к клиенту всех клиентов после `since` (по умолчанию 50) и
+  `cursor`. В каждом сообщении вложенное `job` без `task`: `kind`, `project`, `client`, `model`,
+  `status`, `title` (первая непустая строка task.md без `#`, до 120 символов). `read_at` не меняется.
+- `owner_job id`: то же `job` + `question` (текст последнего `question`, иначе пусто).
+- `owner_post id kind text model`: `kind` из `CLIENT_MESSAGES`; `answer` требует непустой `text`;
+  вызывает `post_from_client(job.client, …)` с `payload[via] = "telegram"`; ответ
+  `{seq, status}`. Недопустимый переход и чужие виды — `ERR_BAD_REQUEST` с текстом `HubError`.
+- Кто может вызвать. У `ProtoServer` нет проверки прав по действию: сокет хаба unix 0600 (доверен),
+  TCP — только с общим `[swarm].token`. Права на `действие@devlab_hub` проверяет нода/бот по
+  подписке (`Subscription.allows_action`), у владельца `*`. MCP-клиенты ходят по HTTP с токеном
+  `dlh_` и видят только фиксированный список `mcp_tools`; HTTP-маршрутов в `HubService` нет, а
+  инструментов `owner_*` нет (страж: `test_owner_actions_have_no_mcp_tool`). Новые MCP-инструменты
+  с этими именами заводить нельзя.
+- Курсор бота хранит сам бот; `ack` бот не зовёт.
+
 ## Решения
 - Адрес: `bind_host` либо `tailscale ip -4`. Нет адреса: служба не стартует, наружу не слушаем.
 - aiohttp отдельной строкой в `pyproject.toml` не заведён: приходит с aiogram, уже используется

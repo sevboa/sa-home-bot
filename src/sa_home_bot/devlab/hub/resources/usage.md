@@ -27,6 +27,7 @@
 6. **Отвечайте на вопросы агента:** `question` переводит задание в `waiting_owner`;
    `devlab_answer id=<id> text=<ответ>` возвращает его в работу. Не хотите ждать:
    `devlab_stop`. `devlab_release` просит исполнителя не держать машину бодрой до вашего ответа.
+   Вопрос мог ответить владелец из Telegram: `devlab_status` уже `running`.
 7. **Заберите результат.** Когда пришло `done`:
    ```
    git -c http.extraHeader="Authorization: Bearer <токен>" fetch http://<хаб>/git/<проект>.git agent/<id>

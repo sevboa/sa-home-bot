@@ -192,6 +192,25 @@ async def test_inbox_isolated_between_clients_and_ack(queue):
         await queue.post_from_client(OTHER_CLIENT, mine.id, S.MSG_STOP)
 
 
+async def test_inbox_all_spans_clients_and_keeps_read_state(queue):
+    assert await queue.max_seq() == 0
+    mine = await running_job(queue)
+    await submit(queue, client=OTHER_CLIENT)
+    other = await queue.claim(EXECUTOR, [MODEL])
+    first = await queue.post_from_executor(mine.id, S.MSG_STARTED)
+    await queue.post_from_executor(other.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
+    last = await queue.post_from_client(OTHER_CLIENT, other.id, S.MSG_ANSWER, {S.PAYLOAD_TEXT: "a"})
+    pairs = await queue.inbox_all()
+    assert [(m.job_id, j.client, j.status) for m, j in pairs] == [
+        (mine.id, CLIENT, S.STATUS_RUNNING),
+        (other.id, OTHER_CLIENT, S.STATUS_RUNNING),
+    ]
+    assert [m.seq for m, _ in await queue.inbox_all(since=first.seq)] == [pairs[1][0].seq]
+    assert len(await queue.inbox_all(limit=1)) == 1
+    assert await queue.max_seq() == last.seq
+    assert not any(m.read for m, _ in await queue.inbox_all())
+
+
 async def test_poll_by_job_and_executor_marks_read(queue):
     job = await waiting_job(queue)
     answer = await queue.post_from_client(CLIENT, job.id, S.MSG_ANSWER)

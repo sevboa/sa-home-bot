@@ -197,6 +197,12 @@ def test_skill_mentions_only_existing_hub_tools():
         assert required in mentioned
 
 
+def test_skill_and_usage_tell_that_owner_may_answer_from_telegram():
+    usage = ROOT / "src/sa_home_bot/devlab/hub/resources/usage.md"
+    for text in (SKILL.read_text(), usage.read_text()):
+        assert "владелец из Telegram" in text
+
+
 def test_skill_params_exist_on_tools():
     found = re.findall(r"\b(devlab_[a-z_]+) ((?:[a-z_]+=\S+ ?)+)", SKILL.read_text())
     assert found
