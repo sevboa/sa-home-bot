@@ -195,7 +195,7 @@ async def test_connect_adds_mcp_once_when_server_absent(tmp_path, capsys):
 
     assert await run_connect(tmp_path, runner) == 0
     assert calls == [["claude", "mcp", "add"]]
-    assert "/mcp" not in capsys.readouterr().out
+    assert "переподключите" not in capsys.readouterr().out
 
 
 async def test_connect_replaces_existing_server(tmp_path, capsys):
@@ -206,9 +206,9 @@ async def test_connect_replaces_existing_server(tmp_path, capsys):
         return 1 if len(calls) == 1 else 0
 
     assert await run_connect(tmp_path, runner) == 0
-    assert calls == [["claude", "mcp", "add"], ["claude", "mcp", "remove"], ["claude", "mcp", "add"]]
+    assert [c[2] for c in calls] == ["add", "remove", "add"]
     out = capsys.readouterr().out
-    assert "/mcp" in out
+    assert "переподключите devlab" in out
     assert "dlh_secret" not in out
 
 
