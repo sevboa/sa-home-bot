@@ -22,9 +22,11 @@
 3. Показ задачи и модели владельцу, ожидание подтверждения.
 4. `nodectl devlab base <имя>` (push `base/<имя>`), затем `devlab_submit`.
 5. При каждом возвращении к работе: `devlab_inbox` и `devlab_ack`, ответы через `devlab_answer`,
-   `devlab_resume` (замечания, другая модель), `devlab_stop`, `devlab_release`.
+   `devlab_resume` (замечания, другая модель), `devlab_stop`, `devlab_release`. Ожидание вне MCP:
+   `nodectl devlab wait <id>` фоновым вызовом Bash (останавливается и на `waiting_owner`), затем
+   `devlab_status` (2026-11-01: `sleep 60` в Bash блокируется, долгий MCP-вызов обрывается).
 6. Приёмка: `nodectl devlab fetch <id>`, ревью диффа по правилам проекта,
-   `devlab_test ref=agent/<id>`, перенос в `dev/<id>` в отдельном worktree (коммиты поимённо), отчёт,
+   `devlab_test ref=agent/<id> wait=0` + `nodectl devlab wait <id>` + `devlab_status`, перенос в `dev/<id>` в отдельном worktree (коммиты поимённо), отчёт,
    `nodectl devlab drop agent/<id> base/<имя>`.
 7. Слияний в основную ветку и выката без явной команды владельца нет.
 

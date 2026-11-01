@@ -44,11 +44,12 @@
   `timeout` сервера ещё и жёсткий предел, progress его не продлевает.
 - Вызов, идущий дольше 2 минут, в основной сессии уходит в фоновую задачу
   (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`); лимиты остаются.
-- Вывод: рекомендуемый `wait` — не больше 240 секунд (ниже 5 минут с запасом). Дальше опрос
-  `devlab_status id=<id>` или `devlab_inbox` (сообщение `test_done`). Потолок хаба 1800 с остаётся для
-  клиентов с поднятым idle-тайм-аутом. `connect` печатает подсказку, настройки пользователя не
-  меняет.
-- Ожидание вне MCP: `devlab_test wait=0`, затем `nodectl devlab wait <id>` (Bash, лучше фоном с
+- Живая находка 2026-11-01: `devlab_test wait=240` клиент Claude Code обрывает раньше срока
+  (`operation timed out`), а `sleep 60` в Bash в свежем Claude Code блокируется (foreground sleep).
+- Вывод: скилы `devlab-test` и `devlab` ставят `wait=0` и ждут через CLI. Потолок хаба 1800 с
+  остаётся для клиентов с поднятым idle-тайм-аутом. `connect` печатает подсказку, настройки
+  пользователя не меняет.
+- Ожидание вне MCP (так делают скилы): `devlab_test wait=0`, затем `nodectl devlab wait <id>` (Bash, лучше фоном с
   уведомлением о выходе), затем `devlab_status id=<id>` с `result`.
 
 ## `nodectl devlab wait <id>`
