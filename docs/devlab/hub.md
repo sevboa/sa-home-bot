@@ -21,8 +21,9 @@
   видов сообщений ящика и HTTP-путей. Остальные задачи берут имена только отсюда.
 - `ServiceSpec devlab_hub` (singleton, сокет `devlab_hub.socket`), конфиг `[devlab_hub]`
   (см. `docs/platform/config-reference.md`). Один HTTP-сервер: `/health`, `/git/`, `/api/`, `/mcp`.
-- `devlab/hub/app.py` — `run_hub` (сокет ноды, HTTP, фоновые `purge_loop`, `wake_loop` и `stall_loop`: раз в `stall_check_s` ищет задания без вестей,
-  порог `stalled_after_min`, см. [queue.md](queue.md) «Застой»),
+- `devlab/hub/app.py` — `run_hub` (сокет ноды, HTTP, фоновые `purge_loop`, `wake_loop` и
+  `stall_loop`: раз в `stall_check_s` ищет задания без вестей, порог `stalled_after_min`, см.
+  [queue.md](queue.md) «Застой»),
   `build_hub_app` — приложение со всеми маршрутами (его же собирает сквозной тест).
 
 ## Действия владельца по proto (62.1, 2026-11-02)

@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits
 from sa_home_bot.devlab.agent.model import GatewayChat, ModelError, ModelReply
+from sa_home_bot.devlab.agent.spend import JobSpend, SpendState
 from sa_home_bot.devlab.executor.agent_worker import AGENT_STATE_FILE, AgentState
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.routing import (
@@ -282,3 +283,11 @@ async def test_resume_remarks_survive_claim_before_poll(env):
 
     assert "учти кодировку" in model.seen[0][1]["content"]
     assert await env.status(job_id) == protocol.STATUS_DONE
+
+
+def test_replies_counter_grows_per_record():
+    saved = []
+    spend = JobSpend(SpendState(), saved.append)
+    spend.record(ModelReply("a", tokens_in=1, tokens_out=1))
+    spend.record(ModelReply("b", tokens_in=0, tokens_out=0))
+    assert spend.replies() == 2

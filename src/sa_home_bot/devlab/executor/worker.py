@@ -5,7 +5,7 @@ import logging
 import shlex
 import shutil
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,12 +50,20 @@ class WorkerSettings:
     heartbeat_interval_s: float
 
 
-def heartbeat_body(jobs: Sequence[str]) -> dict:
-    return {protocol.FIELD_BUSY: bool(jobs), protocol.FIELD_JOBS: list(jobs)}
+def heartbeat_body(jobs: Sequence[str], progress: Mapping[str, int] | None = None) -> dict:
+    body: dict = {protocol.FIELD_BUSY: bool(jobs), protocol.FIELD_JOBS: list(jobs)}
+    if progress:
+        body[protocol.FIELD_PROGRESS] = dict(progress)
+    return body
 
 
-async def send_heartbeat(hub: ExecutorHub, busy: BusyTracker, jobs: Sequence[str]) -> None:
-    busy.set_queued(await hub.heartbeat_queued(heartbeat_body(jobs)))
+async def send_heartbeat(
+    hub: ExecutorHub,
+    busy: BusyTracker,
+    jobs: Sequence[str],
+    progress: Mapping[str, int] | None = None,
+) -> None:
+    busy.set_queued(await hub.heartbeat_queued(heartbeat_body(jobs, progress)))
 
 
 async def forever(
@@ -88,8 +96,12 @@ class WorkerLoops:
     def jobs(self) -> list[str]:
         return [self._current] if self._current is not None else []
 
+    @property
+    def progress(self) -> dict[str, int]:
+        return {}
+
     async def beat(self) -> None:
-        await send_heartbeat(self._hub, self._busy, self.jobs)
+        await send_heartbeat(self._hub, self._busy, self.jobs, self.progress)
 
     async def poll_once(self) -> None:
         raise NotImplementedError

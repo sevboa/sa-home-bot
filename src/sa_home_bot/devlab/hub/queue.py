@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS messages (
     read_at TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_job ON messages (job_id, direction, seq);
+CREATE TABLE IF NOT EXISTS job_progress (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+    counter INTEGER NOT NULL,
+    changed TEXT NOT NULL
+);
 """
 
 PARAMS_COLUMN = "params"
@@ -542,6 +547,30 @@ class HubQueue:
         )
         return await cur.fetchone() is not None
 
+    async def note_progress(self, progress: Any, now: datetime | None = None) -> None:
+        if not isinstance(progress, dict):
+            return
+        stamp = (now or utc_now()).isoformat()
+        async with self._tx() as conn:
+            for job_id, counter in progress.items():
+                if isinstance(counter, bool) or not isinstance(counter, int):
+                    continue
+                cur = await conn.execute(
+                    "SELECT counter FROM job_progress WHERE job_id = ?", (job_id,)
+                )
+                row = await cur.fetchone()
+                if row is not None and row["counter"] == counter:
+                    continue
+                cur = await conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+                if await cur.fetchone() is None:
+                    continue
+                await conn.execute(
+                    "INSERT INTO job_progress (job_id, counter, changed) VALUES (?, ?, ?)"
+                    " ON CONFLICT(job_id) DO UPDATE SET counter = excluded.counter,"
+                    " changed = excluded.changed",
+                    (job_id, counter, stamp),
+                )
+
     async def flag_stalled(
         self, threshold_s: float, executor_alive: bool, now: datetime | None = None
     ) -> list[Message]:
@@ -551,7 +580,8 @@ class HubQueue:
             cur = await conn.execute(
                 "SELECT j.id, j.started, ("
                 " SELECT MAX(created) FROM messages WHERE job_id = j.id AND kind != ?) AS news,"
-                " (SELECT MAX(created) FROM messages WHERE job_id = j.id AND kind = ?) AS flagged"
+                " (SELECT MAX(created) FROM messages WHERE job_id = j.id AND kind = ?) AS flagged,"
+                " (SELECT changed FROM job_progress WHERE job_id = j.id) AS progress"
                 " FROM jobs j WHERE j.status = ? AND j.kind = ?",
                 (
                     protocol.MSG_STALLED,
@@ -562,7 +592,7 @@ class HubQueue:
             )
             rows = await cur.fetchall()
             for row in rows:
-                stamps = [s for s in (row["started"], row["news"]) if s]
+                stamps = [s for s in (row["started"], row["news"], row["progress"]) if s]
                 if not stamps:
                     continue
                 last = max(datetime.fromisoformat(s) for s in stamps)
@@ -589,6 +619,11 @@ class HubQueue:
                 "DELETE FROM messages WHERE read_at IS NOT NULL AND read_at < ?", (border,)
             )
             removed = cur.rowcount
+            await conn.execute(
+                "DELETE FROM job_progress WHERE job_id IN"
+                " (SELECT id FROM jobs WHERE finished IS NOT NULL AND finished < ?)",
+                (border,),
+            )
             cur = await conn.execute(
                 "SELECT id FROM jobs WHERE kind = ? AND finished IS NOT NULL AND finished < ?",
                 (protocol.JOB_KIND_TEST, border),

@@ -16,6 +16,7 @@ class SpendState(BaseModel):
     base_tokens: int = 0
     cost: float = 0.0
     tokens: int = 0
+    replies: int = 0
     reported_cost: float = 0.0
     reported_tokens: int = 0
     extensions: int = 0
@@ -33,6 +34,9 @@ class JobSpend:
     def total_cost(self) -> float:
         return self._state.base_cost + self._state.cost
 
+    def replies(self) -> int:
+        return self._state.replies
+
     def total_tokens(self) -> int:
         return self._state.base_tokens + self._state.tokens
 
@@ -43,6 +47,7 @@ class JobSpend:
     def record(self, reply: ModelReply) -> None:
         state = self._state
         self._update(
+            replies=state.replies + 1,
             tokens=state.tokens + reply.tokens_in + reply.tokens_out,
             cost=state.cost + (reply.cost_usd or 0.0),
         )

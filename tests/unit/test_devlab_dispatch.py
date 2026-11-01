@@ -132,12 +132,40 @@ async def test_stop_asks_confirmation_first(live):
     assert data == ["dl:stopc:cgpkp2", "dl:cnl:cgpkp2"]
 
 
+async def test_stalled_stop_asks_confirmation_and_cancel_restores(live):
+    feed, link, session, _ = live
+    await feed(button_update(1, "dl:stopw:cgpkp2"))
+    assert link.commands == []
+    markup = session.sent(EditMessageReplyMarkup)[0].reply_markup
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["dl:stopc:cgpkp2", "dl:cnlw:cgpkp2"]
+    await feed(button_update(2, "dl:cnlw:cgpkp2"))
+    assert link.commands == []
+    restored = session.sent(EditMessageReplyMarkup)[1].reply_markup
+    assert [b.callback_data for row in restored.inline_keyboard for b in row] == [
+        "dl:stopw:cgpkp2"
+    ]
+
+
+async def test_stalled_stop_chain_reaches_hub(live):
+    feed, link, _, _ = live
+    await feed(button_update(1, "dl:stopw:cgpkp2"))
+    await feed(button_update(2, "dl:stopc:cgpkp2"))
+    assert link.commands == [
+        (
+            protocol.ACTION_OWNER_POST,
+            {protocol.FIELD_ID: "cgpkp2", protocol.FIELD_KIND: protocol.MSG_STOP},
+        )
+    ]
+
+
+@pytest.mark.parametrize("code", ["rel", "stopw", "cnlw"])
 @pytest.mark.parametrize(
     ("user_id", "chat_id"), [(STRANGER, OWNER), (GUEST, GUEST)], ids=["stranger", "guest"]
 )
-async def test_foreign_buttons_denied(live, user_id, chat_id):
+async def test_foreign_buttons_denied(live, user_id, chat_id, code):
     feed, link, session, _ = live
-    await feed(button_update(1, "dl:rel:cgpkp2", user_id=user_id, chat_id=chat_id))
+    await feed(button_update(1, f"dl:{code}:cgpkp2", user_id=user_id, chat_id=chat_id))
     assert link.commands == []
     answer = session.sent(AnswerCallbackQuery)[0]
     assert (answer.text, answer.show_alert) == (DENIED_ALERT_TEXT, True)

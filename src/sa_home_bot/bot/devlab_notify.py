@@ -67,7 +67,6 @@ BODY_FIELDS = {
     protocol.MSG_QUESTION: protocol.PAYLOAD_TEXT,
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
     protocol.MSG_FAILED: protocol.PAYLOAD_TEXT,
-    protocol.MSG_STALLED: protocol.PAYLOAD_TEXT,
 }
 
 
@@ -146,7 +145,7 @@ def facts_block(message: dict[str, Any], max_chars: int) -> str:
         lines.append(f"Без вестей: {int(payload.get(protocol.PAYLOAD_SILENT_MIN) or 0)} мин")
         alive = "на связи" if payload.get(protocol.PAYLOAD_EXECUTOR_ALIVE) else "не отвечает"
         lines.append(f"Исполнитель: {alive}")
-    body = str(payload.get(BODY_FIELDS[kind]) or "").strip()
+    body = str(payload.get(BODY_FIELDS.get(kind, "")) or "").strip()
     if body:
         lines.append("")
         lines.append(html.escape(clip(body, max_chars)))

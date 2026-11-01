@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import timedelta
 
 import pytest
@@ -414,4 +415,23 @@ async def test_stall_loop_flags_and_survives_errors():
     while len(calls) < 3:
         await asyncio.sleep(0)
     task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
     assert calls[:3] == [(1800.0, True)] * 3
+
+
+async def test_heartbeat_progress_reaches_queue(client, store, executor):
+    await store.queue.add_project("demo")
+    job = await store.queue.submit("c", "demo", "m", "t")
+    await store.queue.claim("runner", ["m"])
+    body = {
+        protocol.FIELD_BUSY: True,
+        protocol.FIELD_JOBS: [job.id],
+        protocol.FIELD_PROGRESS: {job.id: 4},
+    }
+    status, _ = await call(client, protocol.HTTP_HEARTBEAT_PATH, executor, body)
+    assert status == 200
+    cur = await store.queue._db.conn.execute(
+        "SELECT counter FROM job_progress WHERE job_id = ?", (job.id,)
+    )
+    assert (await cur.fetchone())["counter"] == 4

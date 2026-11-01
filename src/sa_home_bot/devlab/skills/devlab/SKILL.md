@@ -68,8 +68,8 @@ description: Отдать задачу агенту-разработчику н�
    - `stalled`: задание `running`, но вестей давно нет (порог в конфиге хаба). `devlab_status id=<id>`:
      если задание всё ещё `running` и исполнитель не отвечает, `devlab_stop`, затем `devlab_resume`.
    - `done`: переходи к приёмке.
-3. Зависшее `queued` или `running` без вестей: `devlab_status`, при необходимости спроси владельца,
-   `devlab_stop`. Ожидание: `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (останавливается на `done`,
+3. Зависшее `queued` или `running` без вестей: `devlab_status`; для `running` см. `stalled` выше;
+   при необходимости спроси владельца, `devlab_stop`. Ожидание: `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (останавливается на `done`,
    `failed`, `stopped` и на `waiting_owner`, придёт одно уведомление), затем `devlab_status id=<id>`.
 
 ## Приёмка результата

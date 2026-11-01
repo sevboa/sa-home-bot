@@ -221,8 +221,9 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
 - `bind_host: str = ""` — пусто: адрес tailscale0 через `tailscale ip -4`; явное значение
   нужно для стендов и тестов.
 - `mailbox_retention_days: int = 30` — срок хранения почтового ящика (используется с 60.3.2).
-- `stalled_after_min: int = 30` — сколько минут тишины у задания `agent` в `running`, после которых
-  хаб кладёт в ящик сообщение `stalled` (Этап 62.6).
+- `stalled_after_min: int = 45` — сколько минут у задания `agent` в `running` нет ни одного
+  завершённого шага (ответа модели, `step_done`, ответа владельца), после которых хаб кладёт в ящик
+  `stalled` (Этап 62.6). Больше `MODEL_TIMEOUT_S` (30 мин).
 - `stall_check_s: float = 60` — период проверки застоя.
 - `hub_node: str = "alfred"` — нода хаба для клиентской команды `nodectl devlab connect`
   (URL `http://<hub_node>:<port>` по tailscale-имени).

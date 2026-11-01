@@ -125,6 +125,8 @@ async def beat_forever(
     scrubber: WorkerLoops,
 ) -> None:
     async def beat() -> None:
-        await send_heartbeat(hub, busy, [job for worker in workers for job in worker.jobs])
+        jobs = [job for worker in workers for job in worker.jobs]
+        progress = {key: n for worker in workers for key, n in worker.progress.items()}
+        await send_heartbeat(hub, busy, jobs, progress)
 
     await forever(beat, interval_s, "Heartbeat", scrubber.scrub)

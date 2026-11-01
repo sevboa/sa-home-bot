@@ -65,7 +65,9 @@ async def test_guest_is_denied_for_every_code(code):
 async def test_missing_subscription_is_denied():
     link = waiting_link()
     cb = callback("dl:rel:j1")
-    await handlers.on_devlab_callback(cb, config=Settings(), node_link=link, subscription=None)
+    await handlers.on_devlab_callback(
+        cb, config=Settings(), node_link=link, subscription=None
+    )
     assert link.calls == []
 
 
@@ -130,6 +132,7 @@ def test_router_included_before_ai():
     ]
     assert order.index("devlab") == order.index("away") + 1
     assert order.index("devlab") < order.index("ai")
+
 
 
 async def test_callback_without_message():

@@ -104,9 +104,11 @@ async def catalog(request: web.Request) -> web.Response:
 async def heartbeat(request: web.Request) -> web.Response:
     store = request.app[STORE_KEY]
     principal = request[PRINCIPAL_KEY]
-    await store.heartbeat(principal, await json_body(request))
+    body = await json_body(request)
+    await store.heartbeat(principal, body)
     reply: dict[str, Any] = {protocol.FIELD_OK: True}
     if principal.role == protocol.ROLE_EXECUTOR:
+        await store.queue.note_progress(body.get(protocol.FIELD_PROGRESS))
         reply[protocol.FIELD_QUEUED] = await store.queue.queued_count()
     return web.json_response(reply)
 

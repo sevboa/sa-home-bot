@@ -243,6 +243,14 @@ class AgentWorker(WorkerLoops):
     def _without_parked(self, job_id: str) -> dict[str, ParkedEntry]:
         return {key: value for key, value in self._state.parked.items() if key != job_id}
 
+    @property
+    def progress(self) -> dict[str, int]:
+        return {
+            job_id: self._spends[job_id].replies()
+            for job_id in self.jobs
+            if job_id in self._spends
+        }
+
     def _spend_of(self, job: Job) -> JobSpend:
         spend = self._spends.get(job.id)
         if spend is None:

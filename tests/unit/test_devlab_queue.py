@@ -570,3 +570,20 @@ async def test_flag_stalled_ignores_other_states_and_kinds(queue):
     await queue.submit_test(CLIENT, PROJECT, "master")
     far = utc_now() + timedelta(days=2)
     assert await queue.flag_stalled(STALL_S, True, far) == []
+
+
+async def test_progress_change_counts_as_news(queue):
+    job = await running_job(queue)
+    start = utc_now()
+    await queue.note_progress({job.id: 1}, start + timedelta(seconds=STALL_S - 100))
+    assert await queue.flag_stalled(STALL_S, True, start + timedelta(seconds=STALL_S + 60)) == []
+    await queue.note_progress({job.id: 1}, start + timedelta(seconds=STALL_S + 50))
+    assert await queue.flag_stalled(STALL_S, True, start + timedelta(seconds=STALL_S + 60)) == []
+    late = start + timedelta(seconds=STALL_S * 2)
+    assert len(await queue.flag_stalled(STALL_S, True, late)) == 1
+
+
+async def test_progress_ignores_unknown_jobs_and_junk(queue):
+    await queue.note_progress({"nope": 3, "x": True, "y": "1"})
+    await queue.note_progress("junk")
+    await queue.note_progress(None)

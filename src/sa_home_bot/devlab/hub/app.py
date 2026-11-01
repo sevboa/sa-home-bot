@@ -73,7 +73,9 @@ async def tailscale_address() -> str:
     return words[0]
 
 
-def build_hub_app(store: HubStore, nodes: NodeDirectory, swarm_token: str = "") -> web.Application:
+def build_hub_app(
+    store: HubStore, nodes: NodeDirectory, swarm_token: str = ""
+) -> web.Application:
     app = build_app(store, nodes, swarm_token)
     connect_http.add_routes(app)
     git_http.add_routes(app)
