@@ -15,13 +15,14 @@
 - `sandbox.py` — интерфейс `Sandbox`: `read_bytes`, `write_bytes`, `list_files`,
   `exec(argv, timeout_s)`, `changed_paths()` (изменения относительно базы). Пути относительные,
   выход за корень — `SandboxPathError`. `LocalSandbox` на каталоге (тесты и отладка); контейнерная
-  реализация — 60.5.3. `ExecResult.summary` режет вывод до конца (ошибки в конце) и помечает таймаут.
+  реализация — `PodmanSandbox` (60.5.3, ниже). `ExecResult.summary` режет вывод до конца (ошибки в конце) и помечает таймаут.
 - `spec.py` — `AgentSpec`: команда тестов, `checks`, `allowed_commands`, `forbidden_paths`,
-  `diff_prefixes`, таймауты, лимит вывода. Заполняется из `.devlab.toml` (60.5.3).
+  `secret_paths`, `diff_prefixes`, таймауты, лимит вывода. Собирается `AgentSpec.from_project(ProjectSpec)`
+  из `.devlab.toml`: `test_argv` и `test_timeout_s` берутся из `[test]` (`cmd`+`args`, `timeout_s`), остальное из `[agent]`.
 - `tools.py` — `ToolBox` и схемы: `list_files`, `read_file` (по строкам, ≤200 за вызов), `grep`,
   `edit_file` (один фрагмент, ровно одно вхождение), `write_file`, `run_command` (только
   разрешённые префиксы, без оболочки), `run_tests`, `finish`. Ошибка инструмента — `ToolError`,
-  текст уходит модели. `forbidden_paths` закрывает запись (glob или префикс-каталог с `/`).
+  текст уходит модели. `forbidden_paths` закрывает запись, `secret_paths` — запись и чтение (glob или префикс-каталог с `/`, один матчер `agent/paths.py`).
 - `context.py` — окно. Оценка `len(json)/3` токенов. Перед каждым запросом, если диалог не влезает
   в `context_tokens - reply_tokens - схемы инструментов`, старые выводы инструментов (кроме
   `keep_recent` последних) заменяются на `[вывод свёрнут: N симв.]`, затем длинные аргументы
@@ -79,3 +80,57 @@ usage, таймаут, HTTP-ошибка).
 - Права: пушатся только `wip/<id>` (создать/обновить/удалить) и `agent/<id>` (создать/обновить),
   всё в рамках `refpolicy` для роли `executor`.
 - Тесты: `tests/unit/test_devlab_agent_repo.py` (настоящие git и хаб).
+
+## Контейнер задачи (60.5.3)
+`devlab/executor/agent_sandbox.py`, `PodmanSandbox` — реализация `Sandbox` в долгоживущем контейнере.
+Общее с `PodmanTestRunner` (вызов обёртки, образ и его кэш) вынесено в `executor/wrapper.py` и `executor/image.py`.
+
+### Где источник истины
+Рабочая копия на хосте исполнителя (`AgentRepo.workdir`). Почему:
+- репозиторий агента смотрит именно в этот каталог, `on_change` видит правки без дополнительной синхронизации;
+  `read_bytes`/`write_bytes`/`list_files`/`changed_paths` — это `LocalSandbox` на нём (быстро, без вызовов обёртки на чтение);
+- контейнер можно остановить или потерять (рестарт хоста, `podman rm`), рабочая копия при этом цела;
+  `waiting_owner` не зависит от жизни контейнера.
+- Копия в контейнере (`~devlab/work/<id>`, bind-mount в `/work`) — зеркало. Если с прошлой синхронизации был
+  `write_bytes` (флаг `_stale`), перед командой дерево отправляется `refresh` (содержимое заменяется, каталог остаётся
+  тем же inode). После КАЖДОЙ команды `sync-out` забирает всё дерево, расхождения применяются на хосте: изменённые и
+  новые файлы пишутся, исчезнувшие удаляются. Так форматтер в контейнере попадает в рабочую копию, а `ToolBox` после
+  `run_command` зовёт `on_change`.
+- Не отправляются в контейнер и не возвращаются: кэши (`IGNORED_DIRS`), `.devlab-junit.xml`, `secret_paths`.
+
+### Правила путей
+- `secret_paths` (`.env`, `config.toml`): не уходят в контейнер (команда агента не может `cat .env`), не видны в
+  `list_files`/`grep`, чтение и запись — `SandboxPathError`, из контейнера не возвращаются.
+- `forbidden_paths`: чтение можно, `write_bytes` отказывает. Если команда в контейнере всё же изменила такой файл, на
+  хост это НЕ переносится, а следующая команда начинается с `refresh` и откатывает контейнер к хостовой копии.
+- Два списка нужны потому, что `forbidden_paths` в 60.5.1 означает «закрыто для правок» (агент должен читать `tests/`).
+
+### Жизненный цикл
+- `start()`: `sync-in` (без секретов) → `ensure_image` (рецепт `[test]`: `image`, `setup`, `setup_files`, `env`; кэш по
+  хэшу, сборка с сетью) → `rm` хвоста и `create <id> <тег> <cpus> <память> <cpuset>` (без сети, квоты агента).
+- `exec(argv, timeout_s)`: под замком (команды по одной), `timeout` внутри контейнера (код 124 → `timed_out`), внешний
+  запас `EXEC_GRACE_S`. После таймаута контейнер удаляется (мог зависнуть процесс), `_lost`; следующая команда создаёт его
+  заново из того же образа и делает `refresh`. Образ не пересобирается.
+- `stop()` (для `waiting_owner`): `podman stop`; хостовая копия и `~devlab/work/<id>` остаются. `exec` на остановленном — `RunnerError`.
+- `resume()`: `start`; если не вышло, полный `sync-in` + образ + `create` заново. Перед первой командой всегда `refresh`.
+- `aclose()`: `rm` контейнера и `clean` копии у `devlab` под `asyncio.shield`. Хостовая рабочая копия не трогается.
+- Ресурсы агента: `[devlab] agent_cpus/agent_memory/agent_cpuset` (конфиг владельца исполнителя, не проекта: проект не
+  выбирает, сколько ядер ему дать). Квоты диска нет: на bind-mount у rootless podman её нет (открыто).
+- `baseline` (необязательный) — хэши исходного дерева для `changed_paths`; после рестарта работник 60.5.4 передаёт
+  `LocalSandbox(<checkout base/<id>>).snapshot()`, иначе правки до рестарта пропадут для `FinishGuard`.
+
+### `[agent]` в `.devlab.toml`
+`rules` (файлы правил в системный промпт; читает работник 60.5.4), `checks` (команды-стражи строками), `allowed_commands`
+(префиксы для `run_command`), `forbidden_paths`, `secret_paths`, `diff_prefixes`, `allow_remote_models` (по умолчанию
+`false`; применит 60.5.6), `command_timeout_s`, `output_chars`. Неизвестный ключ в `[agent]` — `SpecError` (опечатка не
+должна молча снимать защиту). Команда тестов и её таймаут — из `[test]`. sa-home-bot: rules = CLAUDE.md, checks =
+`ruff check src tests` и `test_no_comments_in_code`, `diff_prefixes = ["src/"]`, `forbidden_paths` = `.devlab.toml`,
+CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`, `instances/*`, `*.sqlite`, `data/`.
+
+### Ограничения
+- Файлы, созданные в контейнере не-root пользователем, принадлежат subuid и не удаляются `refresh`/`clean` (так же у
+  `PodmanTestRunner`); образы по умолчанию работают от root.
+- `sync-out` после каждой команды забирает всё дерево (tar в памяти, файлы больше 32 МиБ пропускаются): для проекта
+  размером с sa-home-bot доли секунды, для больших нужен выборочный sync.
+- Тесты: `tests/unit/test_devlab_agent_sandbox.py` (фейковая обёртка с состоянием контейнера),
+  `tests/unit/test_devlab_wrapper_script.py` (`refresh` в настоящем `sh`).

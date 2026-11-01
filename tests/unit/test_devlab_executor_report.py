@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.executor.report import (
     EXCERPT_CHARS,
     MAX_FAILURES,
@@ -11,7 +14,16 @@ from sa_home_bot.devlab.executor.report import (
     parse_text,
     tail_of,
 )
-from sa_home_bot.devlab.executor.spec import DEFAULT_TIMEOUT_S, SpecError, parse_spec
+from sa_home_bot.devlab.executor.spec import (
+    DEFAULT_COMMAND_TIMEOUT_S,
+    DEFAULT_OUTPUT_CHARS,
+    DEFAULT_TIMEOUT_S,
+    SPEC_FILE,
+    SpecError,
+    parse_spec,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def summary(passed=0, failed=0, errors=0, skipped=0):
@@ -103,14 +115,64 @@ def test_spec_defaults_without_file():
 def test_spec_reads_test_section_and_ignores_other_sections():
     data = (
         b'[test]\ncmd = "pytest"\nargs = ["-x"]\ntimeout_s = 60\nimage = "i"\nsetup = ["a"]\n'
-        b"[agent]\nx = 1\n"
+        b"[other]\nx = 1\n"
     )
     section = parse_spec(data).test
     assert (section.cmd, section.args, section.timeout_s) == ("pytest", ["-x"], 60)
     assert (section.image, section.setup) == ("i", ["a"])
 
 
-@pytest.mark.parametrize("data", [b"[test", b"[test]\ncmd = 1\n", b"[test]\nbogus = 1\n", b"\xff"])
+@pytest.mark.parametrize(
+    "data",
+    [b"[test", b"[test]\ncmd = 1\n", b"[test]\nbogus = 1\n", b"[agent]\nbogus = 1\n", b"\xff"],
+)
 def test_spec_errors(data):
     with pytest.raises(SpecError):
         parse_spec(data)
+
+
+def test_agent_section_defaults_and_spec_from_project():
+    project = parse_spec(b'[test]\ncmd = "pytest"\nargs = ["-q"]\ntimeout_s = 90\n')
+    assert not project.agent.allow_remote_models and project.agent.rules == []
+    spec = AgentSpec.from_project(project)
+    assert spec.test_argv == ("pytest", "-q") and spec.test_timeout_s == 90
+    assert spec.checks == () and spec.secret_paths == ()
+    assert spec.command_timeout_s == DEFAULT_COMMAND_TIMEOUT_S
+    assert spec.output_chars == DEFAULT_OUTPUT_CHARS
+
+
+def test_agent_section_fills_agent_spec():
+    data = (
+        b"[agent]\nrules = [\"CLAUDE.md\"]\nchecks = [\"ruff check src\", \" \"]\n"
+        b'allowed_commands = ["ruff", "python -m pytest"]\nforbidden_paths = ["tests/"]\n'
+        b'secret_paths = [".env"]\ndiff_prefixes = ["src/"]\nallow_remote_models = true\n'
+        b"command_timeout_s = 12\noutput_chars = 100\n"
+    )
+    project = parse_spec(data)
+    assert project.agent.rules == ["CLAUDE.md"] and project.agent.allow_remote_models
+    spec = AgentSpec.from_project(project)
+    assert spec.test_argv == ()
+    assert spec.checks == (("ruff", "check", "src"),)
+    assert spec.allowed_commands == ("ruff", "python -m pytest")
+    assert (spec.forbidden_paths, spec.secret_paths, spec.diff_prefixes) == (
+        ("tests/",),
+        (".env",),
+        ("src/",),
+    )
+    assert (spec.command_timeout_s, spec.output_chars) == (12, 100)
+
+
+@pytest.mark.parametrize("data", [b"[agent]\ncommand_timeout_s = 0\n", b"[agent]\nchecks = 1\n"])
+def test_agent_section_validation(data):
+    with pytest.raises(SpecError):
+        parse_spec(data)
+
+
+def test_repository_recipe_is_valid_and_guards_the_tree():
+    project = parse_spec((REPO_ROOT / SPEC_FILE).read_bytes())
+    spec = AgentSpec.from_project(project)
+    assert project.agent.rules == ["CLAUDE.md"]
+    assert spec.diff_prefixes == ("src/",)
+    assert any("test_no_comments_in_code" in " ".join(check) for check in spec.checks)
+    assert any(check[:2] == ("ruff", "check") for check in spec.checks)
+    assert not project.agent.allow_remote_models

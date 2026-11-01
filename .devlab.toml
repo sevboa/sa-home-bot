@@ -12,3 +12,20 @@ setup = [
 
 [test.env]
 PYTHONPATH = "/work/src"
+
+[agent]
+rules = ["CLAUDE.md"]
+checks = [
+    "ruff check src tests",
+    "python -m pytest -q tests/unit/test_no_comments_in_code.py",
+]
+allowed_commands = [
+    "ruff check",
+    "ruff format",
+    "python -m pytest",
+    "git diff",
+    "git status",
+]
+forbidden_paths = [".devlab.toml", "CLAUDE.md", "pyproject.toml", "deploy/"]
+secret_paths = [".env", "config.toml", "config.toml.*", "instances/*", "*.sqlite", "data/"]
+diff_prefixes = ["src/"]

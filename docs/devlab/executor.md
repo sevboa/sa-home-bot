@@ -14,7 +14,13 @@
 - `executor/spec.py` — разбор `.devlab.toml`; `executor/report.py` — сводка из junit и текста pytest.
 - `executor/runner.py` — интерфейс `TestRunner` (`run(RunRequest) -> RunResult`, `cancel(job_id)`).
   В тестах — `FakeTestRunner` из `tests/unit/support/fakes.py`.
+- `executor/wrapper.py` — общее для контейнерных исполнителей (60.5.3): `WrapperClient` (вызов обёртки через
+  `sudo -n -u devlab`, `checked`, `exec` с запасом `EXEC_GRACE_S`, `create`, `remove_container`, `cleanup`,
+  отправка дерева `push_tree`), `pack_directory` (с фильтром путей), `extract_files`, `job_name`, `RunnerError`.
+- `executor/image.py` — образ по рецепту: `ImageRecipe`, `containerfile`, `image_tag`, `ensure_image` (кэш по
+  хэшу, сборка с сетью). Один код для `PodmanTestRunner` и `PodmanSandbox`.
 - `executor/podman.py` — `PodmanTestRunner`: контейнерный запуск через обёртку 60.1 (см. ниже).
+- `executor/agent_sandbox.py` — `PodmanSandbox`, контейнер задачи агента (`agent.md`).
 
 ## Цикл
 1. heartbeat каждые `heartbeat_interval_s`: `{busy, jobs}`; `busy` истинно, пока есть текущее задание.
@@ -99,7 +105,7 @@
 Верхнеуровневое `project = "<имя>"` — имя проекта на хабе для `nodectl devlab snapshot`
 ([client-test.md](client-test.md)), исполнитель его не использует.
 
-Другие разделы (`[agent]` и т. д.) исполнитель `test` игнорирует. В sa-home-bot файл лежит в корне:
+Раздел `[agent]` исполнитель `test` не читает (разбирается, но не используется; [agent.md](agent.md)), прочие неизвестные разделы игнорируются. В sa-home-bot файл лежит в корне:
 `python -m pytest -q` (pytest-xdist в dev-зависимостях нет, `-n` не добавляется).
 
 ## Конфиг
@@ -111,5 +117,5 @@
 `tests/unit/test_devlab_executor.py` (настоящий хаб `build_hub_app`, bare-репо, `FakeTestRunner`) и
 `tests/unit/test_devlab_executor_report.py` (разбор итогов, `.devlab.toml`),
 `tests/unit/test_devlab_podman_runner.py` (раннер с фейковым запуском обёртки: argv, кэш образа,
-таймаут, cancel, очистка) и `tests/unit/test_devlab_wrapper_script.py` (настоящий текст обёртки в `sh`
+таймаут, cancel, очистка), `tests/unit/test_devlab_agent_sandbox.py` (песочница агента) и `tests/unit/test_devlab_wrapper_script.py` (настоящий текст обёртки в `sh`
 с фейковым `podman`: валидация `cpuset` и имени файла `sync-out`).

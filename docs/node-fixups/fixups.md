@@ -100,6 +100,8 @@
   исполняется ОТ `devlab`, не от root: снипет `<пользователь ноды> ALL=(devlab) NOPASSWD: <обёртка> *`,
   вызов `sudo -n -u devlab <обёртка> …`. Root исполнителю не нужен — podman rootless.
 - Подкоманды обёртки: `sync-in <id>` (tar со stdin в `~/work/<id>`, каталог пересоздаётся),
+  `refresh <id>` (60.5.3: содержимое `~/work/<id>` стирается `find -mindepth 1 -delete`, затем tar со stdin; САМ каталог
+  остаётся тем же inode, иначе bind-mount работающего контейнера указал бы на удалённый каталог),
   `sync-out <id> [файл]` (tar рабочей копии или одного файла в stdout; имя файла — `[A-Za-z0-9._-]`,
   не `.`/`..`), `clean <id>`, `build <id> <образ>` (Containerfile
   со stdin пишется во временный файл `~/work/<id>.containerfile`: `podman build --file -` под sudo

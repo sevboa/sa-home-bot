@@ -1,5 +1,7 @@
+import io
 import os
 import subprocess
+import tarfile
 
 import pytest
 
@@ -83,3 +85,35 @@ def test_build_failure_status_is_kept(sandbox, tmp_path):
 
 def test_name_still_validated(sandbox):
     assert sandbox("sync-out", "../x", "a.txt").returncode == 2
+
+
+def tar_of(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_refresh_replaces_contents_but_keeps_directory(sandbox, tmp_path):
+    job = tmp_path / "root" / "home" / "work" / "job1"
+    (job / ".hidden").write_text("old")
+    inode = job.stat().st_ino
+    result = sandbox("refresh", "job1", stdin=tar_of({"new.txt": b"fresh"}))
+    assert result.returncode == 0
+    assert sorted(path.name for path in job.iterdir()) == ["new.txt"]
+    assert (job / "new.txt").read_text() == "fresh"
+    assert job.stat().st_ino == inode
+
+
+def test_refresh_creates_missing_directory(sandbox, tmp_path):
+    result = sandbox("refresh", "job2", stdin=tar_of({"a": b"1"}))
+    assert result.returncode == 0
+    assert (tmp_path / "root" / "home" / "work" / "job2" / "a").read_text() == "1"
+
+
+@pytest.mark.parametrize("name", ["", "../x", "-x", "A", "a b", "a;b"])
+def test_refresh_rejects_bad_name(sandbox, name):
+    assert sandbox("refresh", name, stdin=tar_of({"a": b"1"})).returncode == 2

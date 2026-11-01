@@ -271,6 +271,7 @@ instance-конфиге ноды.
 - `test_cpuset: str = "6-11,18-23"` — ядра контейнера теста (`--cpuset-cpus`), только цифры, `,` и `-`.
 - `test_cpus: float = 12.0` — квота CPU (`--cpus`), больше 0.
 - `test_memory: str = "24g"` — лимит памяти контейнера, `<число>[kmg]`.
+- `agent_cpuset: str = "6-11"`, `agent_cpus: float = 6.0`, `agent_memory: str = "12g"` — квоты контейнера агента (60.5.3), проверки те же, что у `test_*`.
 - `build_timeout_s: float = 1800.0` — таймаут сборки образа, больше 0.
 
 ## TasksConfig

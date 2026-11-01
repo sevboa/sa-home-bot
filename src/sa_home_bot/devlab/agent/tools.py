@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import fnmatch
 import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
 
+from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.sandbox import Sandbox, SandboxPathError, safe_relative
 from sa_home_bot.devlab.agent.spec import AgentSpec
 
@@ -149,11 +149,8 @@ class ToolBox:
 
     def _check_writable(self, path: str) -> str:
         relative = safe_relative(path)
-        for pattern in self._spec.forbidden_paths:
-            if fnmatch.fnmatch(relative, pattern) or (
-                pattern.endswith("/") and relative.startswith(pattern)
-            ):
-                raise ToolError(f"путь {relative} закрыт для правок правилами проекта")
+        if matches(relative, self._spec.forbidden_paths + self._spec.secret_paths):
+            raise ToolError(f"путь {relative} закрыт для правок правилами проекта")
         return relative
 
     async def _read_text(self, path: str) -> str:

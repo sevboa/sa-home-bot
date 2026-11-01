@@ -56,9 +56,9 @@ def safe_relative(path: str) -> str:
 
 
 class LocalSandbox:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, baseline: dict[str, str] | None = None) -> None:
         self._root = root
-        self._baseline = self._snapshot()
+        self._baseline = baseline if baseline is not None else self._snapshot()
 
     def _walk(self) -> list[str]:
         found = []
@@ -72,6 +72,9 @@ class LocalSandbox:
         return {
             rel: hashlib.sha256((self._root / rel).read_bytes()).hexdigest() for rel in self._walk()
         }
+
+    def snapshot(self) -> dict[str, str]:
+        return self._snapshot()
 
     def _resolve(self, path: str) -> Path:
         return self._root / safe_relative(path)

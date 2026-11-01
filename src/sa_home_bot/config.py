@@ -155,6 +155,9 @@ class DevlabConfig(BaseModel):
     test_cpuset: str = Field(default="6-11,18-23", pattern=CPUSET_PATTERN)
     test_cpus: float = Field(default=12.0, gt=0)
     test_memory: str = Field(default="24g", pattern=r"^[0-9]+[kmg]$")
+    agent_cpuset: str = Field(default="6-11", pattern=CPUSET_PATTERN)
+    agent_cpus: float = Field(default=6.0, gt=0)
+    agent_memory: str = Field(default="12g", pattern=r"^[0-9]+[kmg]$")
     build_timeout_s: float = Field(default=1800.0, gt=0)
 
 

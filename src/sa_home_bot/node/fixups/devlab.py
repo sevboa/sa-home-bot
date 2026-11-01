@@ -164,6 +164,12 @@ sync-in)
     mkdir -p "$WORK/$1"
     exec tar -x --no-same-owner -C "$WORK/$1"
     ;;
+refresh)
+    name "${{1:-}}"
+    mkdir -p "$WORK/$1"
+    find "$WORK/$1" -mindepth 1 -delete
+    exec tar -x --no-same-owner -C "$WORK/$1"
+    ;;
 sync-out)
     name "${{1:-}}"
     if [ $# -ge 2 ]; then
@@ -225,7 +231,8 @@ prune)
     exec podman image prune --force
     ;;
 *)
-    fail "подкоманды: sync-in sync-out clean build create start stop rm exec ps images prune"
+    fail "подкоманды: sync-in refresh sync-out clean build create start stop rm exec" \\
+        "ps images prune"
     ;;
 esac
 """
