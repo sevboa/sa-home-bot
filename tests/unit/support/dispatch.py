@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import Chat, Message, User
@@ -49,14 +50,29 @@ def recording_bot() -> tuple[Bot, RecordingSession]:
     return Bot("123456:fake-token-for-tests", session=session), session
 
 
+def _module_routers() -> Iterator[Router]:
+    from sa_home_bot.bot import setup
+
+    for module in vars(setup).values():
+        if inspect.ismodule(module):
+            for value in vars(module).values():
+                if isinstance(value, Router):
+                    yield value
+
+
+def _detach_from_dispatchers() -> None:
+    for router in _module_routers():
+        parent = router._parent_router
+        if isinstance(parent, Dispatcher):
+            parent.sub_routers.remove(router)
+            router._parent_router = None
+
+
 @contextmanager
 def prod_dispatcher(book, gate, store=None) -> Iterator[Dispatcher]:
     from sa_home_bot.bot.setup import build_dispatcher
 
-    dp = build_dispatcher(book, gate, store)
     try:
-        yield dp
+        yield build_dispatcher(book, gate, store)
     finally:
-        for child in list(dp.sub_routers):
-            child._parent_router = None
-        dp.sub_routers.clear()
+        _detach_from_dispatchers()

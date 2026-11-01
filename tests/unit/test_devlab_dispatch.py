@@ -24,7 +24,7 @@ NOTICE_ID = 26854
 
 class SpyAway:
     def __init__(self) -> None:
-        self.intercepted: list[str] = []
+        self.intercepted: list[tuple[str, str]] = []
 
     async def intercept(self, message, *, kind, **_):
         self.intercepted.append((kind, message.text))
@@ -141,6 +141,15 @@ async def test_foreign_buttons_denied(live, user_id, chat_id):
     assert link.commands == []
     answer = session.sent(AnswerCallbackQuery)[0]
     assert (answer.text, answer.show_alert) == (DENIED_ALERT_TEXT, True)
+
+
+async def test_legacy_answer_button_is_silent(live):
+    feed, link, session, _ = live
+    await feed(button_update(1, "dl:ans:cgpkp2"))
+    assert link.commands == []
+    answer = session.sent(AnswerCallbackQuery)[0]
+    assert (answer.text, answer.show_alert) == (None, None)
+    assert session.sent(EditMessageReplyMarkup) == []
 
 
 async def test_owner_reply_to_notice_goes_to_dialogue(live):
