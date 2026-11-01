@@ -51,8 +51,9 @@ class FakeMessage:
 
 
 class FakeCallback:
-    def __init__(self, data: str, chat_id: int) -> None:
+    def __init__(self, data: str, chat_id: int, from_user=None) -> None:
         self.data = data
+        self.from_user = from_user
         self.message = FakeMessage(chat_id)
         self.answered: list[tuple] = []
 

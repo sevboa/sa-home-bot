@@ -264,14 +264,30 @@ class FakeMessage:
 
 
 class FakeCallback:
-    def __init__(self, data: str, *, chat_id: int = 1, callback_id: str = "cb-1") -> None:
+    def __init__(
+        self,
+        data: str,
+        *,
+        chat_id: int = 1,
+        callback_id: str = "cb-1",
+        from_user: FakeUser | None = None,
+    ) -> None:
         self.data = data
         self.id = callback_id
+        self.from_user = from_user
         self.message = FakeMessage(chat_id=chat_id)
         self.answered: list[tuple[tuple, dict]] = []
 
     async def answer(self, *args, **kwargs):
         self.answered.append((args, kwargs))
+
+
+class FakeKicker:
+    def __init__(self) -> None:
+        self.kicked = 0
+
+    def kick(self) -> None:
+        self.kicked += 1
 
 
 class Clock:

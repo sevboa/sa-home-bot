@@ -84,8 +84,7 @@ def _book():
 
 async def _press(data, sub=GUEST_FULL, chat_id=778, book=None, notifier=None, user=User, mid=500):
     notifier = notifier or FakeNotifier()
-    cb = FakeCallback(data, chat_id=chat_id)
-    cb.from_user = user
+    cb = FakeCallback(data, chat_id=chat_id, from_user=user)
     asked = []
 
     async def answer(text, reply_markup=None, **kw):

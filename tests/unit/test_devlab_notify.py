@@ -95,7 +95,7 @@ async def test_question_notice_remembers_message_id(store):
     notifier_obj, notifier = make(store, link)
     await notifier_obj.tick()
     key = f"devlab_notice:{OWNER}:1001"
-    assert await store.get_state(key) == "j1"
+    assert devlab_notify.parse_entry(await store.get_state(key))["job_id"] == "j1"
 
 
 async def test_done_and_failed_have_no_notice_key(store):
@@ -202,8 +202,9 @@ async def test_every_admin_gets_own_notice_and_guest_none(store):
     )
     await notifier_obj.tick()
     assert [chat for chat, _ in notifier.sent] == [OWNER, 33]
-    assert await store.get_state(f"devlab_notice:{OWNER}:1001") == "j1"
-    assert await store.get_state("devlab_notice:33:1002") == "j1"
+    first = devlab_notify.parse_entry(await store.get_state(f"devlab_notice:{OWNER}:1001"))
+    second = devlab_notify.parse_entry(await store.get_state("devlab_notice:33:1002"))
+    assert first["job_id"] == second["job_id"] == "j1"
     assert await store.get_state(f"devlab_notice:{GUEST}:1003") is None
 
 

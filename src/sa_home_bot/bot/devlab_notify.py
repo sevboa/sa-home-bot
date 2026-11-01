@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -25,7 +27,12 @@ log = logging.getLogger(__name__)
 
 CALL_TIMEOUT_S = 15.0
 CURSOR_KEY = "devlab_inbox_cursor"
-NOTICE_KEY = "devlab_notice:{chat_id}:{message_id}"
+NOTICE_PREFIX = "devlab_notice:"
+NOTICE_KEY = NOTICE_PREFIX + "{chat_id}:{message_id}"
+NOTICE_TTL_S = 7 * 24 * 3600
+REPLY_PREFIX = "devlab_reply:"
+REPLY_KEY = REPLY_PREFIX + "{chat_id}:{message_id}"
+REPLY_TTL_S = 24 * 3600
 CB_PREFIX = "dl"
 CB_ANSWER = "ans"
 CB_RELEASE = "rel"
@@ -45,6 +52,29 @@ BODY_FIELDS = {
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
     protocol.MSG_FAILED: protocol.PAYLOAD_TEXT,
 }
+
+
+def encode_entry(job_id: str, **extra: Any) -> str:
+    return json.dumps({"job_id": job_id, "created": time.time(), **extra})
+
+
+def parse_entry(raw: str | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    try:
+        entry = json.loads(raw)
+    except ValueError:
+        return None
+    return entry if isinstance(entry, dict) and entry.get("job_id") else None
+
+
+def entry_expired(entry: dict[str, Any] | None, ttl_s: float) -> bool:
+    if entry is None:
+        return True
+    try:
+        return time.time() - float(entry.get("created", 0)) > ttl_s
+    except (TypeError, ValueError):
+        return True
 
 
 def hub_address(config: Settings) -> Address:
@@ -153,7 +183,14 @@ class DevlabNotifier:
                 await asyncio.wait_for(self._kick.wait(), poll_s)
             self._kick.clear()
 
+    async def purge_expired(self) -> None:
+        for prefix, ttl_s in ((NOTICE_PREFIX, NOTICE_TTL_S), (REPLY_PREFIX, REPLY_TTL_S)):
+            for key in await self._store.state_keys(prefix):
+                if entry_expired(parse_entry(await self._store.get_state(key)), ttl_s):
+                    await self._store.delete_state(key)
+
     async def tick(self) -> int:
+        await self.purge_expired()
         node_link = self._get_node_link()
         if node_link is None:
             return 0
@@ -198,4 +235,4 @@ class DevlabNotifier:
             )
             if message_id is not None and message[protocol.FIELD_KIND] == protocol.MSG_QUESTION:
                 key = NOTICE_KEY.format(chat_id=sub.chat_id, message_id=message_id)
-                await self._store.set_state(key, job_id)
+                await self._store.set_state(key, encode_entry(job_id))
