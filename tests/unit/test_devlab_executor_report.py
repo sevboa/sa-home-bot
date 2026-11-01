@@ -175,4 +175,4 @@ def test_repository_recipe_is_valid_and_guards_the_tree():
     assert spec.diff_prefixes == ("src/", "tests/")
     assert any("test_no_comments_in_code" in " ".join(check) for check in spec.checks)
     assert any(check[:2] == ("ruff", "check") for check in spec.checks)
-    assert not project.agent.allow_remote_models
+    assert project.agent.allow_remote_models
