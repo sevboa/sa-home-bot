@@ -86,3 +86,8 @@ diff_prefixes = []
 `ruff check src tests` и страж комментариев `test_no_comments_in_code.py`, `allowed_commands`,
 `forbidden_paths`, `secret_paths`, `diff_prefixes = ["src/", "tests/"]`). В шаблонах `forbidden` и `secret`
 из задачи называются так, как в парсере: `forbidden_paths` и `secret_paths`.
+
+Находки живого выката (2026-11-01): в `setup` ставится экстра `mcp` (`pip install -e .[dev,mcp]`
+или равносильное): без неё не собираются `test_devlab_mcp` и `test_agent_mcp_tools`.
+`allow_remote_models = true` в `[agent]` — решение владельца: облачные модели (OpenRouter) идут
+через шлюзы jeeves и wooster.

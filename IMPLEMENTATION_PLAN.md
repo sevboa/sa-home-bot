@@ -6164,7 +6164,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Хаб будит mycraft (WoL через `wake_core`), когда есть `queued` или ответ на `waiting_owner`,
   а исполнитель молчит.
 
-#### 60.1 Фиксы mycraft (`nodectl fix`) (сделано, код без выката)
+#### 60.1 Фиксы mycraft (`nodectl fix`) (сделано, в проде v0.154.x)
 `needed`: служба `devlab` или `devlab_models` назначена ноде.
 - `install-podman` — podman, uidmap, passt; `check()`: `podman` и `newuidmap` находятся (`find_executable`).
 - `devlab-user` — системный пользователь `devlab`, дом и рабочие каталоги в
@@ -6194,7 +6194,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Итог — модели по умолчанию (локальная, бесплатная API, платная), обвязка, окна, раскладка
   потоков между моделью и контейнерами; в docs.
 
-#### 60.3 Хаб `devlab_hub` (alfred) (сделано, код без выката)
+#### 60.3 Хаб `devlab_hub` (alfred) (сделано, в проде v0.154.x)
 - `ServiceSpec(name="devlab_hub", cli_name="devlab_hub",
   runner="sa_home_bot.devlab.hub.app:run_hub", endpoint_attr="devlab_hub.socket", singleton=True)`,
   назначение — alfred; конфиг `[devlab_hub]` (порт, каталог данных, срок хранения ящика).
@@ -6244,7 +6244,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - jeeves: `openai` (бесплатные и арендуемые); ключи в конфиге инстанса jeeves; только
   проксирование, без вычислений.
 
-#### 60.5 Исполнитель `devlab` (mycraft) — код готов (60.5.1–60.5.7), остался живой выкат
+#### 60.5 Исполнитель `devlab` (mycraft) — код готов (60.5.1–60.5.7), в проде v0.154.x с 2026-11-01
 - `ServiceSpec(name="devlab", cli_name="devlab",
   runner="sa_home_bot.devlab.worker.app:run_worker")`, назначение — mycraft; конфиг `[devlab]`
   (адрес хаба, токены, рабочие каталоги, слоты, ядра и память слота, бюджеты, `owner_wait_s`).
@@ -6277,44 +6277,44 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 Итоги стенда 60.2 (`REPORT.md`) заложены в обвязку: окно агента не больше 16k со сворачиванием
 старых выводов инструментов, финал только при непустом диффе и зелёных тестах и стражах, таймаут
 запроса к модели не меньше 30 минут, «готово» без правок не засчитывается.
-- **60.5.1 Цикл агента** (сделано, код без выката; `docs/devlab/agent.md`) (`devlab/agent/`). OpenAI-совместимый клиент chat/tools к шлюзу
+- **60.5.1 Цикл агента** (сделано, в проде v0.154.x; `docs/devlab/agent.md`) (`devlab/agent/`). OpenAI-совместимый клиент chat/tools к шлюзу
   (`ChatClient`, таймаут 30 мин, заголовок `X-Devlab-Job`, токены из `usage`); интерфейс
   `Sandbox` (чтение, запись, список файлов, команда с таймаутом, изменённые пути) и
   `LocalSandbox` на каталоге для тестов; инструменты `list_files`, `read_file`, `grep`,
   `edit_file`, `write_file`, `run_command`, `run_tests`, `finish`; сворачивание контекста;
   страж финала; цикл с лимитом шагов и результатом `AgentResult`. Тесты с фейковой моделью.
-- **60.5.2 Git агента** (сделано, код без выката; `docs/devlab/agent.md`). `AgentRepo` поверх `ProjectMirror`: рабочая копия `base/<id>` →
+- **60.5.2 Git агента** (сделано, в проде v0.154.x; `docs/devlab/agent.md`). `AgentRepo` поверх `ProjectMirror`: рабочая копия `base/<id>` →
   `wip/<id>`, коммит на каждое изменение файлов (сообщение из действия, автор
   `devlab-agent (<модель>)`), коммит-веха на `step_done`, push со склейкой подряд идущих,
   squash `wip/<id>` → `agent/<id>` (дерево совпадает), удаление `wip/<id>` на хабе и локально,
   в том числе для `failed`/`stopped`. Подключается к циклу через `on_change`. Тесты с настоящим
   git и хабом из `test_devlab_git`.
-- **60.5.3 Контейнер задачи** (сделано, код без выката; `docs/devlab/agent.md`). `PodmanSandbox` (реализация `Sandbox`) через обёртку: сборка
+- **60.5.3 Контейнер задачи** (сделано, в проде v0.154.x; `docs/devlab/agent.md`). `PodmanSandbox` (реализация `Sandbox`) через обёртку: сборка
   образа и окружения по `.devlab.toml`, контейнер без сети с квотами, выполнение команд агента
   в нём, синхронизация рабочей копии, остановка и подъём, удаление. Раздел `[agent]` рецепта:
   `rules`, `checks`, `allowed_commands`, `forbidden_paths`, `allow_remote_models`, ресурсы.
   Тесты с фейковой обёрткой, как у `PodmanTestRunner`.
-- **60.5.4 Работник агента** (сделано, код без выката; `docs/devlab/agent.md`). `AgentWorker`: `claim` заданий `agent`, жизненный цикл
+- **60.5.4 Работник агента** (сделано, в проде v0.154.x; `docs/devlab/agent.md`). `AgentWorker`: `claim` заданий `agent`, жизненный цикл
   (`started`, `step_done`, `done`, `failed`, `stopped`), системный промпт (файлы `rules` + task.md),
   `stop` из `poll`, локальный outbox недошедших сообщений и push, продолжение `running` с
   последнего коммита `wip/<id>` на старте. Связывает 60.5.1–60.5.3.
-- **60.5.5 Вопросы владельцу, resume, стоп-краны** (сделано, код без выката; `docs/devlab/agent.md`). Инструменты `ask_owner` и `step_done`;
+- **60.5.5 Вопросы владельцу, resume, стоп-краны** (сделано, в проде v0.154.x; `docs/devlab/agent.md`). Инструменты `ask_owner` и `step_done`;
   `question` → `waiting_owner`, снятие агента с модели и остановка контейнера, ответ из `poll`
   → работа с того же места (диалог сохраняется на диске); `resume` со сменой модели (журнал
   шагов из ящика); стоп-краны: бюджет времени, лимит шагов, подряд красные прогоны, красный
   страж → `question` с причиной.
-- **60.5.6 Шлюз, модель и расход** (сделано, код без выката; `docs/devlab/agent.md`, «Модель и расход»). Адрес шлюза выбранной модели (каталог хаба: исполнитель
+- **60.5.6 Шлюз, модель и расход** (сделано, в проде v0.154.x; `docs/devlab/agent.md`, «Модель и расход»). Адрес шлюза выбранной модели (каталог хаба: исполнитель
   берёт онлайн-шлюз, затем по приоритету), `claim` с моделями, доступными исполнителю,
   отказ remote-модели при `allow_remote_models = false`, учёт токенов и $ по цене из каталога,
   потолок $ и токенов задачи, расход в `step_done`/`done`.
   Решения владельца 2026-11-01: одна модель на шлюзах jeeves и wooster, исполнитель переключается между
   ними без потери диалога; потолок $ сквозной (по умолчанию $2); `free` модель с ненулевой стоимостью —
   немедленный `question`; шлюз не шлёт OpenRouter `models`/`route`; замечания `resume` едут в `params`.
-- **60.5.7 Служба и слоты** (сделано, код без выката; `docs/devlab/executor.md`, `deploy.md`). `run_executor` ведёт `TestWorker` и
+- **60.5.7 Служба и слоты** (сделано, в проде v0.154.x; `docs/devlab/executor.md`, `deploy.md`). `run_executor` ведёт `TestWorker` и
   `AgentWorker` рядом, общий heartbeat (`busy`/`jobs` обоих), лимиты агента из `[devlab] agent_max_*`,
   `report_cost` в моделях шлюза (OpenRouter `usage.include`), пример конфига шлюза, чек-лист выката,
   сквозной тест `test_devlab_executor_service.py`. Агентский слот один (параллельные агенты не сделаны);
-  `owner_wait_s` — в 60.6. Осталось по 60.5: живой выкат (шлюзы jeeves/wooster, исполнитель mycraft).
+  `owner_wait_s` — в 60.6. Живой выкат (шлюзы jeeves/wooster, исполнитель mycraft, хаб alfred) выполнен 2026-11-01, v0.154.x.
 Порядок: 60.5.1 → (60.5.2 ‖ 60.5.3) → 60.5.4 → 60.5.5 → 60.5.6 → 60.5.7.
 
 #### 60.6 Сон mycraft и соседство с ботом
@@ -6323,7 +6323,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Исполнитель занят, пока есть задача в `running` или очередь не пуста. Задачи в `waiting_owner`
   держат ещё `owner_wait_s` (по умолчанию 1 ч) или до `devlab_release`, потом отпускает.
 - Перед отпусканием всё уже в хабе (коммиты, сообщения), клиенту mycraft не нужен.
-- **60.6.1 ✅ Сон: признак `busy`** (2026-11-01, ветка stage60-6-1b, код без выката, не влито):
+- **60.6.1 ✅ Сон: признак `busy`** (2026-11-01, в проде v0.154.x):
   `ServiceInfo.busy` в `hello` (поле только при `true`, старые службы = не заняты), `PeerLink.busy`
   из hello и heartbeat, `NodeRouter.busy_services()`, `maybe_auto_poweroff_idle` молча выходит при
   занятой службе (без `idle_power_blocked`). Исполнитель: локальный сокет `[devlab].socket`
@@ -6332,7 +6332,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
   `agent-state.json`, `release`/`resume`/`stop`/`answer` из poll, непустой `agent-outbox.json`);
   один трекер на `TestWorker` и `AgentWorker`. Описание: `docs/devlab/executor.md`, `agent.md`,
   `deploy.md`. Дальше 60.6.2 (соседство с ботом на CPU).
-- **60.6.2 ✅ Соседство с ботом на CPU** (2026-11-01, ветка stage60-6-2, код без выката, не влито):
+- **60.6.2 ✅ Соседство с ботом на CPU** (2026-11-01, в проде v0.154.x; соседство с ботом на живой машине не проверено):
   `llm` шлёт `llm_cpu_task_started`/`finished` (`task_id`, `kind`) вокруг распознавания, озвучки,
   картинок и портрета предмета, `cpu_tasks` и `night` в `get_state`, действие `set_night_mode`
   (`node/events.py`). `devlab/neighbor.py::NeighborGate` + `follow_llm`: счёт задач, заморозка по
@@ -6365,7 +6365,7 @@ Colibri) и контейнеры задач ему уступают:
 - Цифры по умолчанию (`threads`, `threads_night`, вес) — из замеров стенда 60.2: замедление живого
   пути бота при работающей модели на 8/12/16 потоках, с весом и без.
 
-#### 60.7 ✅ Набор клиента (2026-11-01, ветка stage60-7, код без выката, не влито)
+#### 60.7 ✅ Набор клиента (2026-11-01, в проде v0.154.x)
 - Сделано: скил `devlab` (`devlab/skills/devlab/SKILL.md`, симлинк `.claude/skills/devlab`, `connect`
   ставит его наравне с `devlab-test`), `nodectl devlab base|fetch|drop` (`devlab/snapshot.py::branch_command`),
   шаблоны `.devlab.toml` в `docs/devlab/devlab-toml.md`, инструкция `docs/devlab/client-agent.md`,
@@ -6403,7 +6403,7 @@ Colibri) и контейнеры задач ему уступают:
 уведомлением о выходе) → `devlab_status id=<id>` с результатом. Порядок: 60.8.1 → 60.8.2 → 60.8.3;
 60.8.4 независима.
 
-- **60.8.1 `devlab_status` отдаёт результат теста.** Цель: после опроса не нужен `devlab_inbox`,
+- **60.8.1 ✅ (влито в master) `devlab_status` отдаёт результат теста.** Цель: после опроса не нужен `devlab_inbox`,
   итог теста приходит тем же `devlab_status`.
   - Менять: `devlab/hub/mcp_tools.py` (`status`), `docs/devlab/api.md`. Не трогать: `queue.py`,
     протокол исполнителя.
@@ -6416,7 +6416,7 @@ Colibri) и контейнеры задач ему уступают:
     `result`).
   - Зависимости: нет.
 
-- **60.8.2 `nodectl devlab wait <id>`.** Цель: ожидание задания вне MCP, без `sleep` в Bash.
+- **60.8.2 ✅ (влито в master) `nodectl devlab wait <id>`.** Цель: ожидание задания вне MCP, без `sleep` в Bash.
   - Менять: `devlab/snapshot.py` (рядом с `branch_command`: тот же разбор argv, токен из
     `TOKEN_PATH`, адрес из `connect.hub_url`), регистрация подкоманды там же, где `base|fetch|drop|
     snapshot` (`nodectl.py`), `devlab/connect.py` (`TEST_WAIT_ADVICE_S` и подсказка: «`devlab_test
@@ -6478,23 +6478,23 @@ Colibri) и контейнеры задач ему уступают:
 ### Этап 61. Мастерская, часть 2: тесты на mycraft для любого клиента
 — план (2026-10-31), после Этапа 60.
 
-- **61.1 ✅ Хаб: задания `test`** (2026-11-01, ветка worktree, не влито): ветки `test/<клиент>/*`
+- **61.1 ✅ Хаб: задания `test`** (2026-11-01, в проде v0.154.x): ветки `test/<клиент>/*`
   в `refpolicy`, вид `test` в очереди (приоритет над агентами, `claim` по `kinds`), `test_done`,
   загрузка логов `PUT /api/log`, `devlab_test` с ожиданием, `devlab_test_log`, будильник. Описание:
   `docs/devlab/{queue,api,git}.md`. Дальше 61.2 исполнитель на mycraft, 61.3 скил `devlab-test`.
-- **61.2a ✅ Исполнитель `devlab`: ядро для заданий `test`** (2026-11-01, ветка worktree, не влито):
+- **61.2a ✅ Исполнитель `devlab`: ядро для заданий `test`** (2026-11-01, в проде v0.154.x):
   служба `devlab`, `[devlab]` (`hub_url`, `hub_token`, `work_dir`, интервалы), цикл heartbeat/claim/poll,
   bare-зеркало проекта и `git archive` коммита, `.devlab.toml` (`[test]`), интерфейс `TestRunner` с
   фейком в тестах, сводка из junit или текста pytest, логи, `test_done`/`failed`/`stopped`, удаление
   `test/*`, курсор poll на диске. Общий HTTP-клиент хаба вынесен в `devlab/hubhttp.py`. Описание:
   `docs/devlab/executor.md`.
-- **61.2b ✅ Контейнерный `TestRunner`** (2026-11-01, ветка worktree, не влито): `executor/podman.py`
+- **61.2b ✅ Контейнерный `TestRunner`** (2026-11-01, в проде v0.154.x): `executor/podman.py`
   (`PodmanTestRunner` через обёртку 60.1: sync-in, сборка/кэш образа по хэшу `image`+`setup`+`setup_files`+`env`,
   контейнер без сети с `--cpuset-cpus`/`--cpus`/`--memory`, таймаут, `cancel`, `sync-out` junit, уборка в
   `finally`), обёртка получила `create … [cpuset]` и `sync-out <id> [файл]`, `[test] setup_files`/`env`,
   `[devlab] test_*`, `.devlab.toml` sa-home-bot с образом python 3.13. `-n` по ядрам не включён (xdist
   нет в dev-зависимостях). Дальше 61.3 скил `devlab-test`.
-- **61.3 ✅ Снимок и скил `devlab-test`** (2026-11-01, ветка worktree, не влито): `nodectl devlab snapshot`
+- **61.3 ✅ Снимок и скил `devlab-test`** (2026-11-01, в проде v0.154.x): `nodectl devlab snapshot`
   (`devlab/snapshot.py`: временный коммит через отдельный `GIT_INDEX_FILE`, push в `test/<нода>/<n>`,
   токен только через `GIT_CONFIG_*`), поле `project` в `.devlab.toml`, скил в пакете
   (`devlab/skills/devlab-test/SKILL.md`), `.claude/skills/devlab-test` — симлинк, `connect` ставит

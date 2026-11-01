@@ -49,3 +49,4 @@ Bare-репозитории лежат в `<data_dir>/git/<имя>.git`. Про�
 После прогона `test/*` удаляет исполнитель (клиент удалять не может, чтобы не убрать снимок из-под
 прогона). Тесты политики: parametrize и настоящий `git push` в `test_devlab_git.py`.
 
+`nodectl devlab connect` берёт адрес из `connect.hub_url`: на ноде хаба (alfred) tailscale-IP, на других нодах имя `hub_node` (2026-11-01).

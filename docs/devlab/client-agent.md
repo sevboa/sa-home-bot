@@ -58,6 +58,9 @@
    git remote add devlab http://alfred.tail61d88b.ts.net:8720/git/<проект>.git
    git config http.http://alfred.tail61d88b.ts.net:8720/.extraHeader "Authorization: Bearer $(cat ~/.config/sa-home-bot/devlab-token)"
    ```
+   Ручные команды с именем `alfred.tail61d88b.ts.net` оставлены как есть. `connect` пишет адрес из
+   `connect.hub_url` (2026-11-01): на ноде хаба (alfred) это tailscale-IP, на остальных нодах имя
+   `hub_node`.
    Так токен попадает в локальный `.git/config` проекта: не коммитить его и не делиться репозиторием.
    Команды `nodectl devlab` этого не требуют.
 3. MCP:
@@ -75,5 +78,5 @@
 `.devlab.toml` разбираются `parse_spec`; `SKILL.md` называет только инструменты из `TOOLS` хаба;
 симлинки репозитория совпадают с пакетными источниками.
 
-Не проверено: живой прогон цикла (хаб на alfred, исполнитель на mycraft), установка на ноутбук и
-Windows-ПК.
+Хаб на alfred и исполнитель на mycraft работают вживую с 2026-11-01 (v0.154.x). Не проверено: полный
+цикл агента владельцем с реальной моделью, установка на ноутбук и Windows-ПК.

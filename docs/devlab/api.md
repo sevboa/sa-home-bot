@@ -108,3 +108,4 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
   последние `LOG_TAIL_MAX_BYTES` (64 КиБ) файла `output.log` (`file=junit.xml` для junit). Нет файла —
   ошибка со статусом задания.
 
+`nodectl devlab connect` берёт адрес из `connect.hub_url`: на ноде хаба (alfred) tailscale-IP, на других нодах имя `hub_node` (2026-11-01).
