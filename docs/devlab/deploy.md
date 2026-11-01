@@ -77,6 +77,25 @@
 6. `sa-home-bot away set 1h`, через минуту `nodectl call llm get_state` показывает `night: true`,
    вес slice 100 (`systemctl --user show sa-home-devlab.slice -p CPUWeight`); `away back` возвращает 10.
 
+## Живые находки выката (2026-11-01)
+Контейнеры от `devlab` на mycraft не создавались: `crun: controller cpuset is not available under
+/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/.../cgroup.controllers`. Причина:
+systemd по умолчанию делегирует менеджеру пользователя только `cpu memory pids` (без `cpuset`
+и `io`), а `podman run --cpuset-cpus` (обёртка `create`) требует `cpuset`. Фикс `devlab-delegate`:
+drop-in `/etc/systemd/system/user@<uid>.service.d/50-sa-home-devlab-delegate.conf` с
+`[Service]\nDelegate=cpu cpuset io memory pids`, `daemon-reload`, `restart user@<uid>.service`
+(делегирование применяется только при старте менеджера; при linger менеджер поднимается сам, фикс
+дополнительно делает `start`, если он не активен). Важно: рестарт `user@<uid>` убивает запущенные
+контейнеры `devlab` и юниты в его пользовательской сессии, поэтому делать `nodectl fix` до первого
+задания или при пустой очереди исполнителя. Порядок: `nodectl fix`, затем рестарт службы `devlab`.
+Проверка: `cat /sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers`
+содержит `cpuset`; `sudo -u devlab ... create` проходит. Не проверено вживую: что вложенные
+`libpod-*.scope` получают `cpuset` (см. [executor.md](executor.md)).
+
+Вторая находка: `nodectl devlab connect` на самой ноде хаба строил `http://alfred:8720`, а `alfred`
+там резолвится в `127.0.1.1`, хаб слушает только tailscale-адрес. `connect.hub_url` теперь на ноде
+хаба берёт `tailscale ip -4` (нет tailscale: прежнее имя).
+
 ## Ограничения первого выката
 - Агентский слот один; задания `test` идут рядом в своём постоянном слоте.
 - Соседство с ботом на CPU (60.6.2) в коде, на живой машине не проверено; чек-лист проверок в

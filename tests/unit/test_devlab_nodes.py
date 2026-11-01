@@ -94,9 +94,7 @@ def peers_state(*peers):
 async def test_swarm_nodes_resolve_cache_and_fallback():
     clock = Clock()
     states = [peers_state(("mycraft", "mycraft.ts.net"))]
-    nodes, calls = swarm_nodes(
-        states, clock, {"mycraft.ts.net": {"100.64.0.2"}}
-    )
+    nodes, calls = swarm_nodes(states, clock, {"mycraft.ts.net": {"100.64.0.2"}})
     first = await nodes.addresses()
     assert first == {"alfred": {"100.64.0.1"}, "mycraft": {"100.64.0.2"}}
     states[0] = peers_state(("jeeves", "jeeves.ts.net"))
@@ -258,7 +256,7 @@ async def test_issue_token_name_unchecked_when_swarm_list_unknown(store):
 
 
 def settings():
-    return Settings.model_validate({"swarm": {"token": SWARM_TOKEN}})
+    return Settings.model_validate({"swarm": {"token": SWARM_TOKEN}, "node": {"id": "mycraft"}})
 
 
 async def test_nodectl_connect_writes_private_file_and_hides_token(tmp_path, capsys):

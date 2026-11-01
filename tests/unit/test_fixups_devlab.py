@@ -11,6 +11,7 @@ DEVLAB_IDS = {
     "devlab-subids",
     "devlab-linger",
     "devlab-cpu-weight",
+    "devlab-delegate",
     "devlab-sudoers",
 }
 
@@ -139,6 +140,47 @@ def test_cpu_weight_fixup_writes_dropin_for_the_devlab_user_slice(root, settings
 def test_cpu_weight_fixup_needs_the_user(root, settings):
     root.outputs["id -u devlab"] = None
     fixup = devlab.make_devlab_cpu_weight_fixup(settings)
+    assert fixup.check() is False
+    with pytest.raises(FixupError):
+        fixup.apply()
+
+
+DELEGATE_DROPIN = "/etc/systemd/system/user@991.service.d/50-sa-home-devlab-delegate.conf"
+CONTROLLERS = "/sys/fs/cgroup/user.slice/user-991.slice/user@991.service/cgroup.controllers"
+
+
+def test_delegate_fixup_writes_dropin_and_restarts_the_user_manager(root, settings):
+    root.outputs["id -u devlab"] = "991\n"
+    root.files[CONTROLLERS] = "cpu memory pids\n"
+    fixup = devlab.make_devlab_delegate_fixup(settings)
+    assert fixup.check() is False
+    fixup.apply()
+    assert root.installed[DELEGATE_DROPIN] == "[Service]\nDelegate=cpu cpuset io memory pids\n"
+    assert root.sudo_commands("systemctl")[:2] == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "user@991.service"],
+    ]
+    assert fixup.check() is False
+    root.files[CONTROLLERS] = "cpu cpuset io memory pids\n"
+    assert fixup.check() is True
+    root.files[DELEGATE_DROPIN] = "[Service]\nDelegate=yes\n"
+    assert fixup.check() is False
+
+
+def test_delegate_fixup_starts_manager_that_did_not_come_up(root, settings):
+    root.outputs["id -u devlab"] = "991\n"
+    fixup = devlab.make_devlab_delegate_fixup(settings)
+    fixup.apply()
+    assert ["systemctl", "start", "user@991.service"] in root.sudo_commands("systemctl")
+    root.calls.clear()
+    root.active_units.add("user@991.service")
+    fixup.apply()
+    assert ["systemctl", "start", "user@991.service"] not in root.sudo_commands("systemctl")
+
+
+def test_delegate_fixup_needs_the_user(root, settings):
+    root.outputs["id -u devlab"] = None
+    fixup = devlab.make_devlab_delegate_fixup(settings)
     assert fixup.check() is False
     with pytest.raises(FixupError):
         fixup.apply()

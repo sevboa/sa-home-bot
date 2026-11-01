@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import socket
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
@@ -29,9 +30,27 @@ class ConnectError(Exception):
     pass
 
 
-def hub_url(settings: Settings) -> str:
+def local_tailscale_address() -> str | None:
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    words = result.stdout.split()
+    return words[0] if result.returncode == 0 and words else None
+
+
+def hub_url(
+    settings: Settings,
+    *,
+    local_address: Callable[[], str | None] = local_tailscale_address,
+) -> str:
     cfg = settings.devlab_hub
-    return f"http://{cfg.hub_node}:{cfg.port}"
+    host = cfg.hub_node
+    if host == (settings.node.id or socket.gethostname()):
+        host = local_address() or host
+    return f"http://{host}:{cfg.port}"
 
 
 async def fetch_token(base_url: str, swarm_token: str) -> str:

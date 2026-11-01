@@ -49,6 +49,12 @@
   клиентов с поднятым idle-тайм-аутом. `connect` печатает эту подсказку, настройки пользователя не
   меняет.
 
+## Адрес хаба на ноде хаба
+`connect.hub_url`: если `hub_node` совпадает с id этой ноды (`node.id` или hostname), берётся адрес
+`tailscale ip -4`, иначе имя `hub_node`. Причина (2026-11-01): на alfred имя `alfred` резолвится в
+`127.0.1.1`, а хаб слушает только tailscale-адрес. Нет tailscale: остаётся имя. Тест
+`test_hub_url_on_the_hub_node_uses_the_tailscale_address`.
+
 ## Тесты
 `tests/unit/test_devlab_snapshot.py`: снимок не меняет HEAD, ветку, индекс, файлы, stash;
 коммит содержит staged/unstaged/новые файлы без игнорируемых; репозиторий без коммитов; имя

@@ -225,3 +225,24 @@ def test_sa_home_bot_spec_uses_same_sections_as_templates():
     template = parse_spec(template_blocks()[0].encode())
     assert own.agent.rules == template.agent.rules
     assert set(own.agent.forbidden_paths) >= set(template.agent.forbidden_paths[:2])
+
+
+def test_hub_url_on_the_hub_node_uses_the_tailscale_address():
+    settings = Settings.model_validate(
+        {"swarm": {"token": "x"}, "node": {"id": "alfred"}, "devlab_hub": {"hub_node": "alfred"}}
+    )
+    assert devlab_connect.hub_url(settings, local_address=lambda: "100.73.52.92") == (
+        "http://100.73.52.92:8720"
+    )
+    assert devlab_connect.hub_url(settings, local_address=lambda: None) == "http://alfred:8720"
+
+
+def test_hub_url_on_another_node_keeps_the_hub_name():
+    settings = Settings.model_validate(
+        {"swarm": {"token": "x"}, "node": {"id": "mycraft"}, "devlab_hub": {"hub_node": "alfred"}}
+    )
+
+    def forbidden():
+        raise AssertionError("tailscale не должен спрашиваться")
+
+    assert devlab_connect.hub_url(settings, local_address=forbidden) == "http://alfred:8720"

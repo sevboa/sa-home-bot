@@ -6344,6 +6344,9 @@ jeeves. Агент коммитит каждый чих в ветку прогр
   (хостовый срок + страховка `exec_backstop`), `exec` ждёт разморозки; фикс `devlab-cpu-weight`
   (`CPUWeight=10` слайсу пользователя `devlab`). Бот: `AwayRunner` шлёт `set_night_mode` по фазе
   `away`. Описание и вопросы для живой проверки: `docs/devlab/models.md`, `executor.md`, `deploy.md`.
+  Находка выката 2026-11-01 (ветка cpuset-fix): `crun: controller cpuset is not available` под
+  `user@<uid>.service`; фикс `devlab-delegate` (`Delegate=cpu cpuset io memory pids` + рестарт
+  `user@<uid>`), плюс `connect.hub_url` на ноде хаба берёт tailscale-адрес (`deploy.md`).
 
 **Соседство с ботом на CPU** (решение владельца 2026-10-31). На mycraft GPU днём держит только gemma;
 распознавание речи, озвучка и картинки бота идут на CPU, их ждёт человек. Фоновые модели (llama.cpp,

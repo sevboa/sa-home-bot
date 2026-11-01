@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from sa_home_bot.config import AppConfig, AppsConfig, NodeConfig, Settings, TelegramConfig
 from sa_home_bot.node import vpn_probe_state
 
-ROOT_PREFIXES = ("/etc/", "/usr/", "/proc/", "/sbin/", "/bin/", "/var/")
+ROOT_PREFIXES = ("/etc/", "/usr/", "/proc/", "/sbin/", "/bin/", "/var/", "/sys/")
 
 
 def make_settings(

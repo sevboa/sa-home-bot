@@ -16,6 +16,7 @@ from sa_home_bot.node.fixups.privileged import (
     install_root_file,
     install_sudoers_snippet,
     path_exists,
+    read_text_if_exists,
     run_sudo,
 )
 
@@ -27,6 +28,9 @@ SUBUID_FILE = Path("/etc/subuid")
 SUBGID_FILE = Path("/etc/subgid")
 SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 CPU_WEIGHT_DROPIN = "50-sa-home-devlab.conf"
+DELEGATE_DROPIN = "50-sa-home-devlab-delegate.conf"
+DELEGATED_CONTROLLERS = "cpu cpuset io memory pids"
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 SUBID_FIRST = 100000
 SUBID_COUNT = 65536
 
@@ -185,6 +189,65 @@ def make_devlab_cpu_weight_fixup(settings: Settings) -> Fixup:
     )
 
 
+def delegate_dropin_content() -> str:
+    return f"[Service]\nDelegate={DELEGATED_CONTROLLERS}\n"
+
+
+def delegate_dropin_path(uid: str) -> Path:
+    return SYSTEMD_UNIT_DIR / f"user@{uid}.service.d" / DELEGATE_DROPIN
+
+
+def user_manager_controllers_path(uid: str) -> Path:
+    return (
+        CGROUP_ROOT
+        / "user.slice"
+        / f"user-{uid}.slice"
+        / f"user@{uid}.service"
+        / "cgroup.controllers"
+    )
+
+
+def _manager_has_cpuset(uid: str) -> bool:
+    content = read_text_if_exists(user_manager_controllers_path(uid))
+    return content is not None and "cpuset" in content.split()
+
+
+def make_devlab_delegate_fixup(settings: Settings) -> Fixup:
+    user = settings.devlab.user
+
+    def check() -> bool:
+        uid = _user_uid(user)
+        return (
+            uid is not None
+            and file_matches(delegate_dropin_path(uid), delegate_dropin_content())
+            and _manager_has_cpuset(uid)
+        )
+
+    def apply() -> None:
+        uid = _user_uid(user)
+        if uid is None:
+            raise FixupError(f"пользователя {user} нет — сначала devlab-user")
+        unit = f"user@{uid}.service"
+        install_root_file(
+            delegate_dropin_path(uid), delegate_dropin_content(), mode="0644", make_parents=True
+        )
+        run_sudo(["systemctl", "daemon-reload"])
+        run_sudo(["systemctl", "restart", unit])
+        if subprocess.run(["sudo", "-n", "systemctl", "is-active", "--quiet", unit]).returncode:
+            run_sudo(["systemctl", "start", unit])
+
+    return Fixup(
+        id="devlab-delegate",
+        title=(
+            f"Делегировать cgroup-контроллеры ({DELEGATED_CONTROLLERS}) менеджеру user@ {user} "
+            "(rootless podman: cpuset; перезапускает user@, останавливает его контейнеры)"
+        ),
+        needed=needs.devlab,
+        check=check,
+        apply=apply,
+    )
+
+
 def devlab_wrapper_content(settings: Settings) -> str:
     home = devlab_home(settings)
     return f"""#!/bin/sh
@@ -333,5 +396,6 @@ def devlab_fixups(settings: Settings) -> list[Fixup]:
         make_devlab_subids_fixup(settings),
         make_devlab_linger_fixup(settings),
         make_devlab_cpu_weight_fixup(settings),
+        make_devlab_delegate_fixup(settings),
         make_devlab_sudoers_fixup(settings),
     ]

@@ -175,6 +175,16 @@
 [deploy.md](deploy.md)). Ночью вес контейнеров не повышается: тесты ночью работают на своих ядрах `6-11,18-23`, а
 вес сказывается только при нехватке CPU.
 
+Контроллеры (находка выката 2026-11-01). `--cpuset-cpus` требует контроллер `cpuset` в
+`user@<uid>.service/cgroup.controllers`, а systemd отдаёт менеджеру пользователя по умолчанию лишь
+`cpu memory pids`. Фикс `devlab-delegate` кладёт drop-in `user@<uid>.service.d/50-sa-home-devlab-delegate.conf`
+(`Delegate=cpu cpuset io memory pids`) и перезапускает `user@<uid>.service` (рестарт убивает
+запущенные контейнеры `devlab`). `check()` сверяет текст drop-in и наличие `cpuset` в
+`cgroup.controllers` менеджера. Дочерние cgroup под `user@<uid>` (в том числе `libpod-*.scope`,
+которые создаёт rootless podman внутри менеджера) получают `cpuset` через `cgroup.subtree_control`:
+при `Delegate=` systemd сам включает делегированные контроллеры на промежуточных уровнях, руками
+писать в `subtree_control` не нужно. Это вывод из документации systemd, вживую не проверено.
+
 Ядра. Контейнеры тестов `test_cpuset = "6-11,18-23"`, агента `agent_cpuset = "6-11"` (как и раньше);
 дневные ядра шлюза `0-5,12-17` с ними не пересекаются.
 
