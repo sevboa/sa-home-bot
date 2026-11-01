@@ -17,6 +17,8 @@ TOOL_WRITE_FILE = "write_file"
 TOOL_RUN_COMMAND = "run_command"
 TOOL_RUN_TESTS = "run_tests"
 TOOL_FINISH = "finish"
+TOOL_ASK_OWNER = "ask_owner"
+TOOL_STEP_DONE = "step_done"
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
 
 LIST_MAX_ENTRIES = 200
@@ -34,6 +36,7 @@ class ToolError(Exception):
 class ToolOutcome:
     text: str
     mutating: bool = False
+    green: bool | None = None
 
 
 def _schema(name: str, description: str, **properties: dict[str, str]) -> dict[str, Any]:
@@ -103,6 +106,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
     _schema(TOOL_RUN_TESTS, "Запускает тесты проекта."),
     _schema(
+        TOOL_STEP_DONE,
+        "Фиксирует законченный шаг. Принимается только при зелёных тестах и стражах проекта.",
+        title=_text("Что сделано на этом шаге, одной строкой"),
+    ),
+    _schema(
+        TOOL_ASK_OWNER,
+        "Задаёт вопрос владельцу и ждёт ответа (может занять часы). Только если без ответа "
+        "нельзя двигаться дальше.",
+        question=_text("Вопрос с нужным контекстом"),
+    ),
+    _schema(
         TOOL_FINISH,
         "Завершает работу. Принимается только при изменённых файлах и зелёных тестах.",
         summary=_text("Что сделано"),
@@ -142,10 +156,12 @@ class ToolBox:
         if handler is None:
             raise ToolError(f"неизвестный инструмент {name!r}")
         try:
-            text = await handler(args)
+            result = await handler(args)
         except SandboxPathError as exc:
             raise ToolError(str(exc)) from exc
-        return ToolOutcome(text, mutating=name in MUTATING_TOOLS)
+        if isinstance(result, ToolOutcome):
+            return result
+        return ToolOutcome(result, mutating=name in MUTATING_TOOLS)
 
     def _check_writable(self, path: str) -> str:
         relative = safe_relative(path)
@@ -238,8 +254,9 @@ class ToolBox:
     def _allowed(self) -> list[list[str]]:
         return [shlex.split(entry) for entry in self._spec.allowed_commands if entry.strip()]
 
-    async def _run_tests(self, args: dict[str, Any]) -> str:
+    async def _run_tests(self, args: dict[str, Any]) -> ToolOutcome:
         if not self._spec.test_argv:
             raise ToolError("команда тестов не задана")
         result = await self._sandbox.exec(self._spec.test_argv, self._spec.test_timeout_s)
-        return result.summary(self._spec.output_chars, self._spec.test_timeout_s)
+        text = result.summary(self._spec.output_chars, self._spec.test_timeout_s)
+        return ToolOutcome(text, green=result.ok)

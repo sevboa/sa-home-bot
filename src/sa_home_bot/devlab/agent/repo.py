@@ -196,7 +196,7 @@ class AgentRepo:
             await self._push()
             return sha or ""
 
-    async def _milestones(self) -> list[str]:
+    async def milestones(self) -> list[str]:
         out = await self._git("log", "--reverse", "--format=%s", f"{self._base}..{HEAD_REF}")
         return [
             line[len(MILESTONE_PREFIX) :]
@@ -211,7 +211,7 @@ class AgentRepo:
             f"Задание: {self._job_id}",
             f"Автор: {self._author.name}",
         ]
-        milestones = await self._milestones()
+        milestones = await self.milestones()
         if milestones:
             lines += ["", "Вехи:", *(f"- {title}" for title in milestones)]
         return "\n".join(lines) + "\n"

@@ -96,7 +96,7 @@ async def test_finish_ignores_diff_outside_prefix(tmp_path):
     )
     loop, _ = make_loop(tmp_path, model, limits=AgentLimits(max_steps=3))
     result = await loop.run("s", "t")
-    assert result.status is AgentStatus.STEP_LIMIT
+    assert result.status is AgentStatus.ASKED
     assert "нет изменений" in model.seen[-1][-1]["content"]
 
 
@@ -111,7 +111,7 @@ async def test_finish_rejected_on_red_tests_and_checks(tmp_path):
     )
     loop, _ = make_loop(tmp_path, model, spec=spec, limits=AgentLimits(max_steps=3))
     result = await loop.run("s", "t")
-    assert result.status is AgentStatus.STEP_LIMIT
+    assert result.status is AgentStatus.ASKED
     answer = model.seen[-1][-1]["content"]
     assert "тесты не зелёные" in answer and "boom" in answer and "страж" in answer
 
@@ -147,7 +147,7 @@ async def test_unexpected_tool_exception_is_reported(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sandbox, "exec", broken)
     result = await loop.run("s", "t")
-    assert result.status is AgentStatus.STEP_LIMIT
+    assert result.status is AgentStatus.ASKED
     assert model.seen[1][-1]["content"] == "ошибка инструмента: RuntimeError: сломалось"
 
 
@@ -197,7 +197,7 @@ async def test_large_write_arguments_are_folded(tmp_path):
         *[tool_reply(TOOL_RUN_TESTS, f"t{i}") for i in range(6)],
         tool_reply(TOOL_FINISH, "f", summary="ok"),
     )
-    limits = AgentLimits(context_tokens=3600, reply_tokens=300, keep_recent=1)
+    limits = AgentLimits(context_tokens=4000, reply_tokens=300, keep_recent=1)
     loop, _ = make_loop(tmp_path, model, spec=spec, limits=limits)
     result = await loop.run("s", "t")
     assert result.status is AgentStatus.FINISHED

@@ -61,20 +61,23 @@ class FlakyHub(ExecutorHub):
         await super().post(job_id, kind, payload)
 
 
-def make_worker(env, model, hub_class=ExecutorHub) -> AgentWorker:
+def make_worker(
+    env, model, hub_class=ExecutorHub, models=(MODEL,), sandboxes=None, limits=None
+) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
     return AgentWorker(
         hub,
         lambda model_name, job_id: model,
-        lambda request: LocalSandbox(request.workdir, request.baseline),
+        sandboxes or (lambda request: LocalSandbox(request.workdir, request.baseline)),
         AgentSettings(
             hub_url=env.hub_url,
             token=env.executor_token,
             work_dir=env.tmp_path / "exec",
             poll_interval_s=0.01,
             heartbeat_interval_s=0.01,
-            models=(MODEL,),
+            models=models,
+            **({"limits": limits} if limits else {}),
             push_interval_s=0.0,
             retry_interval_s=0.01,
         ),

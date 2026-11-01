@@ -17,6 +17,10 @@ class FinishGuard:
         if not changed:
             where = f" в {', '.join(spec.diff_prefixes)}" if spec.diff_prefixes else ""
             return [f"нет изменений{where}: правок не сделано, задача не выполнена"]
+        return await self.verify_green()
+
+    async def verify_green(self) -> list[str]:
+        spec = self._spec
         failures: list[str] = []
         if spec.test_argv:
             result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)

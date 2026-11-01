@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, Field
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus
 from sa_home_bot.devlab.agent.model import ModelFactory
@@ -30,7 +31,7 @@ from sa_home_bot.devlab.executor.mirror import (
 )
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, ProjectSpec, parse_spec
 from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
-from sa_home_bot.devlab.hub.queue import Job
+from sa_home_bot.devlab.hub.queue import Job, Message
 from sa_home_bot.utils.files import load_model, save_model
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ T = TypeVar("T")
 
 AGENT_STATE_FILE = "agent-state.json"
 OUTBOX_FILE = "agent-outbox.json"
+DIALOG_FILE = "dialog.json"
 AGENT_DIR = "agent"
 MIRROR_DIR = "mirror.git"
 WORK_DIR = "work"
@@ -48,17 +50,24 @@ RETRY_INTERVAL_S = 5.0
 ABANDON_ATTEMPTS = 3
 FAILED_TEXT_CHARS = 1000
 STOPPED_REASON = "остановлено владельцем"
+LOST_DIALOG_REASON = "диалог агента потерян, ответ владельца некуда вернуть"
 FAILURE_PREFIX = {
-    AgentStatus.STEP_LIMIT: "лимит шагов",
     AgentStatus.MODEL_FAILED: "модель",
     AgentStatus.CONTEXT_OVERFLOW: "контекст",
     AgentStatus.STUCK: "агент застрял",
 }
 
 
+class ParkedEntry(BaseModel):
+    job: dict[str, Any]
+    answered: bool = False
+
+
 class AgentState(BaseModel):
     cursor: int = 0
     job: dict[str, Any] | None = None
+    parked: dict[str, ParkedEntry] = Field(default_factory=dict)
+    remarks: dict[str, str] = Field(default_factory=dict)
 
 
 class OutboxItem(BaseModel):
@@ -86,6 +95,7 @@ class JobRun:
     mirror: ProjectMirror
     repo: AgentRepo | None = None
     sandbox: ManagedSandbox | None = None
+    parked: bool = False
 
 
 class AgentWorker(WorkerLoops):
@@ -108,11 +118,16 @@ class AgentWorker(WorkerLoops):
         self._current = self._resume.id if self._resume else None
         self._task: asyncio.Task[None] | None = None
         self._stopped: set[str] = set()
+        self._parked_sandboxes: dict[str, ManagedSandbox] = {}
         self._drain_lock = asyncio.Lock()
 
     @property
     def cursor(self) -> int:
         return self._state.cursor
+
+    @property
+    def parked_jobs(self) -> list[str]:
+        return list(self._state.parked)
 
     @property
     def pending_messages(self) -> list[OutboxItem]:
@@ -152,15 +167,76 @@ class AgentWorker(WorkerLoops):
     async def poll_once(self) -> None:
         messages, cursor = await self._hub.poll(self._state.cursor)
         for message in messages:
-            if message.kind == protocol.MSG_STOP and message.job_id == self._current:
-                self._stopped.add(message.job_id)
-                if self._task is not None:
-                    self._task.cancel()
+            await self._on_message(message)
         if cursor != self._state.cursor:
             self._save(cursor=cursor)
 
+    async def _on_message(self, message: Message) -> None:
+        job_id = message.job_id
+        text = message.payload.get(protocol.PAYLOAD_TEXT)
+        text = text if isinstance(text, str) else ""
+        if message.kind == protocol.MSG_STOP:
+            if job_id == self._current:
+                self._stopped.add(job_id)
+                if self._task is not None:
+                    self._task.cancel()
+            elif job_id in self._state.parked:
+                await self._close_parked(job_id, protocol.MSG_STOPPED, STOPPED_REASON)
+        elif message.kind == protocol.MSG_ANSWER and job_id in self._state.parked:
+            await self._accept_answer(job_id, text)
+        elif message.kind == protocol.MSG_RESUME:
+            if job_id in self._state.parked:
+                await self._forget(job_id)
+            if text.strip():
+                self._save(remarks={**self._state.remarks, job_id: text})
+
+    def _job_root(self, job_id: str) -> Path:
+        return self._settings.work_dir / AGENT_DIR / job_id
+
+    async def _accept_answer(self, job_id: str, text: str) -> None:
+        path = self._job_root(job_id) / DIALOG_FILE
+        if not path.exists():
+            await self._close_parked(job_id, protocol.MSG_FAILED, LOST_DIALOG_REASON)
+            return
+        dialog = load_model(Dialog, path)
+        save_model(dialog.model_copy(update={"answer": text}), path)
+        entry = self._state.parked[job_id].model_copy(update={"answered": True})
+        self._save(parked={**self._state.parked, job_id: entry})
+
+    def _without_parked(self, job_id: str) -> dict[str, ParkedEntry]:
+        return {key: value for key, value in self._state.parked.items() if key != job_id}
+
+    async def _forget(self, job_id: str) -> None:
+        self._save(parked=self._without_parked(job_id))
+        sandbox = self._parked_sandboxes.pop(job_id, None)
+        if sandbox is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(sandbox.aclose())
+        shutil.rmtree(self._job_root(job_id), ignore_errors=True)
+
+    async def _close_parked(self, job_id: str, kind: str, text: str) -> None:
+        job = Job(**self._state.parked[job_id].job)
+        self._save(parked=self._without_parked(job_id))
+        root = self._job_root(job_id)
+        run = JobRun(job, root, self._mirror(job, root))
+        run.repo = self._make_repo(run)
+        try:
+            await run.repo.open()
+            await self._abandon(run, text)
+        except (GitError, HubRequestError, OSError) as exc:
+            log.warning("wip задания %s не закрыта: %s", job_id, self.scrub(str(exc)))
+        finally:
+            await run.repo.aclose()
+        await self._forget(job_id)
+        payload = {protocol.PAYLOAD_TEXT: text} if kind == protocol.MSG_FAILED else {}
+        await self.send(job_id, kind, payload)
+
     async def claim_once(self) -> bool:
         resumed, self._resume = self._resume, None
+        if resumed is None:
+            ready = next((key for key, entry in self._state.parked.items() if entry.answered), None)
+            if ready is not None:
+                resumed = Job(**self._state.parked[ready].job)
         job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], self._settings.models)
         if job is None:
             return False
@@ -169,9 +245,10 @@ class AgentWorker(WorkerLoops):
 
     async def handle(self, job: Job, resumed: bool = False) -> None:
         self._current = job.id
-        self._save(job=asdict(job))
-        root = self._settings.work_dir / AGENT_DIR / job.id
+        self._save(job=asdict(job), parked=self._without_parked(job.id))
+        root = self._job_root(job.id)
         if not resumed:
+            await self._forget(job.id)
             await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
         if job.id in self._stopped:
             await self.send(job.id, protocol.MSG_STOPPED, {})
@@ -181,7 +258,8 @@ class AgentWorker(WorkerLoops):
                 await self._task
             finally:
                 self._task = None
-        shutil.rmtree(root, ignore_errors=True)
+        if job.id not in self._state.parked:
+            shutil.rmtree(root, ignore_errors=True)
         self._stopped.discard(job.id)
         self._current = None
         self._save(job=None)
@@ -209,9 +287,9 @@ class AgentWorker(WorkerLoops):
         finally:
             await self._release(run)
 
-    async def _execute(self, run: JobRun) -> AgentResult:
+    def _make_repo(self, run: JobRun) -> AgentRepo:
         job = run.job
-        repo = AgentRepo(
+        return AgentRepo(
             run.mirror,
             run.root / WORK_DIR,
             run.root / GIT_DIR,
@@ -220,24 +298,59 @@ class AgentWorker(WorkerLoops):
             push_interval_s=self._settings.push_interval_s,
             base_branch=job.base_branch,
         )
+
+    async def _execute(self, run: JobRun) -> AgentResult:
+        job = run.job
+        repo = self._make_repo(run)
         run.repo = repo
         await repo.open()
         project = parse_spec(await run.mirror.read_file(repo.base, SPEC_FILE))
         spec = AgentSpec.from_project(project)
         baseline = await self._baseline(run, repo.base)
-        sandbox = self._sandboxes(SandboxRequest(job.id, repo.workdir, project, spec, baseline))
+        held = self._parked_sandboxes.pop(job.id, None)
+        sandbox = held or self._sandboxes(
+            SandboxRequest(job.id, repo.workdir, project, spec, baseline)
+        )
         run.sandbox = sandbox
-        await sandbox.start()
+        await (sandbox.resume() if held else sandbox.start())
         loop = AgentLoop(
             self._models(job.model, job.id),
             ToolBox(sandbox, spec),
             FinishGuard(sandbox, spec),
             self._settings.limits,
             on_change=repo.on_change,
+            on_step=lambda title: self._step_done(run, title),
         )
         system = build_system(await self._rules(run, project, repo.base))
-        task = build_task(job.task, await sandbox.changed_paths())
+        dialog = self._answered_dialog(run)
+        if dialog is not None:
+            return await loop.run(system, job.task, resume=dialog)
+        task = build_task(
+            job.task,
+            await sandbox.changed_paths(),
+            await repo.milestones(),
+            self._take_remarks(job.id),
+        )
         return await loop.run(system, task)
+
+    def _answered_dialog(self, run: JobRun) -> Dialog | None:
+        path = run.root / DIALOG_FILE
+        if not path.exists():
+            return None
+        dialog = load_model(Dialog, path)
+        return dialog if dialog.answer is not None else None
+
+    def _take_remarks(self, job_id: str) -> str:
+        remarks = dict(self._state.remarks)
+        text = remarks.pop(job_id, "")
+        if text:
+            self._save(remarks=remarks)
+        return text
+
+    async def _step_done(self, run: JobRun, title: str) -> None:
+        assert run.repo is not None
+        await self._retry(lambda: run.repo.milestone(title), ABANDON_ATTEMPTS)
+        await self.send(run.job.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: title})
 
     async def _baseline(self, run: JobRun, base: str) -> dict[str, str]:
         target = run.root / BASE_DIR
@@ -262,6 +375,10 @@ class AgentWorker(WorkerLoops):
             protocol.PAYLOAD_TOKENS: result.tokens_in + result.tokens_out,
             protocol.PAYLOAD_MODEL: job.model,
         }
+        if result.status is AgentStatus.ASKED:
+            assert result.dialog is not None
+            await self._park(run, result.dialog, usage)
+            return
         if result.status is AgentStatus.FINISHED:
             await self._retry(lambda: run.repo.finish(result.summary), None)
             await self.send(
@@ -271,6 +388,23 @@ class AgentWorker(WorkerLoops):
         reason = f"{FAILURE_PREFIX[result.status]}: {result.reason}"
         await self._abandon(run, reason)
         await self.send(job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: reason, **usage})
+
+    async def _park(self, run: JobRun, dialog: Dialog, usage: dict[str, Any]) -> None:
+        job = run.job
+        assert run.repo is not None and run.sandbox is not None
+        save_model(dialog, run.root / DIALOG_FILE)
+        try:
+            await run.sandbox.stop()
+        except Exception as exc:
+            log.warning("Контейнер задания %s не остановлен: %s", job.id, self.scrub(str(exc)))
+        await self._retry(run.repo.flush, None)
+        self._parked_sandboxes[job.id] = run.sandbox
+        run.parked = True
+        parked = {**self._state.parked, job.id: ParkedEntry(job=asdict(job))}
+        self._save(job=None, parked=parked)
+        await self.send(
+            job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: dialog.question, **usage}
+        )
 
     async def _fail_or_stop(self, run: JobRun, kind: str, text: str) -> None:
         await self._abandon(run, text)
@@ -308,7 +442,7 @@ class AgentWorker(WorkerLoops):
     async def _release(self, run: JobRun) -> None:
         if run.repo is not None:
             await asyncio.shield(run.repo.aclose())
-        if run.sandbox is not None:
+        if run.sandbox is not None and not run.parked:
             await asyncio.shield(run.sandbox.aclose())
 
     async def run(self) -> None:
