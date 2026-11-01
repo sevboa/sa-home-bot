@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from sa_home_bot.devlab.connect import TOKEN_PATH, hub_url
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, SpecError, parse_spec
 
 GIT_TIMEOUT_S = 300
+BRANCH_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 SNAPSHOT_MESSAGE = "devlab snapshot"
 SNAPSHOT_IDENTITY = {
     "GIT_AUTHOR_NAME": "devlab",
@@ -99,21 +101,92 @@ def branch_name(client: str, commit: str) -> str:
     return f"{protocol.TEST_BRANCH_PREFIX}{client}/{int(time.time())}-{commit[:7]}"
 
 
-def push_snapshot(root: Path, url: str, token: str, project: str, commit: str, branch: str) -> None:
-    env = {
+def hub_env(token: str) -> dict[str, str]:
+    return {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
         "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
     }
-    remote = f"{url}{protocol.HTTP_GIT_PREFIX}{project}.git"
+
+
+def hub_remote(url: str, project: str) -> str:
+    return f"{url}{protocol.HTTP_GIT_PREFIX}{project}.git"
+
+
+def push_snapshot(root: Path, url: str, token: str, project: str, commit: str, branch: str) -> None:
     _git(
         root,
         "push",
         "--no-verify",
         "--quiet",
-        remote,
+        hub_remote(url, project),
         f"{commit}:refs/heads/{branch}",
-        env=env,
+        env=hub_env(token),
+        secret=token,
+    )
+
+
+def check_branch_name(branch: str, prefix: str) -> str:
+    name = branch.removeprefix(prefix)
+    if not BRANCH_NAME.fullmatch(name):
+        raise SnapshotError(f"имя {branch!r}: допустимы a-z, 0-9, точка, дефис, подчёркивание")
+    return prefix + name
+
+
+def push_base(root: Path, url: str, token: str, project: str, name: str, ref: str) -> str:
+    branch = check_branch_name(name, protocol.BASE_BRANCH_PREFIX)
+    commit = _git(root, "rev-parse", "--verify", f"{ref}^{{commit}}").stdout.strip()
+    _git(
+        root,
+        "push",
+        "--no-verify",
+        "--quiet",
+        "--force",
+        hub_remote(url, project),
+        f"{commit}:refs/heads/{branch}",
+        env=hub_env(token),
+        secret=token,
+    )
+    return branch
+
+
+def fetch_agent(root: Path, url: str, token: str, project: str, job_id: str) -> str:
+    branch = check_branch_name(job_id, protocol.AGENT_BRANCH_PREFIX)
+    local = f"refs/devlab/{branch}"
+    _git(
+        root,
+        "fetch",
+        "--quiet",
+        hub_remote(url, project),
+        f"+refs/heads/{branch}:{local}",
+        env=hub_env(token),
+        secret=token,
+    )
+    return local
+
+
+def drop_branches(root: Path, url: str, token: str, project: str, branches: list[str]) -> None:
+    refspecs = []
+    for branch in branches:
+        prefix = next(
+            (
+                p
+                for p in (protocol.AGENT_BRANCH_PREFIX, protocol.BASE_BRANCH_PREFIX)
+                if branch.startswith(p)
+            ),
+            "",
+        )
+        if not prefix:
+            raise SnapshotError(f"удалять можно только agent/* и base/*, не {branch!r}")
+        refspecs.append(f":refs/heads/{check_branch_name(branch, prefix)}")
+    _git(
+        root,
+        "push",
+        "--no-verify",
+        "--quiet",
+        hub_remote(url, project),
+        *refspecs,
+        env=hub_env(token),
         secret=token,
     )
 
@@ -150,4 +223,37 @@ def snapshot(
         return 1
     print(f"проект {name}, коммит {commit[:12]}", file=sys.stderr)
     print(branch)
+    return 0
+
+
+def branch_command(
+    settings: Settings,
+    action: str,
+    names: list[str],
+    *,
+    project: str = "",
+    ref: str = "HEAD",
+    cwd: Path | None = None,
+    token_path: str = TOKEN_PATH,
+) -> int:
+    try:
+        if not names:
+            raise SnapshotError("не указано имя ветки")
+        root = repo_root(cwd or Path.cwd())
+        name = project_name(root, project)
+        token = read_token(token_path)
+        url = hub_url(settings)
+        if action == "base":
+            result = [push_base(root, url, token, name, names[0], ref)]
+        elif action == "fetch":
+            result = [fetch_agent(root, url, token, name, names[0])]
+        else:
+            drop_branches(root, url, token, name, names)
+            result = []
+    except SnapshotError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    print(f"проект {name}", file=sys.stderr)
+    for line in result:
+        print(line)
     return 0

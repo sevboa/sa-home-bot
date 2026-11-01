@@ -6362,7 +6362,11 @@ Colibri) и контейнеры задач ему уступают:
 - Цифры по умолчанию (`threads`, `threads_night`, вес) — из замеров стенда 60.2: замедление живого
   пути бота при работающей модели на 8/12/16 потоках, с весом и без.
 
-#### 60.7 Набор клиента
+#### 60.7 ✅ Набор клиента (2026-11-01, ветка stage60-7, код без выката, не влито)
+- Сделано: скил `devlab` (`devlab/skills/devlab/SKILL.md`, симлинк `.claude/skills/devlab`, `connect`
+  ставит его наравне с `devlab-test`), `nodectl devlab base|fetch|drop` (`devlab/snapshot.py::branch_command`),
+  шаблоны `.devlab.toml` в `docs/devlab/devlab-toml.md`, инструкция `docs/devlab/client-agent.md`,
+  строка в CLAUDE.md, тесты `tests/unit/test_devlab_client_kit.py`. Живой прогон цикла не делался.
 - Скил `devlab` (`.claude/skills/devlab/SKILL.md`, копия в docs для других проектов): оформление
   task.md по шаблону, выбор модели по `devlab_models` (по умолчанию бесплатная; платная — только
   с согласия владельца и с потолком бюджета), подтверждение владельца перед отправкой, push

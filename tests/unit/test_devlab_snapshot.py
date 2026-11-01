@@ -180,7 +180,7 @@ def test_snapshot_without_token_file_points_to_connect(repo, tmp_path, capsys):
 
 def test_install_skill_installs_updates_and_keeps_current(tmp_path):
     skills = str(tmp_path / "skills")
-    target = tmp_path / "skills" / devlab_connect.SKILL_NAME / devlab_connect.SKILL_FILE
+    target = tmp_path / "skills" / devlab_connect.SKILL_NAMES[0] / devlab_connect.SKILL_FILE
     assert devlab_connect.install_skill(skills) == "installed"
     assert devlab_connect.install_skill(skills) == "current"
     target.write_text("old")

@@ -17,7 +17,7 @@ TOKEN_PATH = "~/.config/sa-home-bot/devlab-token"
 CONNECT_TIMEOUT = aiohttp.ClientTimeout(total=15)
 CLAUDE_BINARY = "claude"
 SKILLS_DIR = "~/.claude/skills"
-SKILL_NAME = "devlab-test"
+SKILL_NAMES = ("devlab-test", "devlab")
 SKILL_FILE = "SKILL.md"
 TEST_WAIT_ADVICE_S = 240
 
@@ -72,14 +72,14 @@ def mcp_add_hint(url: str, token_path: Path) -> str:
     )
 
 
-def skill_source() -> str:
+def skill_source(name: str = SKILL_NAMES[0]) -> str:
     package = resources.files("sa_home_bot.devlab")
-    return package.joinpath("skills", SKILL_NAME, SKILL_FILE).read_text("utf-8")
+    return package.joinpath("skills", name, SKILL_FILE).read_text("utf-8")
 
 
-def install_skill(skills_dir: str = SKILLS_DIR) -> str:
-    target = Path(skills_dir).expanduser() / SKILL_NAME / SKILL_FILE
-    text = skill_source()
+def install_skill(skills_dir: str = SKILLS_DIR, name: str = SKILL_NAMES[0]) -> str:
+    target = Path(skills_dir).expanduser() / name / SKILL_FILE
+    text = skill_source(name)
     if target.is_file() and target.read_text("utf-8") == text:
         return "current"
     state = "updated" if target.exists() else "installed"
@@ -110,8 +110,9 @@ async def connect(
     path = Path(token_path).expanduser()
     write_private(path, token + "\n", enforce_mode=True, make_parents=True)
     print(f"Токен записан в {path}")
-    skill_state = install_skill(skills_dir)
-    print(f"Скил {SKILL_NAME} ({skill_state}): {Path(skills_dir).expanduser() / SKILL_NAME}")
+    for skill in SKILL_NAMES:
+        skill_state = install_skill(skills_dir, skill)
+        print(f"Скил {skill} ({skill_state}): {Path(skills_dir).expanduser() / skill}")
     print(
         f"devlab_test wait: до {TEST_WAIT_ADVICE_S} с, у MCP по HTTP idle-тайм-аут 5 минут "
         "(CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, мс; 0 отключает проверку)"

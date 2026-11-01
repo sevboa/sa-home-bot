@@ -114,12 +114,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
     p.add_argument(
         "devlab_command",
-        choices=("connect", "snapshot"),
-        help="connect: получить токен, подключить MCP, поставить скил; "
-        "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test",
+        choices=("connect", "snapshot", "base", "fetch", "drop"),
+        help="connect: получить токен, подключить MCP, поставить скилы; "
+        "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test; "
+        "base <имя>: запушить коммит (--ref, по умолчанию HEAD) в base/<имя>; "
+        "fetch <id>: забрать agent/<id> в refs/devlab/agent/<id>; "
+        "drop <ветка>...: удалить agent/* и base/* на хабе",
     )
+    p.add_argument("devlab_names", nargs="*", help="base/fetch/drop: имена веток или id")
+    p.add_argument("--ref", default="HEAD", help="base: что пушить (по умолчанию HEAD)")
     p.add_argument(
-        "--project", default="", help="snapshot: проект на хабе (по умолчанию из .devlab.toml)"
+        "--project",
+        default="",
+        help="snapshot/base/fetch/drop: проект на хабе (по умолчанию из .devlab.toml)",
     )
     p.add_argument("--client", default="", help="snapshot: имя клиента (по умолчанию имя ноды)")
     p = sub.add_parser(
@@ -504,6 +511,14 @@ def main(argv: list[str] | None = None) -> int:
         settings = _load_settings(args)
         if args.devlab_command == "snapshot":
             return devlab_snapshot.snapshot(settings, project=args.project, client=args.client)
+        if args.devlab_command in ("base", "fetch", "drop"):
+            return devlab_snapshot.branch_command(
+                settings,
+                args.devlab_command,
+                args.devlab_names,
+                project=args.project,
+                ref=args.ref,
+            )
         return asyncio.run(devlab_connect.connect(settings))
     try:
         return asyncio.run(_run(args))
