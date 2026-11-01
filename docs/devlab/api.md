@@ -14,7 +14,7 @@
 | `/api/post` | executor | `job_id`, `kind` (из `EXECUTOR_MESSAGES`), `payload` | `seq` сообщения; переходы статусов и расход (`tokens`, `cost_usd`) считает `HubQueue.post_from_executor` |
 | `/api/poll` | executor | `since` (по умолчанию 0) | `messages` (answer, resume, stop, release по заданиям этого исполнителя), `cursor` |
 | `/api/catalog` | executor | пусто | `models`: каталог живых моделей с адресом шлюза (`url`) на каждой записи |
-| `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models`, `limits` и `url` (адрес шлюза) | `ok` |
+| `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models`, `limits` и `url` (адрес шлюза) | `ok`; исполнителю ещё `queued` (число заданий в очереди, 60.6.1) |
 | `/api/introspect` | gateway | `token`: токен, предъявленный шлюзу; `address`: адрес клиента у шлюза (должен быть IP ноды токена) | `name`, `role`; 404 для неизвестного, отозванного и любого не-executor токена |
 
 - `poll`: `cursor` — `seq` последнего выданного, его исполнитель передаёт в следующем `since`

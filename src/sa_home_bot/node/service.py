@@ -731,6 +731,14 @@ class NodeService:
     async def maybe_auto_poweroff_idle(self) -> None:
         if not self._idle_poweroff:
             return
+        busy = self._router.busy_services() if self._router is not None else []
+        if busy:
+            log.info(
+                "%s: простой Alfred, но службы заняты (%s) — выключение отложено",
+                self._node,
+                ", ".join(busy),
+            )
+            return
         ssh, tmux = await self._blocking_sessions()
         if not ssh and not tmux:
             self._schedule_power(ACTION_POWEROFF)

@@ -347,3 +347,12 @@ async def test_git_error_does_not_leak_token(env):
     with pytest.raises(GitError) as raised:
         await mirror.fetch()
     assert bad not in str(raised.value)
+
+
+async def test_heartbeat_takes_hub_queue_into_busy(env):
+    worker = env.worker(FakeTestRunner())
+    await worker.beat()
+    assert not worker._busy.busy()
+    await env.store.queue.submit(CLIENT, PROJECT, "model", "task")
+    await worker.beat()
+    assert worker._busy.busy()

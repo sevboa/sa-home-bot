@@ -144,6 +144,7 @@ CPUSET_PATTERN = r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
 
 
 class DevlabConfig(BaseModel):
+    socket: str = "./data/devlab.sock"
     root: str = "/models/sa-home/devlab"
     user: str = "devlab"
     hub_url: str = ""
@@ -151,6 +152,7 @@ class DevlabConfig(BaseModel):
     work_dir: str = ""
     poll_interval_s: float = Field(default=5.0, gt=0)
     heartbeat_interval_s: float = Field(default=30.0, gt=0)
+    owner_wait_s: float = Field(default=3600.0, ge=0)
     test_image: str = "docker.io/library/python:3.13-slim"
     test_cpuset: str = Field(default="6-11,18-23", pattern=CPUSET_PATTERN)
     test_cpus: float = Field(default=12.0, gt=0)

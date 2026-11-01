@@ -62,7 +62,14 @@ class FlakyHub(ExecutorHub):
 
 
 def make_worker(
-    env, model, hub_class=ExecutorHub, models=(MODEL,), sandboxes=None, limits=None, catalog=None
+    env,
+    model,
+    hub_class=ExecutorHub,
+    models=(MODEL,),
+    sandboxes=None,
+    limits=None,
+    catalog=None,
+    busy=None,
 ) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
@@ -81,6 +88,7 @@ def make_worker(
             retry_interval_s=0.01,
         ),
         catalog or StaticCatalog(*(local_entry(name) for name in models)),
+        busy,
     )
 
 

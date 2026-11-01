@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.spend import JobSpend, MeteredChat, SpendState
 from sa_home_bot.devlab.agent.tools import ToolBox
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, SandboxRequest
+from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.mirror import (
     GitError,
@@ -72,6 +74,8 @@ class ModelUnavailable(Exception):
 class ParkedEntry(BaseModel):
     job: dict[str, Any]
     answered: bool = False
+    released: bool = False
+    asked_at: float = Field(default_factory=time.time)
 
 
 class AgentState(BaseModel):
@@ -116,8 +120,9 @@ class AgentWorker(WorkerLoops):
         sandboxes: SandboxFactory,
         settings: AgentSettings,
         catalog: Catalog,
+        busy: BusyTracker | None = None,
     ) -> None:
-        super().__init__(hub, settings)
+        super().__init__(hub, settings, busy)
         self._settings: AgentSettings = settings
         self._models = models
         self._sandboxes = sandboxes
@@ -129,6 +134,19 @@ class AgentWorker(WorkerLoops):
         self._outbox = load_model(Outbox, self._outbox_path)
         self._resume = Job(**self._state.job) if self._state.job else None
         self._current = self._resume.id if self._resume else None
+        self._busy.outbox_size = lambda: len(self._outbox.items)
+        self._busy.restore(
+            {
+                key: entry.asked_at
+                for key, entry in self._state.parked.items()
+                if not entry.answered and not entry.released
+            }
+        )
+        for key, entry in self._state.parked.items():
+            if entry.answered:
+                self._busy.started(key)
+        if self._resume:
+            self._busy.started(self._resume.id)
         self._task: asyncio.Task[None] | None = None
         self._stopped: set[str] = set()
         self._parked_sandboxes: dict[str, ManagedSandbox] = {}
@@ -197,9 +215,16 @@ class AgentWorker(WorkerLoops):
                 await self._close_parked(job_id, protocol.MSG_STOPPED, STOPPED_REASON)
         elif message.kind == protocol.MSG_ANSWER and job_id in self._state.parked:
             await self._accept_answer(job_id, text)
+        elif message.kind == protocol.MSG_RELEASE and job_id in self._state.parked:
+            self._release_hold(job_id)
         elif message.kind == protocol.MSG_RESUME:
             if job_id in self._state.parked:
                 await self._forget(job_id)
+
+    def _release_hold(self, job_id: str) -> None:
+        entry = self._state.parked[job_id].model_copy(update={"released": True})
+        self._save(parked={**self._state.parked, job_id: entry})
+        self._busy.released(job_id)
 
     def _job_root(self, job_id: str) -> Path:
         return self._settings.work_dir / AGENT_DIR / job_id
@@ -212,6 +237,7 @@ class AgentWorker(WorkerLoops):
         dialog = load_model(Dialog, path)
         save_model(dialog.model_copy(update={"answer": text}), path)
         entry = self._state.parked[job_id].model_copy(update={"answered": True})
+        self._busy.started(job_id)
         self._save(parked={**self._state.parked, job_id: entry})
 
     def _without_parked(self, job_id: str) -> dict[str, ParkedEntry]:
@@ -236,6 +262,7 @@ class AgentWorker(WorkerLoops):
             self._save(spend={k: v for k, v in self._state.spend.items() if k != job_id})
 
     async def _forget(self, job_id: str) -> None:
+        self._busy.finished(job_id)
         self._drop_spend(job_id)
         self._save(parked=self._without_parked(job_id))
         sandbox = self._parked_sandboxes.pop(job_id, None)
@@ -286,6 +313,8 @@ class AgentWorker(WorkerLoops):
         root = self._job_root(job.id)
         if not resumed:
             await self._forget(job.id)
+        self._busy.started(job.id)
+        if not resumed:
             await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
         if job.id in self._stopped:
             await self.send(job.id, protocol.MSG_STOPPED, {})
@@ -296,6 +325,7 @@ class AgentWorker(WorkerLoops):
             finally:
                 self._task = None
         if job.id not in self._state.parked:
+            self._busy.finished(job.id)
             shutil.rmtree(root, ignore_errors=True)
             self._drop_spend(job.id)
         self._stopped.discard(job.id)
@@ -456,7 +486,9 @@ class AgentWorker(WorkerLoops):
         await self._retry(run.repo.flush, None)
         self._parked_sandboxes[job.id] = run.sandbox
         run.parked = True
-        parked = {**self._state.parked, job.id: ParkedEntry(job=asdict(job))}
+        self._busy.waiting_owner(job.id)
+        asked_at = self._busy.waiting_since()[job.id]
+        parked = {**self._state.parked, job.id: ParkedEntry(job=asdict(job), asked_at=asked_at)}
         self._save(job=None, parked=parked)
         await self.send(
             job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: dialog.question, **usage}

@@ -6323,6 +6323,15 @@ jeeves. Агент коммитит каждый чих в ветку прогр
 - Исполнитель занят, пока есть задача в `running` или очередь не пуста. Задачи в `waiting_owner`
   держат ещё `owner_wait_s` (по умолчанию 1 ч) или до `devlab_release`, потом отпускает.
 - Перед отпусканием всё уже в хабе (коммиты, сообщения), клиенту mycraft не нужен.
+- **60.6.1 ✅ Сон: признак `busy`** (2026-11-01, ветка stage60-6-1b, код без выката, не влито):
+  `ServiceInfo.busy` в `hello` (поле только при `true`, старые службы = не заняты), `PeerLink.busy`
+  из hello и heartbeat, `NodeRouter.busy_services()`, `maybe_auto_poweroff_idle` молча выходит при
+  занятой службе (без `idle_power_blocked`). Исполнитель: локальный сокет `[devlab].socket`
+  (`endpoint_attr` в реестре), `executor/busy.py::BusyTracker` (running, `queued` из ответа хаба на
+  heartbeat, `waiting_owner` агента в пределах `[devlab].owner_wait_s` = 3600 с с хранением в
+  `agent-state.json`, `release`/`resume`/`stop`/`answer` из poll, непустой `agent-outbox.json`);
+  один трекер на `TestWorker` и `AgentWorker`. Описание: `docs/devlab/executor.md`, `agent.md`,
+  `deploy.md`. Дальше 60.6.2 (соседство с ботом на CPU).
 
 **Соседство с ботом на CPU** (решение владельца 2026-10-31). На mycraft GPU днём держит только gemma;
 распознавание речи, озвучка и картинки бота идут на CPU, их ждёт человек. Фоновые модели (llama.cpp,

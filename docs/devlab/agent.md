@@ -216,7 +216,12 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
   шагов (вехи `веха: ...` из `wip/<id>`, `AgentRepo.milestones()`), замечания из `payload.text` и список изменённых
   файлов. Замечания лежат в `job.params.remarks` (хаб кладёт их при `resume`) и приходят вместе с `claim`, поэтому
   гонка `claim`/`poll` их не теряет (60.5.6); при рестарте посреди задачи они попадут в промпт снова.
-- `release` и `owner_wait_s` не обрабатываются (60.6/60.5.7).
+- Занятость (60.6.1, `BusyTracker` исполнителя, `executor.md`): `running` с `handle` (и с восстановления
+  `agent-state.json` после рестарта); `question` ставит `waiting_owner`, время вопроса пишется в
+  `parked[<id>].asked_at` и держит машину `[devlab].owner_wait_s`; `release` помечает запись `released`
+  (удержание снято, задание остаётся в `parked`, хаб разбудит mycraft ответом); `answer` возвращает
+  «выполняется»; `resume`/`stop`/закрытие парковки и конец задания снимают всё. Непустой
+  `agent-outbox.json` держит машину независимо от задач.
 - Тесты: `tests/unit/test_devlab_agent_owner.py` (хаб, настоящий репозиторий, `ScriptedChatModel`, `LocalSandbox` со
   шпионом): вопрос-ответ, рестарт до и после ответа, resume со сменой модели, stop в ожидании, step_done
   красный/зелёный, каждый кран.

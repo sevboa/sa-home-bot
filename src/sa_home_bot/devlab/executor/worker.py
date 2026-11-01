@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.executor import report as reporting
+from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.mirror import (
     ProjectMirror,
@@ -53,6 +54,10 @@ def heartbeat_body(jobs: Sequence[str]) -> dict:
     return {protocol.FIELD_BUSY: bool(jobs), protocol.FIELD_JOBS: list(jobs)}
 
 
+async def send_heartbeat(hub: ExecutorHub, busy: BusyTracker, jobs: Sequence[str]) -> None:
+    busy.set_queued(await hub.heartbeat_queued(heartbeat_body(jobs)))
+
+
 async def forever(
     step: Callable, interval_s: float, what: str, scrub: Callable[[str], str] = str
 ) -> None:
@@ -67,9 +72,12 @@ async def forever(
 
 
 class WorkerLoops:
-    def __init__(self, hub: ExecutorHub, settings: WorkerSettings) -> None:
+    def __init__(
+        self, hub: ExecutorHub, settings: WorkerSettings, busy: BusyTracker | None = None
+    ) -> None:
         self._hub = hub
         self._settings = settings
+        self._busy = busy or BusyTracker()
         self._current: str | None = None
 
     def scrub(self, text: str) -> str:
@@ -81,7 +89,7 @@ class WorkerLoops:
         return [self._current] if self._current is not None else []
 
     async def beat(self) -> None:
-        await self._hub.heartbeat(heartbeat_body(self.jobs))
+        await send_heartbeat(self._hub, self._busy, self.jobs)
 
     async def poll_once(self) -> None:
         raise NotImplementedError
@@ -138,8 +146,14 @@ class WorkerLoops:
 class TestWorker(WorkerLoops):
     __test__ = False
 
-    def __init__(self, hub: ExecutorHub, runner: TestRunner, settings: WorkerSettings) -> None:
-        super().__init__(hub, settings)
+    def __init__(
+        self,
+        hub: ExecutorHub,
+        runner: TestRunner,
+        settings: WorkerSettings,
+        busy: BusyTracker | None = None,
+    ) -> None:
+        super().__init__(hub, settings, busy)
         self._runner = runner
         self._state_path = settings.work_dir / STATE_FILE
         self._state = load_model(ExecutorState, self._state_path)
@@ -185,6 +199,7 @@ class TestWorker(WorkerLoops):
 
     async def handle(self, job: Job) -> None:
         self._current = job.id
+        self._busy.started(job.id)
         self._save(current=job.id)
         workdir = self._settings.work_dir / JOBS_DIR / job.id
         ref = str(job.params.get(protocol.FIELD_REF, ""))
@@ -205,6 +220,7 @@ class TestWorker(WorkerLoops):
                 log.warning("Ветка %s на хабе не удалена: %s", ref, self.scrub(str(exc)))
         self._stopped.discard(job.id)
         self._current = None
+        self._busy.finished(job.id)
         self._save(current=None)
 
     def _mirror(self, project: str) -> ProjectMirror:

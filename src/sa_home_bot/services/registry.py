@@ -98,6 +98,7 @@ _SPECS: tuple[ServiceSpec, ...] = (
         name=protocol.EXECUTOR_SERVICE,
         cli_name=protocol.EXECUTOR_SERVICE,
         runner="sa_home_bot.devlab.executor.app:run_executor",
+        endpoint_attr="devlab.socket",
     ),
     ServiceSpec(
         name="vpn", cli_name="vpn", runner="sa_home_bot.vpn.app:run_vpn", endpoint_attr="vpn.socket"

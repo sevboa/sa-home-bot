@@ -125,9 +125,44 @@
 Раздел `[agent]` исполнитель `test` не читает (разбирается, но не используется; [agent.md](agent.md)), прочие неизвестные разделы игнорируются. В sa-home-bot файл лежит в корне:
 `python -m pytest -q` (pytest-xdist в dev-зависимостях нет, `-n` не добавляется).
 
+## Признак «занят» и сон mycraft (60.6.1, 2026-11-01)
+Пока исполнитель занят, нода не гасит машину по простою (`maybe_auto_poweroff_idle`) и не шлёт
+`idle_power_blocked`: владельцу не пишут о том, чего он не просил.
+
+Схема:
+1. Исполнитель поднимает локальный ProtoServer (`[devlab].socket`, по умолчанию `./data/devlab.sock`,
+   `endpoint_attr="devlab.socket"` в реестре служб) и в `hello`/`describe` отдаёт `ServiceInfo.busy`.
+   Поле в payload появляется только при `true`; у старых служб его нет, это «не занят».
+2. `PeerLink` ноды к локальной службе читает `busy` из `hello` при подключении и в каждом heartbeat
+   (раз в 5 с); при обрыве связи сбрасывает в `false` (мёртвая служба машину не держит).
+3. `NodeRouter.busy_services()` перечисляет живые занятые локальные службы; `maybe_auto_poweroff_idle`
+   при непустом списке пишет строку в журнал и выходит. Механизм общий: любая служба ноды может
+   отдать `busy`, devlab лишь первая. Условие простоя (`llm_went_idle`) не повторяется само: если
+   исполнитель освободился позже, машина погаснет при следующем простое llm.
+
+Исполнитель занят (`devlab/executor/busy.py::BusyTracker`), если верно хоть одно:
+- есть задача `running` (test или agent): `started` при взятии, `finished` при `test_done`/`done`/
+  `failed`/`stopped`. Трекер один на оба воркера и общий heartbeat: `send_heartbeat` кладёт `queued`
+  из ответа хаба в тот же `BusyTracker`;
+- хаб сообщает непустую очередь: ответ на heartbeat исполнителя содержит `queued` (число заданий в
+  `queued`; расширение 60.6.1, старый хаб без поля даёт 0);
+- есть задача в `waiting_owner` и с момента `question` не прошло `[devlab].owner_wait_s` (3600 с);
+  `question` ставит только агент (`test` не спрашивает), время вопроса лежит в `agent-state.json`
+  (`parked[<id>].asked_at`) и перезапуск службы его не обнуляет; `answer` переводит задачу в
+  «выполняется» (в том числе после рестарта), `resume`/`stop`/закрытие парковки снимают удержание;
+- `outbox_size()` больше нуля: пока сообщения агента из `agent-outbox.json` не дошли до хаба, машину
+  не усыпить (`AgentWorker` присваивает `BusyTracker.outbox_size` при создании; у `test` outbox нет,
+  его сообщения уходят сразу или логируются).
+
+`devlab_release` (MCP хаба, сообщение `release` в `poll`) снимает удержание по задаче: исполнитель
+вызывает `released` (агент помечает запись `parked` как `released`, чтобы рестарт не вернул удержание). Хаб принимает `release` только для `waiting_owner`, это сообщение не будит mycraft
+(`wake.md`). Перед отпусканием клиент проверяет, что всё уже в хабе: push `wip`, сообщения. `answer`
+переводит задачу в удержание «выполняется», `resume` и `stop` тоже снимают ожидание. Освободившийся по
+`owner_wait_s` исполнитель задачу не теряет: хаб разбудит mycraft ответом (`wake.md`).
+
 ## Конфиг
-Таблица `[devlab]`: `hub_url`, `hub_token`, `work_dir`, `poll_interval_s`, `heartbeat_interval_s`,
-`test_image`, `test_cpuset`, `test_cpus`, `test_memory`, `build_timeout_s`, `agent_cpuset`, `agent_cpus`,
+Таблица `[devlab]`: `socket`, `hub_url`, `hub_token`, `work_dir`, `poll_interval_s`, `heartbeat_interval_s`,
+`owner_wait_s`, `test_image`, `test_cpuset`, `test_cpus`, `test_memory`, `build_timeout_s`, `agent_cpuset`, `agent_cpus`,
 `agent_memory`, `agent_max_steps`, `agent_max_wall_s`, `agent_max_red_runs`, `agent_max_cost_usd`,
 `agent_max_tokens`, `agent_context_tokens`, `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
 

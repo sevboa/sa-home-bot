@@ -499,6 +499,13 @@ class HubQueue:
                 )
             return messages
 
+    async def queued_count(self) -> int:
+        cur = await self._db.conn.execute(
+            "SELECT count(*) AS n FROM jobs WHERE status = ?", (protocol.STATUS_QUEUED,)
+        )
+        row = await cur.fetchone()
+        return row["n"] if row else 0
+
     async def pending_work(self) -> bool:
         cur = await self._db.conn.execute(
             f"SELECT 1 FROM jobs WHERE status = ? AND kind IN ({_in(protocol.JOB_KINDS)})"

@@ -206,6 +206,7 @@ class ServiceInfo:
     wake: dict[str, str] | None = None
     endpoints: tuple[str, ...] = ()
     links: dict[str, dict[str, Any]] | None = None
+    busy: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -219,6 +220,8 @@ class ServiceInfo:
         }
         if self.links is not None:
             payload["links"] = self.links
+        if self.busy:
+            payload["busy"] = True
         return payload
 
     @classmethod
@@ -238,6 +241,7 @@ class ServiceInfo:
                     else ()
                 ),
                 links=_parse_links(payload.get("links")),
+                busy=payload.get("busy") is True,
             )
         except KeyError as exc:
             raise ProtoError(ERR_BAD_REQUEST, f"hello без поля {exc}") from exc

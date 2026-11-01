@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from pathlib import Path
 
 from sa_home_bot.config import DevlabConfig, Settings
@@ -9,17 +10,20 @@ from sa_home_bot.devlab.agent.loop import AgentLimits
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, podman_sandbox_factory
 from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker
+from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
 from sa_home_bot.devlab.executor.routing import GatewayModels, ModelCatalog
 from sa_home_bot.devlab.executor.runner import TestRunner
+from sa_home_bot.devlab.executor.service import ExecutorService
 from sa_home_bot.devlab.executor.worker import (
     TestWorker,
     WorkerLoops,
     WorkerSettings,
     forever,
-    heartbeat_body,
+    send_heartbeat,
 )
+from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
@@ -69,21 +73,28 @@ async def run_executor(
     )
     catalog = ModelCatalog(hub)
     gateways = GatewayModels(catalog, cfg.hub_token)
-    tester = TestWorker(hub, runner, worker_settings)
+    busy = BusyTracker(cfg.owner_wait_s)
+    tester = TestWorker(hub, runner, worker_settings, busy)
     agent = AgentWorker(
         hub,
         models or gateways,
         sandboxes or podman_sandbox_factory(cfg),
         AgentSettings(**vars(worker_settings), limits=agent_limits(cfg)),
         catalog,
+        busy,
     )
+    service = ExecutorService(settings.node.id or socket.gethostname(), busy)
+    server = ProtoServer(cfg.socket, service, token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
+    await server.start()
     log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
         asyncio.create_task(agent.run(heartbeat=False)),
-        asyncio.create_task(beat_forever(hub, (tester, agent), cfg.heartbeat_interval_s, agent)),
+        asyncio.create_task(
+            beat_forever(hub, busy, (tester, agent), cfg.heartbeat_interval_s, agent)
+        ),
     ]
     try:
         await lifespan.wait()
@@ -93,14 +104,19 @@ async def run_executor(
         await asyncio.gather(*tasks, return_exceptions=True)
         log.info("Останов службы devlab...")
         await gateways.close()
+        await server.stop()
         await hub.close()
         log.info("Служба devlab остановлена чисто")
 
 
 async def beat_forever(
-    hub: ExecutorHub, workers: tuple[WorkerLoops, ...], interval_s: float, scrubber: WorkerLoops
+    hub: ExecutorHub,
+    busy: BusyTracker,
+    workers: tuple[WorkerLoops, ...],
+    interval_s: float,
+    scrubber: WorkerLoops,
 ) -> None:
     async def beat() -> None:
-        await hub.heartbeat(heartbeat_body([job for worker in workers for job in worker.jobs]))
+        await send_heartbeat(hub, busy, [job for worker in workers for job in worker.jobs])
 
     await forever(beat, interval_s, "Heartbeat", scrubber.scrub)

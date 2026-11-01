@@ -262,6 +262,7 @@ instance-конфиге ноды.
 Таблица `[devlab]`: корень мастерской ноды исполнителя и служба `devlab` (исполнитель заданий
 `test`, Этап 61.2a, `docs/devlab/executor.md`). Секрет `hub_token` — только в instance-конфиге ноды.
 
+- `socket: str = "./data/devlab.sock"` — локальный сокет исполнителя: нода читает через него `busy`.
 - `root: str = "/models/sa-home/devlab"` — корень мастерской на ноде исполнителя.
 - `user: str = "devlab"` — системный пользователь контейнеров задач (обёртка 60.1).
 - `hub_url: str = ""` — адрес хаба, например `http://alfred.tail61d88b.ts.net:8720`.
@@ -269,6 +270,8 @@ instance-конфиге ноды.
 - `work_dir: str = ""` — пусто: `<root>/executor` (зеркала `mirrors/`, задания `jobs/`, `state.json`).
 - `poll_interval_s: float = 5.0` — период опроса хаба (`claim` и `poll`), больше 0.
 - `heartbeat_interval_s: float = 30.0` — период heartbeat, больше 0.
+- `owner_wait_s: float = 3600.0` — сколько задача в `waiting_owner` держит машину бодрой после
+  вопроса, пока нет `devlab_release` (0 — не держит).
 - `test_image: str = "docker.io/library/python:3.13-slim"` — базовый образ, если в `.devlab.toml` нет `image`.
 - `test_cpuset: str = "6-11,18-23"` — ядра контейнера теста (`--cpuset-cpus`), только цифры, `,` и `-`.
 - `test_cpus: float = 12.0` — квота CPU (`--cpus`), больше 0.
@@ -965,6 +968,8 @@ alfred: kind=server, но он дома, не в облаке).
   если кто-то зашёл по SSH, шлёт админам событие `idle_power_blocked` с
   кнопкой «закрыть сессии и выключить» (node/service.py, bot/node_events.py).
   Отдельного тайм-аута нет — источник простоя один, `[llm].idle_sleep_after_s`.
+  Пока локальная служба отдаёт `busy` в hello (исполнитель devlab, 2026-11-01), нода не
+  выключается и `idle_power_blocked` не шлёт.
 
 - `stop_timeout_s: float = Field(default=90.0, gt=0)`
   SIGTERM → SIGKILL
