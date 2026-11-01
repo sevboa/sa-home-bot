@@ -10,6 +10,7 @@ from sa_home_bot.bot.devlab_notify import DevlabNotifier
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.errors import ServiceUnavailableError
+from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ProtoError
 from tests.unit.support.factories import make_book, make_subscription
 from tests.unit.support.fakes import FakeNodeLink, FakeNotifier
 
@@ -254,7 +255,8 @@ async def test_gemma_lead_replaces_stub_and_facts_stay_intact(store):
     assert ai_lines.DEVLAB_QUESTION_TEXT not in text
     assert "$0.0123" in text and "agent/j1" in text and "Какой &lt;ключ&gt;?" in text
     ((_, args, dst),) = chat_calls(link)
-    assert args["role"] == "persona" and args["think"] is False and args["chat_id"] == OWNER
+    assert args["role"] == "persona" and args["think"] is False
+    assert "chat_id" not in args
     assert dst.service == "llm"
     prompt = args["messages"][0]["content"]
     assert not any(ch.isdigit() for ch in prompt)
@@ -291,7 +293,15 @@ async def test_away_skips_chat(store):
     assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
 
 
-@pytest.mark.parametrize("error", [TimeoutError(), ServiceUnavailableError("нет связи")])
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError(),
+        ServiceUnavailableError("нет связи"),
+        ProtoError(ERR_UNAVAILABLE, "нет"),
+        RuntimeError("сбой"),
+    ],
+)
 async def test_chat_failure_falls_back_to_stub(store, error):
     await store.set_state(devlab_notify.CURSOR_KEY, "5")
 
@@ -305,6 +315,20 @@ async def test_chat_failure_falls_back_to_stub(store, error):
     link = Link(results=inbox([message(6)]))
     notifier_obj, notifier = make(store, link)
     assert await notifier_obj.tick() == 1
+    assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
+
+
+async def test_away_load_failure_falls_back_to_stub(store, monkeypatch):
+    await store.set_state(devlab_notify.CURSOR_KEY, "5")
+
+    async def broken(self):
+        raise RuntimeError("база")
+
+    monkeypatch.setattr(devlab_notify.AwayService, "load", broken)
+    link = chat_link({"response": "Сэр."})
+    notifier_obj, notifier = make(store, link)
+    assert await notifier_obj.tick() == 1
+    assert chat_calls(link) == []
     assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
 
 
