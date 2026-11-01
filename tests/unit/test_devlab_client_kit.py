@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import sys
 import tomllib
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.config import Settings
@@ -326,19 +326,18 @@ async def test_wait_times_out_with_code_124(hub, tmp_path, capsys):
     job_id = await queue_test_job(store)
     code, sleeps = await run_wait(hub, tmp_path, job_id=job_id, interval=10, timeout=35)
     assert code == 124
-    assert sum(sleeps) <= 35
+    assert sleeps == [10, 10, 10, 5]
     last = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert last == {"id": job_id, "status": protocol.STATUS_QUEUED}
 
 
-async def test_wait_never_prints_or_passes_token(hub, tmp_path, capsys, monkeypatch):
+async def test_wait_never_prints_token(hub, tmp_path, capsys):
     _, store, token = hub
     job_id = await queue_test_job(store)
-    monkeypatch.setattr(sys, "argv", ["nodectl", "devlab", "wait", job_id])
     code, _ = await run_wait(hub, tmp_path, job_id=job_id, interval=10, timeout=15)
     out = capsys.readouterr()
     assert code == 124
-    assert token not in out.out + out.err + " ".join(sys.argv)
+    assert token not in out.out + out.err
 
 
 async def test_wait_fails_after_three_hub_failures(hub, tmp_path, capsys):
@@ -388,7 +387,9 @@ async def test_wait_stops_on_waiting_owner(hub, tmp_path, capsys):
 async def test_wait_bad_token_reports_error(hub, tmp_path, capsys):
     code, _ = await run_wait(hub, tmp_path, token="wrong-token", job_id="j1")
     assert code == 1
-    assert "wrong-token" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "nodectl devlab connect" in err
+    assert "wrong-token" not in err
 
 
 def test_wait_without_token_points_to_connect(tmp_path, capsys):
@@ -416,3 +417,49 @@ async def test_connect_advises_wait_zero_and_nodectl_wait(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "wait=0" in out
     assert "nodectl devlab wait" in out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"jsonrpc": "2.0", "id": 1, "error": "boom"},
+        {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"text": "[1]"}]}},
+        {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"text": 5}]}},
+        {"jsonrpc": "2.0", "id": 1, "result": {"content": "x"}},
+        [1, 2],
+    ],
+)
+async def test_call_status_garbage_shape_is_hub_unavailable(payload):
+    async def handler(request):
+        return web.json_response(payload)
+
+    app = web.Application()
+    app.router.add_post(protocol.HTTP_MCP_PATH, handler)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("")).rstrip("/")
+        if isinstance(payload, dict) and "error" in payload:
+            with pytest.raises(snapshot.SnapshotError):
+                await asyncio.to_thread(snapshot.call_status, url, "t", "j")
+        else:
+            with pytest.raises(snapshot.HubUnavailable):
+                await asyncio.to_thread(snapshot.call_status, url, "t", "j")
+
+
+async def test_call_status_does_not_follow_redirects():
+    seen = []
+
+    async def target(request):
+        seen.append(request.headers.get("Authorization"))
+        return web.json_response({})
+
+    async def handler(request):
+        raise web.HTTPTemporaryRedirect("/other")
+
+    app = web.Application()
+    app.router.add_post(protocol.HTTP_MCP_PATH, handler)
+    app.router.add_post("/other", target)
+    async with TestClient(TestServer(app)) as client:
+        url = str(client.make_url("")).rstrip("/")
+        with pytest.raises(snapshot.HubUnavailable):
+            await asyncio.to_thread(snapshot.call_status, url, "secret", "j")
+    assert seen == []

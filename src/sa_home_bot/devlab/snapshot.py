@@ -274,6 +274,14 @@ class HubUnavailable(Exception):
     pass
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+HUB_OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
     body = {
         "jsonrpc": protocol.MCP_JSONRPC,
@@ -288,7 +296,7 @@ def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=WAIT_REQUEST_TIMEOUT_S) as resp:
+        with HUB_OPENER.open(request, timeout=WAIT_REQUEST_TIMEOUT_S) as resp:
             reply = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -300,25 +308,30 @@ def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
         raise HubUnavailable(type(exc).__name__) from exc
     if not isinstance(reply, dict):
         raise HubUnavailable("ответ хаба не объект")
-    if "error" in reply:
-        raise SnapshotError(f"хаб: {reply['error'].get('message', reply['error'])}")
+    if protocol.FIELD_ERROR in reply:
+        error = reply[protocol.FIELD_ERROR]
+        message = error.get("message") if isinstance(error, dict) else None
+        raise SnapshotError(f"хаб: {message or 'ошибка JSON-RPC'}")
     result = reply.get("result") or {}
     try:
         text = result["content"][0]["text"]
-    except (KeyError, IndexError, TypeError) as exc:
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise HubUnavailable("неожиданный ответ хаба") from exc
-    if result.get("isError"):
+    if not isinstance(text, str):
+        raise HubUnavailable("неожиданный ответ хаба")
+    if result.get("isError") is True:
         raise SnapshotError(f"хаб: {text}")
     try:
         view = json.loads(text)
     except ValueError as exc:
         raise HubUnavailable("ответ хаба не JSON") from exc
+    if not isinstance(view, dict):
+        raise HubUnavailable("ответ хаба не объект")
     return view
 
 
 def wait_summary(job_id: str, view: dict[str, Any]) -> str:
-    job = view.get("job", view)
-    line: dict[str, Any] = {"id": job_id, "status": job.get("status", "")}
+    line: dict[str, Any] = {"id": job_id, "status": view.get("status") or "unknown"}
     if view.get("result") is not None:
         line["result"] = view["result"]
     return json.dumps(line, ensure_ascii=False)
@@ -361,12 +374,12 @@ def wait_command(
             print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
             return 1
         else:
-            status = last.get("job", last).get("status", "")
-            if status in WAIT_DONE_STATUSES:
+            if last.get("status") in WAIT_DONE_STATUSES:
                 print(wait_summary(job_id, last))
                 return 0
-        if clock() + interval > deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
             print(f"Тайм-аут {timeout:g} с: задание не завершилось", file=sys.stderr)
             print(wait_summary(job_id, last))
             return EXIT_TIMEOUT
-        sleep(interval)
+        sleep(min(interval, remaining))
