@@ -31,6 +31,7 @@ from sa_home_bot.utils.lifespan import Lifespan
 log = logging.getLogger(__name__)
 
 EXECUTOR_DIR = "executor"
+RUNNER_CLOSE_TIMEOUT_S = 20.0
 
 
 def build_runner(cfg: DevlabConfig, pause: PauseClock | None = None) -> TestRunner:
@@ -109,6 +110,10 @@ async def run_executor(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.wait_for(runner.aclose(), RUNNER_CLOSE_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("Уборка контейнеров не закончилась за %g с", RUNNER_CLOSE_TIMEOUT_S)
         await stop_following(neighbor, gate)
         log.info("Останов службы devlab...")
         await gateways.close()

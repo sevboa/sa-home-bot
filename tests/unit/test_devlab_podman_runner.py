@@ -192,29 +192,53 @@ async def test_result_returned_before_cleanup_finishes(tmp_path):
     assert fake.commands()[-1] == "clean"
 
 
+class GatedCleanup:
+    def __init__(self, fake: FakeWrapper) -> None:
+        self.fake = fake
+        self.release = asyncio.Event()
+        self.reached = asyncio.Event()
+        self.gate = True
+
+    async def __call__(self, argv, **kwargs):
+        if argv[5] == "clean" and self.gate:
+            self.reached.set()
+            await self.release.wait()
+        return await self.fake(argv, **kwargs)
+
+
 async def test_next_run_waits_for_pending_cleanup(tmp_path):
     fake = FakeWrapper()
-    release = asyncio.Event()
-    inner = fake.__call__
-    gate = {"on": True}
-
-    async def gated(argv, **kwargs):
-        if argv[5] == "clean" and gate["on"]:
-            await release.wait()
-        return await inner(argv, **kwargs)
-
+    gated = GatedCleanup(fake)
     runner = podman.PodmanTestRunner(DevlabConfig(), spawn=gated)
     await runner.run(request(tmp_path))
+    await gated.reached.wait()
     second = asyncio.create_task(runner.run(request(tmp_path)))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    done, _ = await asyncio.wait({second}, timeout=0.05)
+    assert not done
     assert fake.commands().count("sync-in") == 1
-    gate["on"] = False
-    release.set()
+    gated.gate = False
+    gated.release.set()
     await asyncio.wait_for(second, 5)
     await runner.aclose()
     assert fake.commands().count("sync-in") == 2
     assert fake.commands().count("clean") == 2
+
+
+async def test_cancelled_waiter_does_not_abort_cleanup(tmp_path):
+    fake = FakeWrapper()
+    gated = GatedCleanup(fake)
+    runner = podman.PodmanTestRunner(DevlabConfig(), spawn=gated)
+    await runner.run(request(tmp_path))
+    await gated.reached.wait()
+    second = asyncio.create_task(runner.run(request(tmp_path)))
+    await asyncio.wait({second}, timeout=0.05)
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert "clean" not in fake.commands()
+    gated.release.set()
+    await runner.aclose()
+    assert fake.commands().count("clean") == 1
 
 
 async def test_cancel_unknown_job_is_noop():

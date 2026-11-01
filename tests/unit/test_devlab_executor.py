@@ -274,6 +274,28 @@ async def test_cancel_after_run_still_delivers_test_done(env):
     assert protocol.MSG_TEST_DONE in await env.inbox_kinds()
     assert worker.jobs == []
     assert load_model(ExecutorState, env.tmp_path / "exec" / STATE_FILE).current is None
+    assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+class CancelDuringRunRunner(FakeTestRunner):
+    async def run(self, request):
+        self.requests.append(request)
+        asyncio.current_task().cancel()
+        await asyncio.sleep(0)
+
+
+async def test_cancel_during_run_keeps_current_for_recover(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/9"
+    await env.push(ref, {".devlab.toml": SPEC})
+    job_id = await env.submit(ref)
+    worker = env.worker(CancelDuringRunRunner())
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.claim_once()
+
+    assert worker.jobs == []
+    assert load_model(ExecutorState, env.tmp_path / "exec" / STATE_FILE).current == job_id
+    assert protocol.MSG_TEST_DONE not in await env.inbox_kinds()
 
 
 async def test_cursor_survives_restart(env):

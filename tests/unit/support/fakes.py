@@ -352,6 +352,7 @@ class FakeTestRunner:
         self.requests: list[Any] = []
         self.cancelled: list[str] = []
         self.workdir_files: list[str] = []
+        self.closed = False
         self.started = asyncio.Event()
         self._release = asyncio.Event()
 
@@ -370,6 +371,9 @@ class FakeTestRunner:
     async def cancel(self, job_id: str) -> None:
         self.cancelled.append(job_id)
         self._release.set()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class ScriptedChatModel:

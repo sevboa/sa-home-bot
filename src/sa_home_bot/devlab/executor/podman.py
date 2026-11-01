@@ -43,12 +43,12 @@ class PodmanTestRunner:
     async def aclose(self) -> None:
         pending = list(self._cleanups.values())
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.wait(pending)
 
     async def _await_cleanup(self, name: str) -> None:
         pending = self._cleanups.get(name)
         if pending is not None:
-            await asyncio.gather(pending, return_exceptions=True)
+            await asyncio.wait({pending})
 
     def _cleanup_later(self, name: str) -> None:
         task = asyncio.ensure_future(self._wrapper.cleanup(name))

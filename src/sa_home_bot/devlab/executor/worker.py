@@ -170,6 +170,7 @@ class TestWorker(WorkerLoops):
         self._state_path = settings.work_dir / STATE_FILE
         self._state = load_model(ExecutorState, self._state_path)
         self._stopped: set[str] = set()
+        self._delivered = False
 
     @property
     def cursor(self) -> int:
@@ -216,31 +217,38 @@ class TestWorker(WorkerLoops):
         workdir = self._settings.work_dir / JOBS_DIR / job.id
         ref = str(job.params.get(protocol.FIELD_REF, ""))
         mirror: ProjectMirror | None = None
+        self._delivered = False
         try:
-            mirror = self._mirror(job.project)
-            await self._run_job(job, ref, mirror, workdir)
+            try:
+                mirror = self._mirror(job.project)
+                await self._run_job(job, ref, mirror, workdir)
+                self._delivered = True
+            except Exception as exc:
+                text = self.scrub(f"{type(exc).__name__}: {exc}")[:FAILED_TEXT_CHARS]
+                log.warning("Задание %s не выполнено: %s", job.id, text)
+                await self._post_quietly(job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text})
+                self._delivered = True
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+            await self._drop_branch(mirror, ref)
         except asyncio.CancelledError:
-            shutil.rmtree(workdir, ignore_errors=True)
+            if self._delivered:
+                await self._drop_branch(mirror, ref)
+            raise
+        finally:
             self._stopped.discard(job.id)
             self._current = None
             self._busy.finished(job.id)
-            self._save(current=None)
-            raise
+            if self._delivered:
+                self._save(current=None)
+
+    async def _drop_branch(self, mirror: ProjectMirror | None, ref: str) -> None:
+        if mirror is None or not ref.startswith(protocol.TEST_BRANCH_PREFIX):
+            return
+        try:
+            await mirror.delete_branch(ref)
         except Exception as exc:
-            text = self.scrub(f"{type(exc).__name__}: {exc}")[:FAILED_TEXT_CHARS]
-            log.warning("Задание %s не выполнено: %s", job.id, text)
-            await self._post_quietly(job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text})
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
-        if mirror is not None and ref.startswith(protocol.TEST_BRANCH_PREFIX):
-            try:
-                await mirror.delete_branch(ref)
-            except Exception as exc:
-                log.warning("Ветка %s на хабе не удалена: %s", ref, self.scrub(str(exc)))
-        self._stopped.discard(job.id)
-        self._current = None
-        self._busy.finished(job.id)
-        self._save(current=None)
+            log.warning("Ветка %s на хабе не удалена: %s", ref, self.scrub(str(exc)))
 
     def _mirror(self, project: str) -> ProjectMirror:
         name = check_project_name(project)
@@ -287,7 +295,14 @@ class TestWorker(WorkerLoops):
         try:
             await asyncio.shield(delivery)
         except asyncio.CancelledError:
-            await asyncio.gather(delivery, return_exceptions=True)
+            await asyncio.wait({delivery})
+            failure = None if delivery.cancelled() else delivery.exception()
+            if failure is not None:
+                log.warning(
+                    "Результат %s при отмене не доставлен: %s", job.id, self.scrub(str(failure))
+                )
+            elif not delivery.cancelled():
+                self._delivered = True
             raise
 
     async def _deliver(
