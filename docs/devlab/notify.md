@@ -73,3 +73,11 @@ dedup_key="devlab:<seq>")`: при временном сбое Telegram сооб
   переживает рестарт.
 - Владелец проверяется дважды: `subscription.is_owner` и `from_user.id == subscription.chat_id`
   (и для нажатий, и для реплаев).
+- Находка 2026-11-02 (62.3.1): в проде реплай «go» на подсказку ушёл Альфреду, а не в хаб.
+  `AuthorizationMiddleware` висит inner-middleware на `dp.message`, а aiogram зовёт фильтры
+  роутера ДО inner-middleware, поэтому `subscription` в фильтре всегда `None` и фильтр молча
+  отвечал False (юнит-тесты передавали `subscription` руками). Теперь фильтр сам берёт подписку из
+  `book` (workflow-данные `start_polling` фильтрам видны), хендлер по-прежнему получает
+  `subscription` от middleware. Кнопки не страдали: их фильтр только `F.data`. Страж —
+  `tests/unit/test_devlab_dispatch.py`, апдейты через настоящий `build_dispatcher` +
+  `feed_update` с workflow-данными как в `app.py`.

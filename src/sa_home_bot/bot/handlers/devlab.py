@@ -37,6 +37,7 @@ from sa_home_bot.bot.ui.callback_data import unpack
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 
 log = logging.getLogger(__name__)
@@ -191,18 +192,19 @@ async def _ask_answer(
 
 class DevlabReplyFilter(Filter):
     async def __call__(
-        self, message: Message, store=None, subscription: Subscription | None = None
+        self, message: Message, store=None, book: SubscriptionBook | None = None
     ) -> bool | dict:
         reply = message.reply_to_message
         text = (message.text or "").strip()
         if (
             store is None
+            or book is None
             or reply is None
             or message.chat is None
             or message.from_user is None
             or not text
             or text.startswith("/")
-            or not _is_owner(subscription, message.from_user)
+            or not _is_owner(book.for_chat(message.chat.id), message.from_user)
         ):
             return False
         chat_id = message.chat.id

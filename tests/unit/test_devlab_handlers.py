@@ -13,7 +13,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
-from tests.unit.support.factories import make_subscription
+from tests.unit.support.factories import make_book, make_subscription
 from tests.unit.support.fakes import (
     FakeCallback,
     FakeKicker,
@@ -156,7 +156,7 @@ def reply_to(message_id, text, user_id=OWNER, chat_id=OWNER):
 
 async def run_reply(msg, store, link, subscription=None, notifier=None):
     match = await handlers.DevlabReplyFilter()(
-        msg, store=store, subscription=subscription or owner_sub()
+        msg, store=store, book=make_book(subscription or owner_sub())
     )
     if not match:
         return False

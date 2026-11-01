@@ -405,10 +405,9 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
     from aiogram import Bot, Router
     from aiogram.types import Chat, Message, Update, User
 
-    from sa_home_bot.bot.setup import build_dispatcher
+    from tests.unit.support.dispatch import prod_dispatcher
 
     book = _book()
-    dp = build_dispatcher(book, _gate(store, tmp_path, book=book))
     seen: list[str] = []
     spy = Router(name="spy")
 
@@ -416,20 +415,21 @@ async def test_stranger_update_reaches_no_router(store, tmp_path):
     async def _catch_all(message: Message) -> None:  # pragma: no cover
         seen.append(message.text or "")
 
-    dp.include_router(spy)
     bot = Bot("123456:fake-token-for-tests")
     chat = Chat(id=999, type="private")
     user = User(id=999, is_bot=False, first_name="Чужой")
 
     try:
-        for text in ("/start", "/ping", "привет"):
-            update = Update(
-                update_id=1,
-                message=Message(
-                    message_id=1, date=BASE_TIME, chat=chat, from_user=user, text=text
-                ),
-            )
-            await dp.feed_update(bot, update)
+        with prod_dispatcher(book, _gate(store, tmp_path, book=book)) as dp:
+            dp.include_router(spy)
+            for text in ("/start", "/ping", "привет"):
+                update = Update(
+                    update_id=1,
+                    message=Message(
+                        message_id=1, date=BASE_TIME, chat=chat, from_user=user, text=text
+                    ),
+                )
+                await dp.feed_update(bot, update)
     finally:
         await bot.session.close()
 
