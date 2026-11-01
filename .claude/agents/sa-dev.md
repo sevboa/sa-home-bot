@@ -20,6 +20,8 @@ model: sonnet
    (затронутые файлы + `tests/unit/test_no_comments_in_code.py`), смотри настоящий код выхода, не
    прячь его за `| tail`. `ruff check` по изменённым файлам. Полный набор не гоняешь: его гоняет
    `sa-tester` на mycraft. alfred слабый: тяжёлое по одному.
+5a. `git stash` ЗАПРЕЩЁН в любом виде (stash общий для всех worktree и сессий: pop может забрать чужое).
+   Отложить работу — временный коммит в своей ветке. ruff format — только по своим новым файлам.
 6. Коммит: `git add <файлы поимённо>`, сообщение по-русски в стиле `git log`, в конце
    `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`. Запрещены `git stash`, `add -A/.`,
    `commit -a`, merge в master, push, деплой, `nodectl` на чужих нодах.
