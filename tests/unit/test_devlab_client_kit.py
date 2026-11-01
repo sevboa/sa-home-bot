@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -246,3 +248,171 @@ def test_hub_url_on_another_node_keeps_the_hub_name():
         raise AssertionError("tailscale не должен спрашиваться")
 
     assert devlab_connect.hub_url(settings, local_address=forbidden) == "http://alfred:8720"
+
+
+def wait_token(tmp_path, token):
+    token_file = tmp_path / "token"
+    token_file.write_text(token + "\n")
+    return str(token_file)
+
+
+async def queue_test_job(store):
+    return (await store.queue.submit_test(CLIENT, PROJECT, "test/laptop/1")).id
+
+
+async def run_wait(hub, tmp_path, *, token=None, poll=None, **kwargs):
+    client, _, real = hub
+    sleeps = []
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    options = {"sleep": sleep, "clock": lambda: clock["now"]}
+    if poll is not None:
+        options["poll"] = poll
+    code = await asyncio.to_thread(
+        snapshot.wait_command,
+        settings_for(client),
+        kwargs.pop("job_id"),
+        token_path=wait_token(tmp_path, token or real),
+        **options,
+        **kwargs,
+    )
+    return code, sleeps
+
+
+async def test_wait_returns_result_after_test_done(hub, tmp_path, capsys):
+    _, store, _ = hub
+    job_id = await queue_test_job(store)
+    polls = []
+    real_poll = snapshot.call_status
+
+    def poll(url, tok, jid):
+        polls.append(jid)
+        if len(polls) == 3:
+            asyncio.run_coroutine_threadsafe(finish(store, job_id), loop).result(5)
+        return real_poll(url, tok, jid)
+
+    loop = asyncio.get_running_loop()
+    code, sleeps = await run_wait(hub, tmp_path, job_id=job_id, poll=poll, interval=7)
+    assert code == 0
+    assert len(polls) == 3
+    assert sleeps == [7, 7]
+    last = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert last["id"] == job_id
+    assert last["status"] == protocol.STATUS_DONE
+    assert last["result"][protocol.PAYLOAD_EXIT_CODE] == 0
+
+
+async def finish(store, job_id):
+    job = await store.queue.claim("pc", [], [protocol.JOB_KIND_TEST])
+    assert job is not None and job.id == job_id
+    await store.queue.post_from_executor(
+        job.id,
+        protocol.MSG_TEST_DONE,
+        {
+            protocol.PAYLOAD_EXIT_CODE: 0,
+            protocol.PAYLOAD_DURATION_S: 1.0,
+            protocol.PAYLOAD_SUMMARY: dict.fromkeys(protocol.SUMMARY_KEYS, 0),
+        },
+        executor="pc",
+    )
+
+
+async def test_wait_times_out_with_code_124(hub, tmp_path, capsys):
+    _, store, token = hub
+    job_id = await queue_test_job(store)
+    code, sleeps = await run_wait(hub, tmp_path, job_id=job_id, interval=10, timeout=35)
+    assert code == 124
+    assert sum(sleeps) <= 35
+    last = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert last == {"id": job_id, "status": protocol.STATUS_QUEUED}
+
+
+async def test_wait_never_prints_or_passes_token(hub, tmp_path, capsys, monkeypatch):
+    _, store, token = hub
+    job_id = await queue_test_job(store)
+    monkeypatch.setattr(sys, "argv", ["nodectl", "devlab", "wait", job_id])
+    code, _ = await run_wait(hub, tmp_path, job_id=job_id, interval=10, timeout=15)
+    out = capsys.readouterr()
+    assert code == 124
+    assert token not in out.out + out.err + " ".join(sys.argv)
+
+
+async def test_wait_fails_after_three_hub_failures(hub, tmp_path, capsys):
+    calls = []
+
+    def poll(url, tok, jid):
+        calls.append(jid)
+        raise snapshot.HubUnavailable("ConnectionRefusedError")
+
+    code, sleeps = await run_wait(hub, tmp_path, job_id="j1", poll=poll, interval=5)
+    assert code == 1
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+    assert "недоступен" in capsys.readouterr().err
+
+
+async def test_wait_recovers_when_hub_comes_back(hub, tmp_path, capsys):
+    answers = iter([snapshot.HubUnavailable("x"), snapshot.HubUnavailable("x"), {"status": "done"}])
+
+    def poll(url, tok, jid):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    code, _ = await run_wait(hub, tmp_path, job_id="j1", poll=poll, interval=5)
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {"id": "j1", "status": "done"}
+
+
+async def test_wait_unknown_job_is_error(hub, tmp_path, capsys):
+    code, sleeps = await run_wait(hub, tmp_path, job_id="nope", interval=5)
+    assert code == 1
+    assert sleeps == []
+    assert "Ошибка" in capsys.readouterr().err
+
+
+async def test_wait_stops_on_waiting_owner(hub, tmp_path, capsys):
+    def poll(url, tok, jid):
+        return {"status": protocol.STATUS_WAITING_OWNER}
+
+    code, _ = await run_wait(hub, tmp_path, job_id="j1", poll=poll)
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == protocol.STATUS_WAITING_OWNER
+
+
+async def test_wait_bad_token_reports_error(hub, tmp_path, capsys):
+    code, _ = await run_wait(hub, tmp_path, token="wrong-token", job_id="j1")
+    assert code == 1
+    assert "wrong-token" not in capsys.readouterr().err
+
+
+def test_wait_without_token_points_to_connect(tmp_path, capsys):
+    code = snapshot.wait_command(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        "j1",
+        token_path=str(tmp_path / "none"),
+    )
+    assert code == 1
+    assert "nodectl devlab connect" in capsys.readouterr().err
+
+
+async def test_connect_advises_wait_zero_and_nodectl_wait(tmp_path, capsys):
+    async def fetch(url, swarm):
+        return "tok"
+
+    await devlab_connect.connect(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        token_path=str(tmp_path / "t"),
+        skills_dir=str(tmp_path / "s"),
+        fetch=fetch,
+        runner=lambda argv: 0,
+        which=lambda name: None,
+    )
+    out = capsys.readouterr().out
+    assert "wait=0" in out
+    assert "nodectl devlab wait" in out

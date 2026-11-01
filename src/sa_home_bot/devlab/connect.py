@@ -133,8 +133,9 @@ async def connect(
         skill_state = install_skill(skills_dir, skill)
         print(f"Скил {skill} ({skill_state}): {Path(skills_dir).expanduser() / skill}")
     print(
-        f"devlab_test wait: до {TEST_WAIT_ADVICE_S} с, у MCP по HTTP idle-тайм-аут 5 минут "
-        "(CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, мс; 0 отключает проверку)"
+        f"devlab_test: вызывай с wait=0 (MCP по HTTP рвёт вызов после 5 минут тишины, "
+        f"рекомендуемый предел wait {TEST_WAIT_ADVICE_S} с), результат ждёт "
+        "`nodectl devlab wait <id>`, затем devlab_status"
     )
     if which(CLAUDE_BINARY) is None:
         print("claude не найден в PATH. Подключи MCP вручную:")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -7,7 +8,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
@@ -16,6 +21,12 @@ from sa_home_bot.devlab.executor.spec import SPEC_FILE, SpecError, parse_spec
 
 GIT_TIMEOUT_S = 300
 BRANCH_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+WAIT_DONE_STATUSES = (*protocol.TERMINAL_STATUSES, protocol.STATUS_WAITING_OWNER)
+WAIT_INTERVAL_S = 20.0
+WAIT_TIMEOUT_S = 1800.0
+WAIT_REQUEST_TIMEOUT_S = 15
+WAIT_MAX_HUB_FAILURES = 3
+EXIT_TIMEOUT = 124
 SNAPSHOT_MESSAGE = "devlab snapshot"
 SNAPSHOT_IDENTITY = {
     "GIT_AUTHOR_NAME": "devlab",
@@ -257,3 +268,105 @@ def branch_command(
     for line in result:
         print(line)
     return 0
+
+
+class HubUnavailable(Exception):
+    pass
+
+
+def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
+    body = {
+        "jsonrpc": protocol.MCP_JSONRPC,
+        "id": 1,
+        "method": protocol.MCP_METHOD_TOOLS_CALL,
+        "params": {"name": protocol.TOOL_STATUS, "arguments": {"id": job_id}},
+    }
+    request = urllib.request.Request(
+        url + protocol.HTTP_MCP_PATH,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=WAIT_REQUEST_TIMEOUT_S) as resp:
+            reply = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise SnapshotError(
+                f"хаб отклонил токен (HTTP {exc.code}): `nodectl devlab connect`"
+            ) from exc
+        raise HubUnavailable(f"HTTP {exc.code}") from exc
+    except (OSError, ValueError) as exc:
+        raise HubUnavailable(type(exc).__name__) from exc
+    if not isinstance(reply, dict):
+        raise HubUnavailable("ответ хаба не объект")
+    if "error" in reply:
+        raise SnapshotError(f"хаб: {reply['error'].get('message', reply['error'])}")
+    result = reply.get("result") or {}
+    try:
+        text = result["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HubUnavailable("неожиданный ответ хаба") from exc
+    if result.get("isError"):
+        raise SnapshotError(f"хаб: {text}")
+    try:
+        view = json.loads(text)
+    except ValueError as exc:
+        raise HubUnavailable("ответ хаба не JSON") from exc
+    return view
+
+
+def wait_summary(job_id: str, view: dict[str, Any]) -> str:
+    job = view.get("job", view)
+    line: dict[str, Any] = {"id": job_id, "status": job.get("status", "")}
+    if view.get("result") is not None:
+        line["result"] = view["result"]
+    return json.dumps(line, ensure_ascii=False)
+
+
+def wait_command(
+    settings: Settings,
+    job_id: str,
+    *,
+    interval: float = WAIT_INTERVAL_S,
+    timeout: float = WAIT_TIMEOUT_S,
+    token_path: str = TOKEN_PATH,
+    poll: Callable[[str, str, str], dict[str, Any]] = call_status,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    try:
+        if not job_id:
+            raise SnapshotError("не указан id задания")
+        if interval <= 0 or timeout <= 0:
+            raise SnapshotError("--interval и --timeout должны быть больше нуля")
+        token = read_token(token_path)
+        url = hub_url(settings)
+    except SnapshotError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    deadline = clock() + timeout
+    failures = 0
+    last: dict[str, Any] = {}
+    while True:
+        try:
+            last = poll(url, token, job_id)
+            failures = 0
+        except HubUnavailable as exc:
+            failures += 1
+            if failures >= WAIT_MAX_HUB_FAILURES:
+                print(f"Ошибка: хаб недоступен {failures} опроса подряд: {exc}", file=sys.stderr)
+                return 1
+        except SnapshotError as exc:
+            print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
+            return 1
+        else:
+            status = last.get("job", last).get("status", "")
+            if status in WAIT_DONE_STATUSES:
+                print(wait_summary(job_id, last))
+                return 0
+        if clock() + interval > deadline:
+            print(f"Тайм-аут {timeout:g} с: задание не завершилось", file=sys.stderr)
+            print(wait_summary(job_id, last))
+            return EXIT_TIMEOUT
+        sleep(interval)

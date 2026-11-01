@@ -114,12 +114,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
     p.add_argument(
         "devlab_command",
-        choices=("connect", "snapshot", "base", "fetch", "drop"),
+        choices=("connect", "snapshot", "base", "fetch", "drop", "wait"),
         help="connect: получить токен, подключить MCP, поставить скилы; "
         "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test; "
         "base <имя>: запушить коммит (--ref, по умолчанию HEAD) в base/<имя>; "
         "fetch <id>: забрать agent/<id> в refs/devlab/agent/<id>; "
-        "drop <ветка>...: удалить agent/* и base/* на хабе",
+        "drop <ветка>...: удалить agent/* и base/* на хабе; "
+        "wait <id>: дождаться done|failed|stopped|waiting_owner, последняя строка — JSON; "
+        "тайм-аут — код 124",
     )
     p.add_argument("devlab_names", nargs="*", help="base/fetch/drop: имена веток или id")
     p.add_argument("--ref", default="HEAD", help="base: что пушить (по умолчанию HEAD)")
@@ -129,6 +131,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="snapshot/base/fetch/drop: проект на хабе (по умолчанию из .devlab.toml)",
     )
     p.add_argument("--client", default="", help="snapshot: имя клиента (по умолчанию имя ноды)")
+    p.add_argument(
+        "--interval", type=float, default=devlab_snapshot.WAIT_INTERVAL_S,
+        help="wait: период опроса хаба, с (по умолчанию 20)",
+    )
+    p.add_argument(
+        "--timeout", type=float, default=devlab_snapshot.WAIT_TIMEOUT_S,
+        help="wait: предел ожидания, с (по умолчанию 1800), по истечении код 124",
+    )
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
     )
@@ -511,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         settings = _load_settings(args)
         if args.devlab_command == "snapshot":
             return devlab_snapshot.snapshot(settings, project=args.project, client=args.client)
+        if args.devlab_command == "wait":
+            return devlab_snapshot.wait_command(
+                settings,
+                args.devlab_names[0] if args.devlab_names else "",
+                interval=args.interval,
+                timeout=args.timeout,
+            )
         if args.devlab_command in ("base", "fetch", "drop"):
             return devlab_snapshot.branch_command(
                 settings,

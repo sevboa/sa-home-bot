@@ -46,8 +46,18 @@
   (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`); лимиты остаются.
 - Вывод: рекомендуемый `wait` — не больше 240 секунд (ниже 5 минут с запасом). Дальше опрос
   `devlab_status id=<id>` или `devlab_inbox` (сообщение `test_done`). Потолок хаба 1800 с остаётся для
-  клиентов с поднятым idle-тайм-аутом. `connect` печатает эту подсказку, настройки пользователя не
+  клиентов с поднятым idle-тайм-аутом. `connect` печатает подсказку, настройки пользователя не
   меняет.
+- Ожидание вне MCP: `devlab_test wait=0`, затем `nodectl devlab wait <id>` (Bash, лучше фоном с
+  уведомлением о выходе), затем `devlab_status id=<id>` с `result`.
+
+## `nodectl devlab wait <id>`
+- Раз в `--interval` (20 с) зовёт `devlab_status` хаба по HTTP (JSON-RPC `tools/call`, заголовок
+  `Authorization` из файла токена `connect`; токена нет ни в argv, ни в выводе) до `done`, `failed`,
+  `stopped` или `waiting_owner`.
+- Выход 0: последняя строка stdout — JSON `{"id", "status", "result"?}` (`result` у test-заданий).
+- `--timeout` (1800 с) истёк: код 124, в stdout та же строка с текущим статусом.
+- Хаб недоступен 3 опроса подряд, токен не принят, задания нет: код 1 и причина в stderr.
 
 ## Адрес хаба на ноде хаба
 `connect.hub_url`: если `hub_node` совпадает с id этой ноды (`node.id` или hostname), берётся адрес
