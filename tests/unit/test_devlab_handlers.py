@@ -6,7 +6,7 @@ import time
 import pytest
 
 from sa_home_bot.bot import ai_lines
-from sa_home_bot.bot.devlab_notify import NOTICE_KEY, encode_entry
+from sa_home_bot.bot.devlab_notify import NOTICE_KEY, DevlabNotifier, encode_entry
 from sa_home_bot.bot.handlers import devlab as handlers
 from sa_home_bot.bot.middlewares import DENIED_ALERT_TEXT
 from sa_home_bot.config import Settings
@@ -258,3 +258,91 @@ def test_router_included_before_ai():
     ]
     assert order.index("devlab") == order.index("away") + 1
     assert order.index("devlab") < order.index("ai")
+
+
+
+async def test_callback_without_message(store):
+    link = waiting_link()
+    cb = callback("dl:rel:j1")
+    cb.message = None
+    await press(cb, store, link)
+    assert link.calls == []
+    assert cb.answered[0][0] == ()
+
+
+async def test_callback_from_other_user_in_owner_chat_is_denied(store):
+    link = waiting_link()
+    cb = FakeCallback("dl:rel:j1", chat_id=OWNER, from_user=FakeUser(id=99))
+    await press(cb, store, link)
+    assert cb.answered[0][0] == (DENIED_ALERT_TEXT,)
+    assert link.calls == []
+
+
+async def test_reply_from_other_user_in_owner_chat_goes_on(store):
+    await store.set_state(NOTICE_KEY.format(chat_id=OWNER, message_id=77), encode_entry("j9"))
+    msg = reply_to(77, "чужой", user_id=99, chat_id=OWNER)
+    assert not await run_reply(msg, store, waiting_link())
+
+
+async def test_answer_with_hub_down_creates_no_key(store):
+    link = FakeNodeLink(error=ServiceUnavailableError("нет связи"))
+    cb = callback("dl:ans:j1")
+    await press(cb, store, link)
+    assert cb.answered[0][0] == (ai_lines.DEVLAB_HUB_DOWN_TEXT,)
+    assert cb.message.answers == []
+    assert await store.state_keys("devlab_reply:") == []
+
+
+async def test_reply_with_hub_down_keeps_key(store):
+    key = NOTICE_KEY.format(chat_id=OWNER, message_id=77)
+    await store.set_state(key, encode_entry("j9"))
+    link = FakeNodeLink(error=ServiceUnavailableError("нет связи"))
+    msg = reply_to(77, "ответ")
+    assert await run_reply(msg, store, link)
+    assert msg.answers == [ai_lines.DEVLAB_HUB_DOWN_TEXT]
+    assert await store.get_state(key) is not None
+
+
+async def test_repeat_reply_after_answer_is_refused_by_hub_not_dialogue(store):
+    key = NOTICE_KEY.format(chat_id=OWNER, message_id=77)
+    await store.set_state(key, encode_entry("j9"))
+    assert await run_reply(reply_to(77, "первый"), store, waiting_link())
+    link = FakeNodeLink(error=ProtoError(ERR_BAD_REQUEST, "не ждёт ответа"))
+    msg = reply_to(77, "второй")
+    assert await run_reply(msg, store, link)
+    assert "не ждёт ответа" in msg.answers[0]
+
+
+async def test_expired_notice_not_forwarded_and_removed(store):
+    key = NOTICE_KEY.format(chat_id=OWNER, message_id=77)
+    old = json.dumps({"job_id": "j9", "created": time.time() - 8 * 86400})
+    await store.set_state(key, old)
+    link = waiting_link()
+    msg = reply_to(77, "поздно")
+    assert await run_reply(msg, store, link)
+    assert msg.answers == [ai_lines.DEVLAB_PROMPT_EXPIRED_TEXT]
+    assert link.calls == []
+    assert await store.get_state(key) is None
+
+
+async def test_tick_purges_expired_keys_only(store):
+    fresh = NOTICE_KEY.format(chat_id=OWNER, message_id=1)
+    stale = NOTICE_KEY.format(chat_id=OWNER, message_id=2)
+    stale_reply = handlers.REPLY_KEY.format(chat_id=OWNER, message_id=3)
+    fresh_reply = handlers.REPLY_KEY.format(chat_id=OWNER, message_id=4)
+    await store.set_state(fresh, encode_entry("a"))
+    await store.set_state(stale, json.dumps({"job_id": "a", "created": time.time() - 8 * 86400}))
+    await store.set_state(stale_reply, json.dumps({"job_id": "a", "created": time.time() - 90000}))
+    await store.set_state(fresh_reply, json.dumps({"job_id": "a", "created": time.time() - 3600}))
+    notifier = DevlabNotifier(
+        get_node_link=lambda: None,
+        store=store,
+        config=Settings(),
+        book=None,
+        notifier=None,
+    )
+    await notifier.tick()
+    assert await store.get_state(fresh) is not None
+    assert await store.get_state(stale) is None
+    assert await store.get_state(stale_reply) is None
+    assert await store.get_state(fresh_reply) is not None
