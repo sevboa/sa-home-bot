@@ -23,6 +23,7 @@ from sa_home_bot.devlab.executor.worker import (
 from sa_home_bot.devlab.hub import repos
 from sa_home_bot.devlab.hub.app import build_hub_app
 from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.utils.files import load_model
 from tests.unit.support.fakes import FakeNodes, FakeTestRunner
 from tests.unit.test_devlab_e2e import Mcp
 from tests.unit.test_devlab_git import arun_git, auth, run_git
@@ -251,6 +252,28 @@ async def test_stop_cancels_running_job(env):
     assert protocol.MSG_STOPPED in kinds
     assert protocol.MSG_TEST_DONE not in kinds
     assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+class CancelAfterRunRunner(FakeTestRunner):
+    async def run(self, request):
+        result = await super().run(request)
+        asyncio.current_task().cancel()
+        return result
+
+
+async def test_cancel_after_run_still_delivers_test_done(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/8"
+    await env.push(ref, {".devlab.toml": SPEC})
+    job_id = await env.submit(ref)
+    worker = env.worker(CancelAfterRunRunner(output=PASSED))
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert protocol.MSG_TEST_DONE in await env.inbox_kinds()
+    assert worker.jobs == []
+    assert load_model(ExecutorState, env.tmp_path / "exec" / STATE_FILE).current is None
 
 
 async def test_cursor_survives_restart(env):

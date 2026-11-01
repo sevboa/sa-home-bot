@@ -38,11 +38,35 @@ class PodmanTestRunner:
         self._cfg = cfg
         self._wrapper = WrapperClient(cfg, spawn, pause)
         self._active: dict[str, _Active] = {}
+        self._cleanups: dict[str, asyncio.Task[None]] = {}
+
+    async def aclose(self) -> None:
+        pending = list(self._cleanups.values())
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _await_cleanup(self, name: str) -> None:
+        pending = self._cleanups.get(name)
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+
+    def _cleanup_later(self, name: str) -> None:
+        task = asyncio.ensure_future(self._wrapper.cleanup(name))
+        self._cleanups[name] = task
+
+        def forget(done: asyncio.Task[None]) -> None:
+            if self._cleanups.get(name) is done:
+                del self._cleanups[name]
+            if not done.cancelled() and done.exception() is not None:
+                log.warning("cleanup %s: %s", name, done.exception())
+
+        task.add_done_callback(forget)
 
     async def run(self, request: RunRequest) -> RunResult:
         name = job_name(request.job_id)
         if request.job_id in self._active:
             raise RunnerError(f"задание {request.job_id} уже выполняется")
+        await self._await_cleanup(name)
         active = _Active(name=name)
         self._active[request.job_id] = active
         active.task = asyncio.ensure_future(self._pipeline(request, active))
@@ -67,6 +91,7 @@ class PodmanTestRunner:
 
     async def _pipeline(self, request: RunRequest, active: _Active) -> RunResult:
         name = active.name
+        deferred = False
         try:
             await self._wrapper.push_tree("sync-in", name, request.workdir)
             recipe = ImageRecipe(
@@ -87,9 +112,12 @@ class PodmanTestRunner:
             if result.timed_out:
                 await self._wrapper.remove_container(name)
             await self._sync_out(name, request.workdir)
+            self._cleanup_later(name)
+            deferred = True
             return result
         finally:
-            await asyncio.shield(self._wrapper.cleanup(name))
+            if not deferred:
+                await asyncio.shield(self._wrapper.cleanup(name))
 
     async def _sync_out(self, name: str, workdir: Path) -> None:
         try:

@@ -20,7 +20,7 @@ from sa_home_bot.devlab.executor.mirror import (
     check_project_name,
     remote_url,
 )
-from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest, TestRunner
+from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest, RunResult, TestRunner
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, parse_spec
 from sa_home_bot.devlab.hub.queue import Job
 from sa_home_bot.utils.files import load_model, save_model
@@ -219,6 +219,13 @@ class TestWorker(WorkerLoops):
         try:
             mirror = self._mirror(job.project)
             await self._run_job(job, ref, mirror, workdir)
+        except asyncio.CancelledError:
+            shutil.rmtree(workdir, ignore_errors=True)
+            self._stopped.discard(job.id)
+            self._current = None
+            self._busy.finished(job.id)
+            self._save(current=None)
+            raise
         except Exception as exc:
             text = self.scrub(f"{type(exc).__name__}: {exc}")[:FAILED_TEXT_CHARS]
             log.warning("Задание %s не выполнено: %s", job.id, text)
@@ -274,6 +281,18 @@ class TestWorker(WorkerLoops):
         if job.id in self._stopped:
             await self._hub.post(job.id, protocol.MSG_STOPPED, {})
             return
+        delivery = asyncio.ensure_future(
+            self._deliver(job, workdir, result, duration, spec.timeout_s)
+        )
+        try:
+            await asyncio.shield(delivery)
+        except asyncio.CancelledError:
+            await asyncio.gather(delivery, return_exceptions=True)
+            raise
+
+    async def _deliver(
+        self, job: Job, workdir: Path, result: RunResult, duration: float, timeout_s: float
+    ) -> None:
         junit_path = workdir / JUNIT_FILE
         junit = junit_path.read_bytes() if junit_path.is_file() else None
         output = result.output[-protocol.LOG_MAX_BYTES :]
@@ -287,7 +306,7 @@ class TestWorker(WorkerLoops):
         exit_code = result.exit_code
         if result.timed_out:
             exit_code = TIMEOUT_EXIT_CODE
-            tail = f"[таймаут {spec.timeout_s:g} с]\n{tail}"
+            tail = f"[таймаут {timeout_s:g} с]\n{tail}"
         await self._hub.post(
             job.id,
             protocol.MSG_TEST_DONE,

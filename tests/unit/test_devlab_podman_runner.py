@@ -95,7 +95,9 @@ def request(tmp_path, **kwargs) -> RunRequest:
 
 async def test_full_pipeline_argv_and_junit(tmp_path):
     fake = FakeWrapper(junit=b"<testsuites/>")
-    result = await make_runner(fake).run(request(tmp_path))
+    runner = make_runner(fake)
+    result = await runner.run(request(tmp_path))
+    await runner.aclose()
     assert result.exit_code == 0 and result.output == b"ok\n" and not result.timed_out
     assert fake.commands() == [
         "sync-in",
@@ -125,7 +127,9 @@ async def test_cached_image_skips_build(tmp_path):
     files = images.read_setup_files(tmp_path, req.setup_files)
     tag = images.image_tag(IMAGE, req.setup, files, ())
     fake = FakeWrapper(images=[tag])
-    await make_runner(fake).run(req)
+    runner = make_runner(fake)
+    await runner.run(req)
+    await runner.aclose()
     assert "build" not in fake.commands()
 
 
@@ -147,7 +151,9 @@ async def test_timeout_inside_container_sets_flag(tmp_path):
 async def test_outer_timeout_kills_container(tmp_path, monkeypatch):
     monkeypatch.setattr(wrapper, "EXEC_GRACE_S", 0.05)
     fake = FakeWrapper(block_exec=True)
-    result = await make_runner(fake).run(request(tmp_path, timeout_s=0.01))
+    runner = make_runner(fake)
+    result = await runner.run(request(tmp_path, timeout_s=0.01))
+    await runner.aclose()
     assert result.timed_out
     assert fake.commands()[-2:] == ["rm", "clean"]
     commands = fake.commands()
@@ -165,6 +171,50 @@ async def test_cancel_kills_container_and_run_returns(tmp_path):
     assert fake.commands()[-2:] == ["rm", "clean"]
     assert "sync-out" not in fake.commands()
     await runner.cancel("abc123")
+
+
+async def test_result_returned_before_cleanup_finishes(tmp_path):
+    fake = FakeWrapper()
+    release = asyncio.Event()
+    inner = fake.__call__
+
+    async def gated(argv, **kwargs):
+        if argv[5] == "clean":
+            await release.wait()
+        return await inner(argv, **kwargs)
+
+    runner = podman.PodmanTestRunner(DevlabConfig(), spawn=gated)
+    result = await asyncio.wait_for(runner.run(request(tmp_path)), 5)
+    assert result.exit_code == 0
+    assert "clean" not in fake.commands()
+    release.set()
+    await runner.aclose()
+    assert fake.commands()[-1] == "clean"
+
+
+async def test_next_run_waits_for_pending_cleanup(tmp_path):
+    fake = FakeWrapper()
+    release = asyncio.Event()
+    inner = fake.__call__
+    gate = {"on": True}
+
+    async def gated(argv, **kwargs):
+        if argv[5] == "clean" and gate["on"]:
+            await release.wait()
+        return await inner(argv, **kwargs)
+
+    runner = podman.PodmanTestRunner(DevlabConfig(), spawn=gated)
+    await runner.run(request(tmp_path))
+    second = asyncio.create_task(runner.run(request(tmp_path)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert fake.commands().count("sync-in") == 1
+    gate["on"] = False
+    release.set()
+    await asyncio.wait_for(second, 5)
+    await runner.aclose()
+    assert fake.commands().count("sync-in") == 2
+    assert fake.commands().count("clean") == 2
 
 
 async def test_cancel_unknown_job_is_noop():
