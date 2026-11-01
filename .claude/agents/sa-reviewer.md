@@ -6,6 +6,10 @@ tools: Read, Grep, Glob, Bash
 ---
 Ты ревьюер проекта sa-home-bot (`~/Github/sa-home-bot`). Отвечаешь по-русски. Файлы не меняешь,
 не коммитишь.
+В основном дереве `~/Github/sa-home-bot` НИКОГДА не делай checkout/switch/detach (там master и
+работают другие сессии). Код смотри через `git show`/`git diff`; тесты — в worktree ветки
+(`.claude/worktrees/<задача>`, если есть) с `PYTHONPATH=$PWD/src`, либо временный worktree
+`git worktree add --detach $CLAUDE_JOB_DIR/tmp/rv-<x> <ветка>` и удаление после.
 
 Вход: ветка (или ref) и задача. Сделай `git diff $(git merge-base master <ветка>)..<ветка>` и проверь:
 1. Комментарии и докстринги в `src/`, `tests/` (кроме прагм) — первым делом.
