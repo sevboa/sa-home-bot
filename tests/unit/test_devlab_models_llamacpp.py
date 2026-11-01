@@ -19,6 +19,7 @@ from sa_home_bot.devlab.models.backends import (
 from sa_home_bot.devlab.models.gateway import Gateway
 from sa_home_bot.devlab.models.ledger import Ledger
 from sa_home_bot.devlab.models.limits import RateWindow
+from sa_home_bot.devlab.models.slice import SliceControl
 from sa_home_bot.utils.process import ProcResult
 
 MODEL = "flint"
@@ -166,7 +167,7 @@ async def test_argv_has_slice_weight_taskset_threads_context_and_no_gpu():
     assert argv[:4] == ["systemd-run", "--user", "--quiet", "--collect"]
     assert f"--unit={model_unit(MODEL)}" in argv
     assert f"--slice={protocol.DEVLAB_SLICE}" in argv
-    assert f"--property=CPUWeight={protocol.DEVLAB_SLICE_CPU_WEIGHT}" in argv
+    assert not any(arg.startswith("--property=CPUWeight") for arg in argv)
     start = argv.index("taskset")
     assert argv[start : start + 4] == ["taskset", "-c", "0-5", "/opt/llama-server"]
     tail = argv[start + 3 :]
@@ -180,7 +181,7 @@ async def test_argv_has_slice_weight_taskset_threads_context_and_no_gpu():
 
 
 async def test_argv_without_cpus_threads_context_has_no_taskset():
-    spec = DevlabModelConfig(kind="llamacpp", gguf=GGUF)
+    spec = DevlabModelConfig(kind="llamacpp", gguf=GGUF, threads=0, threads_night=0, cpus="")
     argv = LlamaCppBackend(MODEL, spec, binary="llama-server", port=8731).argv()
     assert "taskset" not in argv
     assert "--threads" not in argv
@@ -332,3 +333,84 @@ async def test_gateway_heartbeat_loaded_and_503(make, systemd, tmp_path):
     finally:
         await client.close()
         await ledger.close()
+
+
+def option(argv: list[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def test_llamacpp_defaults_come_from_the_stand():
+    spec = DevlabModelConfig(kind="llamacpp", gguf=GGUF)
+    assert (spec.threads, spec.threads_night, spec.cpus, spec.cpus_night) == (
+        8,
+        12,
+        "0-5,12-17",
+        "",
+    )
+    explicit = DevlabModelConfig(kind="llamacpp", gguf=GGUF, threads=6, cpus="")
+    assert (explicit.threads, explicit.cpus) == (6, "")
+
+
+@pytest.mark.parametrize("cpus", ["a", "0-3;id", "-1"])
+def test_bad_cpus_are_rejected_in_config(cpus):
+    with pytest.raises(ValueError):
+        DevlabModelConfig(kind="llamacpp", gguf=GGUF, cpus=cpus)
+    with pytest.raises(ValueError):
+        DevlabModelConfig(kind="llamacpp", gguf=GGUF, cpus_night=cpus)
+
+
+async def test_day_argv_uses_day_cores_and_threads_night_argv_all_cores():
+    spec = DevlabModelConfig(kind="llamacpp", gguf=GGUF)
+    systemd = FakeSystemd()
+    control = SliceControl(systemd)
+    backend = LlamaCppBackend(MODEL, spec, binary="llama-server", port=8731, control=control)
+    day = backend.argv()
+    assert day[day.index("taskset") + 1 : day.index("taskset") + 3] == ["-c", "0-5,12-17"]
+    assert option(day, "--threads") == "8"
+    await control.set_night(True)
+    night = backend.argv()
+    assert "taskset" not in night
+    assert option(night, "--threads") == "12"
+    await control.set_night(False)
+    assert option(backend.argv(), "--threads") == "8"
+
+
+async def test_night_without_threads_night_keeps_day_threads():
+    spec = DevlabModelConfig(kind="llamacpp", gguf=GGUF, threads=6, threads_night=0)
+    control = SliceControl(FakeSystemd())
+    control.night = True
+    argv = LlamaCppBackend(MODEL, spec, binary="x", port=8731, control=control).argv()
+    assert option(argv, "--threads") == "6"
+
+
+def weights(systemd: FakeSystemd) -> list[str]:
+    prefix = ["systemctl", "--user", "set-property", "--runtime"]
+    return [c[-1] for c in systemd.calls if c[:4] == prefix]
+
+
+async def test_slice_weight_is_applied_after_start_and_follows_night(make, systemd, llama):
+    backend = make()
+    await request(backend)
+    started = next(i for i, c in enumerate(systemd.calls) if c[0] == "systemd-run")
+    assert systemd.calls[started + 1] == [
+        "systemctl",
+        "--user",
+        "set-property",
+        "--runtime",
+        protocol.DEVLAB_SLICE,
+        "CPUWeight=10",
+    ]
+    await backend.control.set_night(True)
+    await backend.control.set_night(False)
+    assert weights(systemd) == ["CPUWeight=10", "CPUWeight=100", "CPUWeight=10"]
+
+
+async def test_freeze_and_thaw_address_the_slice():
+    systemd = FakeSystemd()
+    control = SliceControl(systemd)
+    await control.freeze()
+    await control.thaw()
+    assert systemd.calls == [
+        ["systemctl", "--user", "freeze", protocol.DEVLAB_SLICE],
+        ["systemctl", "--user", "thaw", protocol.DEVLAB_SLICE],
+    ]

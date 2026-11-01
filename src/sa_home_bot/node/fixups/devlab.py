@@ -5,6 +5,7 @@ from getpass import getuser
 from pathlib import Path
 
 from sa_home_bot.config import Settings
+from sa_home_bot.devlab import protocol
 from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
 from sa_home_bot.node.fixups.privileged import (
@@ -24,6 +25,8 @@ DEVLAB_SUDOERS_FILE = "50-sa-home-devlab"
 LINGER_DIR = Path("/var/lib/systemd/linger")
 SUBUID_FILE = Path("/etc/subuid")
 SUBGID_FILE = Path("/etc/subgid")
+SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+CPU_WEIGHT_DROPIN = "50-sa-home-devlab.conf"
 SUBID_FIRST = 100000
 SUBID_COUNT = 65536
 
@@ -138,6 +141,50 @@ def make_devlab_linger_fixup(settings: Settings) -> Fixup:
     )
 
 
+def _user_uid(user: str) -> str | None:
+    result = subprocess.run(["id", "-u", user], capture_output=True, text=True)
+    uid = result.stdout.strip()
+    return uid if result.returncode == 0 and uid.isdigit() else None
+
+
+def cpu_weight_dropin_content() -> str:
+    return f"[Slice]\nCPUWeight={protocol.DEVLAB_SLICE_CPU_WEIGHT}\n"
+
+
+def cpu_weight_dropin_path(uid: str) -> Path:
+    return SYSTEMD_UNIT_DIR / f"user-{uid}.slice.d" / CPU_WEIGHT_DROPIN
+
+
+def make_devlab_cpu_weight_fixup(settings: Settings) -> Fixup:
+    user = settings.devlab.user
+
+    def check() -> bool:
+        uid = _user_uid(user)
+        return uid is not None and file_matches(
+            cpu_weight_dropin_path(uid), cpu_weight_dropin_content()
+        )
+
+    def apply() -> None:
+        uid = _user_uid(user)
+        if uid is None:
+            raise FixupError(f"пользователя {user} нет — сначала devlab-user")
+        install_root_file(
+            cpu_weight_dropin_path(uid), cpu_weight_dropin_content(), mode="0644", make_parents=True
+        )
+        run_sudo(["systemctl", "daemon-reload"])
+
+    return Fixup(
+        id="devlab-cpu-weight",
+        title=(
+            f"Вес CPU {protocol.DEVLAB_SLICE_CPU_WEIGHT} для user-слайса {user} "
+            "(контейнеры уступают живым задачам бота)"
+        ),
+        needed=needs.devlab,
+        check=check,
+        apply=apply,
+    )
+
+
 def devlab_wrapper_content(settings: Settings) -> str:
     home = devlab_home(settings)
     return f"""#!/bin/sh
@@ -215,6 +262,20 @@ rm)
     name "${{1:-}}"
     exec podman rm --force "devlab-$1"
     ;;
+pause|unpause)
+    if [ $# -ge 1 ]; then
+        name "$1"
+        exec podman "$cmd" "devlab-$1"
+    fi
+    if [ "$cmd" = pause ]; then state=running; else state=paused; fi
+    ids="$(podman ps --quiet --filter name=devlab- --filter "status=$state")"
+    [ -n "$ids" ] || exit 0
+    exec podman "$cmd" $ids
+    ;;
+interrupt)
+    name "${{1:-}}"
+    exec podman exec "devlab-$1" sh -c 'kill -TERM -1; sleep 2; kill -KILL -1'
+    ;;
 exec)
     name "${{1:-}}"; number "${{2:-}}"
     id="$1"; limit="$2"; shift 2
@@ -231,8 +292,8 @@ prune)
     exec podman image prune --force
     ;;
 *)
-    fail "подкоманды: sync-in refresh sync-out clean build create start stop rm exec" \\
-        "ps images prune"
+    fail "подкоманды: sync-in refresh sync-out clean build create start stop rm pause" \\
+        "unpause interrupt exec ps images prune"
     ;;
 esac
 """
@@ -271,5 +332,6 @@ def devlab_fixups(settings: Settings) -> list[Fixup]:
         make_devlab_user_fixup(settings),
         make_devlab_subids_fixup(settings),
         make_devlab_linger_fixup(settings),
+        make_devlab_cpu_weight_fixup(settings),
         make_devlab_sudoers_fixup(settings),
     ]

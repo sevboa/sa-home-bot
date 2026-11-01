@@ -23,6 +23,8 @@ from sa_home_bot.devlab.executor.worker import (
     forever,
     send_heartbeat,
 )
+from sa_home_bot.devlab.executor.wrapper import PauseClock, WrapperClient
+from sa_home_bot.devlab.neighbor import NeighborGate, start_following, stop_following
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.utils.lifespan import Lifespan
 
@@ -31,8 +33,8 @@ log = logging.getLogger(__name__)
 EXECUTOR_DIR = "executor"
 
 
-def build_runner(cfg: DevlabConfig) -> TestRunner:
-    return PodmanTestRunner(cfg)
+def build_runner(cfg: DevlabConfig, pause: PauseClock | None = None) -> TestRunner:
+    return PodmanTestRunner(cfg, pause=pause)
 
 
 def work_dir_of(cfg: DevlabConfig) -> Path:
@@ -60,7 +62,11 @@ async def run_executor(
     cfg = settings.devlab
     if not cfg.hub_url or not cfg.hub_token:
         raise RuntimeError("devlab: нужны hub_url и hub_token (роль executor)")
-    runner = runner or build_runner(cfg)
+    containers = WrapperClient(cfg)
+    gate = NeighborGate(
+        freeze=containers.pause, thaw=containers.unpause, freeze_max_s=cfg.freeze_max_s
+    )
+    runner = runner or build_runner(cfg, gate)
     work_dir = work_dir_of(cfg)
     work_dir.mkdir(parents=True, exist_ok=True)
     hub = ExecutorHub(cfg.hub_url, cfg.hub_token)
@@ -78,7 +84,7 @@ async def run_executor(
     agent = AgentWorker(
         hub,
         models or gateways,
-        sandboxes or podman_sandbox_factory(cfg),
+        sandboxes or podman_sandbox_factory(cfg, pause=gate),
         AgentSettings(**vars(worker_settings), limits=agent_limits(cfg)),
         catalog,
         busy,
@@ -89,6 +95,7 @@ async def run_executor(
     lifespan.install_signal_handlers()
     await server.start()
     log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
+    neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
         asyncio.create_task(agent.run(heartbeat=False)),
@@ -102,6 +109,7 @@ async def run_executor(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await stop_following(neighbor, gate)
         log.info("Останов службы devlab...")
         await gateways.close()
         await server.stop()

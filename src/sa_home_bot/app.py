@@ -34,7 +34,7 @@ from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
-from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.setup import build_bot, build_dispatcher
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.bot.tool_debug import ToolCalls
@@ -44,8 +44,10 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.node.events import ACTION_LLM_SET_NIGHT_MODE
 from sa_home_bot.node.instances import slot_key
 from sa_home_bot.people import seed as people_seed
+from sa_home_bot.proto.addresses import LLM_ADDRESS
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -202,6 +204,14 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
 
     active_ai_chats = ActiveAiChats()
 
+    async def _send_night_mode(night: bool) -> None:
+        link_to_node = _get_node_link()
+        if link_to_node is None:
+            raise ServiceUnavailableError("нет связи с нодой")
+        await link_to_node.command(
+            ACTION_LLM_SET_NIGHT_MODE, {"night": night}, dst=LLM_ADDRESS, timeout=10.0
+        )
+
     away = AwayService(store, settings)
     away_runner = AwayRunner(
         away,
@@ -219,6 +229,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         ),
         book,
         notifier,
+        night_sink=_send_night_mode,
     )
     away_task = asyncio.create_task(away_runner.run(), name="away")
     people_seed_task = asyncio.create_task(

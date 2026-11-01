@@ -111,7 +111,8 @@ async def test_full_pipeline_argv_and_junit(tmp_path):
     assert fake.calls[0][0][:5] == ["sudo", "-n", "-u", "devlab", WRAPPER]
     tag = fake.args_of("build")[0][2]
     assert fake.args_of("create")[0][1:] == ["abc123", tag, "12", "24g", "6-11,18-23"]
-    assert fake.args_of("exec")[0][1:] == ["abc123", "60", "python -m pytest -q"]
+    backstop = str(wrapper.exec_backstop(60))
+    assert fake.args_of("exec")[0][1:] == ["abc123", backstop, "python -m pytest -q"]
     assert fake.args_of("sync-out")[0][1:] == ["abc123", JUNIT_FILE]
     assert (tmp_path / JUNIT_FILE).read_bytes() == b"<testsuites/>"
     dockerfile = fake.calls[fake.commands().index("build")][1].decode()

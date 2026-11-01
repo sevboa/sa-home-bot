@@ -22,6 +22,7 @@ from sa_home_bot.devlab.executor.runner import JUNIT_FILE
 from sa_home_bot.devlab.executor.spec import ProjectSpec
 from sa_home_bot.devlab.executor.wrapper import (
     SYNC_TIMEOUT_S,
+    PauseClock,
     RunnerError,
     Spawn,
     WrapperClient,
@@ -43,13 +44,14 @@ class PodmanSandbox:
         spec: AgentSpec,
         baseline: dict[str, str] | None = None,
         spawn: Spawn = process.run,
+        pause: PauseClock | None = None,
     ) -> None:
         self._cfg = cfg
         self._name = job_name(job_id)
         self._workdir = workdir
         self._recipe = recipe
         self._spec = spec
-        self._wrapper = WrapperClient(cfg, spawn)
+        self._wrapper = WrapperClient(cfg, spawn, pause)
         self._local = LocalSandbox(workdir, baseline)
         self._lock = asyncio.Lock()
         self._tag = ""
@@ -211,11 +213,20 @@ class SandboxRequest:
 SandboxFactory = Callable[[SandboxRequest], ManagedSandbox]
 
 
-def podman_sandbox_factory(cfg: DevlabConfig, spawn: Spawn = process.run) -> SandboxFactory:
+def podman_sandbox_factory(
+    cfg: DevlabConfig, spawn: Spawn = process.run, pause: PauseClock | None = None
+) -> SandboxFactory:
     def make(request: SandboxRequest) -> PodmanSandbox:
         recipe = ImageRecipe.from_section(request.project.test, cfg.test_image)
         return PodmanSandbox(
-            cfg, request.job_id, request.workdir, recipe, request.spec, request.baseline, spawn
+            cfg,
+            request.job_id,
+            request.workdir,
+            recipe,
+            request.spec,
+            request.baseline,
+            spawn,
+            pause,
         )
 
     return make

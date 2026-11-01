@@ -95,11 +95,11 @@ remote = true
 `--n-gpu-layers 0` фиксирован, GPU днём принадлежит gemma. Ollama не участвует.
 - Запуск по требованию: первый запрос поднимает `llama-server` как transient user-юнит
   `systemd-run --user --quiet --collect --unit=sa-home-devlab-model-<имя> --slice=sa-home-devlab.slice
-  --property=CPUWeight=10 [taskset -c <cpus>] <llamacpp_bin> --model <gguf> --host 127.0.0.1
+  [taskset -c <cpus>] <llamacpp_bin> --model <gguf> --host 127.0.0.1
   --port <порт> --n-gpu-layers 0 [--ctx-size <context>] [--threads <threads>] <extra_args>`.
   Имена юнита и slice, вес — `devlab/protocol.py` (`MODEL_UNIT_PREFIX`, `DEVLAB_SLICE`,
-  `DEVLAB_SLICE_CPU_WEIGHT`), оттуда их берёт 60.6. Заморозка slice и ночной режим — 60.6, здесь
-  не сделаны; `threads_night` пока только хранится.
+  `DEVLAB_SLICE_CPU_WEIGHT`, `DEVLAB_SLICE_CPU_WEIGHT_NIGHT`). Вес и заморозка slice, дневные и
+  ночные потоки — раздел «Соседство с ботом» ниже.
 - Готовность: опрос `GET /health` раз в секунду, таймаут 900 с (`LLAMA_HEALTH_TIMEOUT_S`);
   перед каждым опросом проверяется `systemctl --user is-active`. Запуск идёт под lock, параллельные
   первые запросы ждут один процесс. Перед стартом юнит гасится (хвост прошлого запуска).
@@ -123,9 +123,59 @@ gguf = "/models/sa-home/devlab/flint.gguf"
 context = 32768
 threads = 8
 threads_night = 12
-cpus = "0-11"
+cpus = "0-5,12-17"
 idle_unload_s = 600
 ```
+
+## Соседство с ботом на CPU (60.6.2, код без выката)
+Решение владельца 2026-10-31: на mycraft распознавание речи, озвучка и картинки бота идут на CPU,
+их ждёт человек, поэтому llama.cpp им уступает. Цифры — `/mnt/data/claude/dev/stage60-stand/REPORT.md`,
+«Влияние на бота»: без ограничений озвучка замедляется вдвое (21–31 с вместо 12–21), `nice` не
+помогает (30–42 с), `CPUWeight=10` с `taskset` на часть ядер возвращает 17–25 с при 5,2–5,5 ток/с модели.
+
+Вес. Вес стоит на самом slice: `systemctl --user set-property --runtime sa-home-devlab.slice
+CPUWeight=<вес>` (`models/slice.py::SliceControl`). Вес на юните внутри slice с одним ребёнком ничего
+не решает, он делит CPU только с соседями по slice, а не с ботом (служба бота живёт в `app.slice`
+того же user-менеджера, вес 100). Поэтому `--property=CPUWeight` у `systemd-run` убран, а вес
+slice ставится сразу после успешного `systemd-run` (пустой slice systemd выгружает, свойство
+пропало бы) и при каждой смене режима. Днём 10, ночью 100.
+
+Потоки и ядра. Берутся из `[devlab_models.<имя>]`: `threads`, `threads_night`, `cpus`, `cpus_night`.
+У `kind = "llamacpp"` умолчания из стенда: `threads = 8`, `threads_night = 12`, `cpus = "0-5,12-17"`,
+`cpus_night = ""` (без `taskset`). Умолчания рассчитаны на mycraft (24 логических ядра), на другой
+машине их надо переопределить (`cpus = ""` убирает `taskset`). Ночью `threads_night = 0` оставляет
+дневные потоки. Потоки и ядра читаются при подъёме `llama-server`: уже запущенный процесс на лету не
+перезапускается, новые значения подхватятся при следующей загрузке (после `idle_unload_s`). Вес
+slice меняется на лету.
+
+Пауза на живую задачу бота.
+- Служба `llm` на время `transcribe_voice`, `synthesize_speech`, `generate_image` и `item_portrait`
+  шлёт локальные события `llm_cpu_task_started` и `llm_cpu_task_finished` (`task_id`, `kind`:
+  `stt`/`tts`/`image`); пока команда идёт, `get_state` отдаёт её id в `cpu_tasks`.
+- Шлюз (только если есть хоть одна `llamacpp`-модель) держит соединение с `[llm].socket` (или
+  `[devlab_models].neighbor_socket`) и подписан на события (`devlab/neighbor.py::follow_llm`). По
+  первому `started` — `systemctl --user freeze sa-home-devlab.slice`, по `finished` последней
+  задачи — `systemctl --user thaw`. Замораживается только slice моделей: служба шлюза, сам HTTP и
+  службы бота не затрагиваются.
+- Вложенные задачи: счёт по `task_id`, разморозка только когда множество пусто.
+- Страховки: `freeze_max_s` (300 с) размораживает, если `finished` не пришёл (после этого поздний
+  `finished` безвреден, а новый `started` замораживает заново); обрыв соединения с `llm` тоже
+  размораживает, потому что события могли потеряться; при подключении состояние берётся из
+  `get_state`, а не из потока событий.
+- Заморозка не обрывает запрос клиента: ответ просто задерживается. Чтение апстрима ждёт данные до
+  300 с (`UPSTREAM_TIMEOUT.sock_read`), столько же по умолчанию `freeze_max_s`, поэтому очень
+  долгая заморозка посреди стрима может закончиться таймаутом чтения. Если на проде такое
+  случится, уменьшить `freeze_max_s`.
+
+Ночной режим. Пока Альфред в отлучке (`away`), у бота нет живых CPU-задач.
+- Состояние `away` живёт в БД бота (alfred), на mycraft его не видно. `AwayRunner` (раз в минуту)
+  шлёт службе `llm` команду `set_night_mode {night}` (адрес `LLM_ADDRESS` через ноду), `night`
+  истинно только в фазе `away` (не в `returning`); повтор раз в 300 с, пока ночь, и после каждого
+  сбоя доставки, чтобы перезапуск `llm` не терял режим.
+- `llm` хранит флаг, отдаёт его в `get_state` и по смене шлёт `llm_night_mode`. Шлюз по событию
+  меняет вес slice на 100 и переключает `threads_night`/`cpus_night` для следующего подъёма; по
+  `away back` возвращает вес 10 и дневные потоки.
+- Если mycraft выключен или `llm` недоступна, команда не доходит, режим остаётся прежним (дневным).
 
 ## Не сделано
 Выкат (назначение службы на jeeves/wooster, токены, instance-конфиги) — за владельцем, чек-лист в

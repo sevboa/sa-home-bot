@@ -7,12 +7,15 @@ import logging
 from aiohttp import web
 
 from sa_home_bot.config import Settings
+from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.app import tailscale_address
 from sa_home_bot.devlab.models.backends import build_backend
 from sa_home_bot.devlab.models.gateway import Gateway
 from sa_home_bot.devlab.models.hubclient import HEARTBEAT_INTERVAL_S, HubClient
 from sa_home_bot.devlab.models.ledger import Ledger
 from sa_home_bot.devlab.models.limits import RateWindow
+from sa_home_bot.devlab.models.slice import SliceControl
+from sa_home_bot.devlab.neighbor import NeighborGate, start_following, stop_following
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
@@ -36,7 +39,20 @@ async def run_models(settings: Settings) -> None:
             "devlab_models: нужны hub_url, hub_token и хотя бы одна [devlab_models.<имя>]"
         )
     host = cfg.bind_host or await tailscale_address()
-    backends = {name: build_backend(name, spec, cfg) for name, spec in cfg.entries.items()}
+    control = SliceControl()
+    backends = {
+        name: build_backend(name, spec, cfg, control) for name, spec in cfg.entries.items()
+    }
+    local = any(spec.kind == protocol.MODEL_KIND_LLAMACPP for spec in cfg.entries.values())
+    gate = NeighborGate(
+        freeze=control.freeze,
+        thaw=control.thaw,
+        freeze_max_s=cfg.freeze_max_s,
+        on_night=control.set_night,
+    )
+    neighbor = (
+        start_following(gate, cfg.neighbor_socket or settings.llm.socket) if local else None
+    )
     windows = {name: RateWindow(spec.rpm) for name, spec in cfg.entries.items()}
     ledger = Ledger(cfg.data_dir)
     await ledger.open()
@@ -57,6 +73,8 @@ async def run_models(settings: Settings) -> None:
         beat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await beat
+        if neighbor is not None:
+            await stop_following(neighbor, gate)
         log.info("Останов службы devlab_models...")
         await runner.cleanup()
         for backend in backends.values():

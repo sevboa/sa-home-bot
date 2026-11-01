@@ -10,6 +10,7 @@ from sa_home_bot.devlab.executor.image import ImageRecipe, ensure_image
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest, RunResult
 from sa_home_bot.devlab.executor.wrapper import (
     SYNC_TIMEOUT_S,
+    PauseClock,
     RunnerError,
     Spawn,
     WrapperClient,
@@ -31,9 +32,11 @@ class _Active:
 
 
 class PodmanTestRunner:
-    def __init__(self, cfg: DevlabConfig, spawn: Spawn = process.run) -> None:
+    def __init__(
+        self, cfg: DevlabConfig, spawn: Spawn = process.run, pause: PauseClock | None = None
+    ) -> None:
         self._cfg = cfg
-        self._wrapper = WrapperClient(cfg, spawn)
+        self._wrapper = WrapperClient(cfg, spawn, pause)
         self._active: dict[str, _Active] = {}
 
     async def run(self, request: RunRequest) -> RunResult:

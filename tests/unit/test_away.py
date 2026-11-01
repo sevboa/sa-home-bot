@@ -37,6 +37,7 @@ from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
+from tests.unit.support.fakes import Clock as FloatClock
 
 T0 = datetime(2026, 10, 4, 12, 0, 0, tzinfo=UTC)
 UTC_TZ = UTC
@@ -751,6 +752,68 @@ async def test_runner_delivers_claude_notices_to_owner(service):
     assert [(c, t) for c, t, _ in notifier.sent] == [(999, "Claude отправил Альфреда в город.")]
     await runner.tick()
     assert len(notifier.sent) == 1
+
+
+class NightLog:
+    def __init__(self) -> None:
+        self.sent: list[bool] = []
+        self.fail = False
+
+    async def __call__(self, night: bool) -> None:
+        if self.fail:
+            raise ConnectionError("llm недоступна")
+        self.sent.append(night)
+
+
+async def test_runner_publishes_night_mode_on_changes_and_refreshes_while_away(service, clock):
+    log = NightLog()
+    ticks = FloatClock(0.0)
+    runner = AwayRunner(
+        service,
+        NoReturn(),
+        _owner_book(),
+        FakeNotifier(),
+        night_sink=log,
+        night_refresh_s=300.0,
+        clock=ticks,
+    )
+    await runner.tick()
+    await runner.tick()
+    assert log.sent == [False]
+    await _away(service, hours=3)
+    await runner.tick()
+    assert log.sent == [False, True]
+    ticks.advance(seconds=100)
+    await runner.tick()
+    assert log.sent == [False, True]
+    ticks.advance(seconds=250)
+    await runner.tick()
+    assert log.sent == [False, True, True]
+    await service.back()
+    await runner.tick()
+    assert log.sent[-1] is False and len(log.sent) == 4
+
+
+async def test_runner_retries_night_mode_after_a_failed_delivery(service):
+    log = NightLog()
+    runner = AwayRunner(service, NoReturn(), _owner_book(), FakeNotifier(), night_sink=log)
+    await _away(service, hours=3)
+    log.fail = True
+    await runner.tick()
+    assert log.sent == []
+    log.fail = False
+    await runner.tick()
+    assert log.sent == [True]
+
+
+async def test_runner_returning_phase_is_not_night(service):
+    log = NightLog()
+    runner = AwayRunner(service, NoReturn(), _owner_book(), FakeNotifier(), night_sink=log)
+    await _away(service, hours=3)
+    await runner.tick()
+    await service.mark_phase_returning()
+    await runner.tick()
+    assert log.sent == [True, False]
 
 
 class ReturnEnv:

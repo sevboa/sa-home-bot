@@ -6332,6 +6332,18 @@ jeeves. Агент коммитит каждый чих в ветку прогр
   `agent-state.json`, `release`/`resume`/`stop`/`answer` из poll, непустой `agent-outbox.json`);
   один трекер на `TestWorker` и `AgentWorker`. Описание: `docs/devlab/executor.md`, `agent.md`,
   `deploy.md`. Дальше 60.6.2 (соседство с ботом на CPU).
+- **60.6.2 ✅ Соседство с ботом на CPU** (2026-11-01, ветка stage60-6-2, код без выката, не влито):
+  `llm` шлёт `llm_cpu_task_started`/`finished` (`task_id`, `kind`) вокруг распознавания, озвучки,
+  картинок и портрета предмета, `cpu_tasks` и `night` в `get_state`, действие `set_night_mode`
+  (`node/events.py`). `devlab/neighbor.py::NeighborGate` + `follow_llm`: счёт задач, заморозка по
+  первой, разморозка по последней, `freeze_max_s` (300 с), разморозка при обрыве связи, ночной флаг.
+  Шлюз: вес на самом slice (`models/slice.py`, день 10 / ночь 100, `set-property --runtime`),
+  `systemctl --user freeze|thaw sa-home-devlab.slice`, умолчания стенда `threads = 8`,
+  `threads_night = 12`, `cpus = "0-5,12-17"`, `cpus_night`. Исполнитель: подкоманды обёртки `pause`,
+  `unpause` (без имени: все `devlab-*`), `interrupt`; таймаут команд считается без заморозки
+  (хостовый срок + страховка `exec_backstop`), `exec` ждёт разморозки; фикс `devlab-cpu-weight`
+  (`CPUWeight=10` слайсу пользователя `devlab`). Бот: `AwayRunner` шлёт `set_night_mode` по фазе
+  `away`. Описание и вопросы для живой проверки: `docs/devlab/models.md`, `executor.md`, `deploy.md`.
 
 **Соседство с ботом на CPU** (решение владельца 2026-10-31). На mycraft GPU днём держит только gemma;
 распознавание речи, озвучка и картинки бота идут на CPU, их ждёт человек. Фоновые модели (llama.cpp,

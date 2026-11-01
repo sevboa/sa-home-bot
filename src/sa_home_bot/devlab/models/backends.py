@@ -13,7 +13,8 @@ import aiohttp
 
 from sa_home_bot.config import DevlabModelConfig, DevlabModelsConfig
 from sa_home_bot.devlab import protocol
-from sa_home_bot.utils.process import ProcResult, run
+from sa_home_bot.devlab.models.slice import Runner, SliceControl
+from sa_home_bot.utils.process import run
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +32,6 @@ LLAMA_CRASH_WINDOW_S = 600.0
 LLAMA_MAX_CRASHES = 3
 UNIT_SUFFIX = ".service"
 UNIT_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
-
-Runner = Callable[[list[str]], Awaitable[ProcResult]]
 
 
 class ModelUnavailableError(Exception):
@@ -100,8 +99,10 @@ class LlamaCppBackend(HttpBackend):
         runner: Runner = run,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        control: SliceControl | None = None,
     ) -> None:
         super().__init__(name, spec)
+        self.control = control or SliceControl(runner)
         self._binary = binary
         self._port = port
         self._runner = runner
@@ -128,10 +129,10 @@ class LlamaCppBackend(HttpBackend):
             "--collect",
             f"--unit={model_unit(self.name)}",
             f"--slice={protocol.DEVLAB_SLICE}",
-            f"--property=CPUWeight={protocol.DEVLAB_SLICE_CPU_WEIGHT}",
         ]
-        if spec.cpus:
-            command += ["taskset", "-c", spec.cpus]
+        cpus = self.control.cpus(spec.cpus, spec.cpus_night)
+        if cpus:
+            command += ["taskset", "-c", cpus]
         command += [
             self._binary,
             "--model",
@@ -145,8 +146,9 @@ class LlamaCppBackend(HttpBackend):
         ]
         if spec.context:
             command += ["--ctx-size", str(spec.context)]
-        if spec.threads:
-            command += ["--threads", str(spec.threads)]
+        threads = self.control.threads(spec.threads, spec.threads_night)
+        if threads:
+            command += ["--threads", str(threads)]
         return command + spec.extra_args
 
     async def chat(self, payload: dict[str, Any]) -> aiohttp.ClientResponse:
@@ -222,6 +224,7 @@ class LlamaCppBackend(HttpBackend):
             log.error("systemd-run для %s: %s", self.name, started.stderr_text)
             self._crashes.append(self._clock())
             raise ModelUnavailableError(f"модель {self.name!r} не удалось запустить")
+        await self.control.apply_weight()
         deadline = self._clock() + LLAMA_HEALTH_TIMEOUT_S
         while True:
             if not await self._is_active():
@@ -267,7 +270,10 @@ BACKENDS: dict[str, type[ModelBackend]] = {protocol.MODEL_KIND_OPENAI: OpenAiBac
 
 
 def build_backend(
-    name: str, spec: DevlabModelConfig, cfg: DevlabModelsConfig | None = None
+    name: str,
+    spec: DevlabModelConfig,
+    cfg: DevlabModelsConfig | None = None,
+    control: SliceControl | None = None,
 ) -> ModelBackend:
     if spec.kind != protocol.MODEL_KIND_LLAMACPP:
         return BACKENDS[spec.kind](name, spec)
@@ -279,4 +285,4 @@ def build_backend(
             f"devlab_models: локальных моделей {len(local)}, а портов "
             f"{cfg.llamacpp_port_min}-{cfg.llamacpp_port_max} не хватает"
         )
-    return LlamaCppBackend(name, spec, binary=cfg.llamacpp_bin, port=port)
+    return LlamaCppBackend(name, spec, binary=cfg.llamacpp_bin, port=port, control=control)

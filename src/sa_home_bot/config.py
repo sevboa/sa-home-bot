@@ -153,6 +153,8 @@ class DevlabConfig(BaseModel):
     poll_interval_s: float = Field(default=5.0, gt=0)
     heartbeat_interval_s: float = Field(default=30.0, gt=0)
     owner_wait_s: float = Field(default=3600.0, ge=0)
+    freeze_max_s: float = Field(default=300.0, gt=0)
+    neighbor_socket: str = ""
     test_image: str = "docker.io/library/python:3.13-slim"
     test_cpuset: str = Field(default="6-11,18-23", pattern=CPUSET_PATTERN)
     test_cpus: float = Field(default=12.0, gt=0)
@@ -224,6 +226,17 @@ class DevlabHubConfig(BaseModel):
     hub_node: str = "alfred"
 
 
+OPTIONAL_CPUSET_PATTERN = r"^(|" + CPUSET_PATTERN[1:-1] + ")$"
+
+LLAMACPP_DEFAULTS: dict[str, Any] = {
+    "free": True,
+    "remote": False,
+    "threads": 8,
+    "threads_night": 12,
+    "cpus": "0-5,12-17",
+}
+
+
 class DevlabModelConfig(BaseModel):
     kind: Literal["openai", "llamacpp"] = "openai"
     base_url: str = ""
@@ -241,7 +254,8 @@ class DevlabModelConfig(BaseModel):
     gguf: str = ""
     threads: int = Field(default=0, ge=0)
     threads_night: int = Field(default=0, ge=0)
-    cpus: str = ""
+    cpus: str = Field(default="", pattern=OPTIONAL_CPUSET_PATTERN)
+    cpus_night: str = Field(default="", pattern=OPTIONAL_CPUSET_PATTERN)
     idle_unload_s: int = Field(default=600, ge=0)
     extra_args: list[str] = Field(default_factory=list)
 
@@ -249,7 +263,7 @@ class DevlabModelConfig(BaseModel):
     @classmethod
     def _local_defaults(cls, data: Any) -> Any:
         if isinstance(data, dict) and data.get("kind") == "llamacpp":
-            return {"free": True, "remote": False, **data}
+            return {**LLAMACPP_DEFAULTS, **data}
         return data
 
     @model_validator(mode="after")
@@ -268,6 +282,8 @@ class DevlabModelsConfig(BaseModel):
     llamacpp_bin: str = "llama-server"
     llamacpp_port_min: int = Field(default=8730, ge=1, le=65535)
     llamacpp_port_max: int = Field(default=8749, ge=1, le=65535)
+    freeze_max_s: float = Field(default=300.0, gt=0)
+    neighbor_socket: str = ""
     entries: dict[str, DevlabModelConfig] = Field(default_factory=dict)
 
     @model_validator(mode="before")

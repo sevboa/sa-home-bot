@@ -9,6 +9,7 @@
 | `node_joined`, `node_down`, `node_up`, `node_leaving`, `node_returned`, `singleton_activated`, `singleton_yielded`, `update_finished`, `restart_applied` | чат `system` через `broadcast_system` (как старт/останов, `bot/lifecycle.py`) и запись в журнал `swarm_events` |
 | `llm_idle_sleep`, `llm_service_restart` | адресно в `chat_ids` из данных события (служба llm знает точный список чатов тёплого окна), мимо подписок |
 | `llm_speech_cured` | `broadcast_all` - всем подпискам, включая гостей без opt-in (разовая новость Логопеда) |
+| `llm_cpu_task_started`, `llm_cpu_task_finished`, `llm_night_mode` | никому в боте (обработчик их игнорирует): служебные события 60.6.2 для шлюза моделей и исполнителя devlab на той же ноде (`docs/devlab/models.md`) |
 | `idle_power_blocked` | только админам (`notify_admins`) с кнопкой «закрыть SSH-сессии и выключить» (действие `close_ssh_sessions` службы node) |
 | `task_prewake`, `task_result`, `deliver_message` | службы tasks; адресно по `meta` |
 | `tool_call` | подписки с `event_types=["alfred_tool_call"]` (`notify_tool_call`), адресата в событии нет |

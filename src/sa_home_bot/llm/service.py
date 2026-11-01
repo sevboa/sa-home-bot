@@ -35,10 +35,22 @@ from sa_home_bot.llm.prompt import (
 from sa_home_bot.llm.speech_therapy import SpeechTherapist
 from sa_home_bot.llm.ttl_store import TtlStore
 from sa_home_bot.node.events import (
+    ACTION_LLM_SET_NIGHT_MODE,
+    EVENT_LLM_CPU_TASK_FINISHED,
+    EVENT_LLM_CPU_TASK_STARTED,
     EVENT_LLM_IDLE_SLEEP,
+    EVENT_LLM_NIGHT_MODE,
     EVENT_LLM_SERVICE_RESTART,
     EVENT_LLM_SPEECH_CURED,
     EVENT_LLM_WENT_IDLE,
+    LLM_CPU_KIND_IMAGE,
+    LLM_CPU_KIND_STT,
+    LLM_CPU_KIND_TTS,
+    LLM_EVENT_KIND,
+    LLM_EVENT_NIGHT,
+    LLM_EVENT_TASK_ID,
+    LLM_STATE_CPU_TASKS,
+    LLM_STATE_NIGHT,
 )
 from sa_home_bot.proto.addresses import LLM_SERVICE, ROLE_DIRECTOR, ROLE_SUMMARIZER
 from sa_home_bot.proto.chunks import CHUNK_BYTES
@@ -120,6 +132,13 @@ ITEM_PORTRAIT_BACKGROUND = "(isolated on plain light grey background)1.3"
 _ITEM_ATTEMPTS_MAX = 4
 
 ACTION_SET_SPEECH_CLEAR = "set_speech_clear"
+
+CPU_TASK_KINDS = {
+    ACTION_TRANSCRIBE_VOICE: LLM_CPU_KIND_STT,
+    ACTION_SYNTHESIZE_SPEECH: LLM_CPU_KIND_TTS,
+    ACTION_GENERATE_IMAGE: LLM_CPU_KIND_IMAGE,
+    ACTION_ITEM_PORTRAIT: LLM_CPU_KIND_IMAGE,
+}
 
 _SUMMARIZER_OPTIONS: dict[str, Any] = {"temperature": 0, "num_predict": 2048}
 
@@ -325,6 +344,8 @@ class LlmService:
         self._streaming: TtlStore[dict[str, Any]] = TtlStore(_STREAMING_ENTRY_TTL_S)
         self._stt_uploads: TtlStore[bytearray] = TtlStore(_STT_UPLOAD_TTL_S)
         self._tts_sessions: TtlStore[bytes] = TtlStore(_TTS_SESSION_TTL_S)
+        self._cpu_tasks: dict[str, str] = {}
+        self._night = False
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -650,6 +671,13 @@ class LlmService:
                 ),
                 ActionSpec(id=ACTION_WARMUP, title="Прогреть модель заранее (без ответа)"),
                 ActionSpec(
+                    id=ACTION_LLM_SET_NIGHT_MODE,
+                    title="Ночной режим: Альфред в отлучке, фоновым службам ноды можно все ядра",
+                    params=(
+                        ActionParam(name="night", type="bool", required=True, title="Включить"),
+                    ),
+                ),
+                ActionSpec(
                     id=ACTION_SET_SPEECH_CLEAR,
                     title="Включить/выключить картавость для гостя (Этап 47)",
                     params=(
@@ -667,6 +695,8 @@ class LlmService:
             "model": self._cfg.model,
             "asleep": self._asleep or not self._warmup_confirmed,
             "speech_therapy": self._speech.snapshot(),
+            LLM_STATE_CPU_TASKS: sorted(self._cpu_tasks),
+            LLM_STATE_NIGHT: self._night,
         }
 
     def _think_arg(self, args: dict[str, Any]) -> bool | str | None:
@@ -697,6 +727,40 @@ class LlmService:
         return user_id
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        kind = CPU_TASK_KINDS.get(action)
+        if kind is None:
+            return await self._dispatch_command(action, args)
+        task_id = new_id()
+        self._cpu_tasks[task_id] = kind
+        await self._emit_cpu_task(EVENT_LLM_CPU_TASK_STARTED, task_id, kind)
+        try:
+            return await self._dispatch_command(action, args)
+        finally:
+            self._cpu_tasks.pop(task_id, None)
+            await asyncio.shield(self._emit_cpu_task(EVENT_LLM_CPU_TASK_FINISHED, task_id, kind))
+
+    async def _emit_cpu_task(self, event: str, task_id: str, kind: str) -> None:
+        try:
+            await self._emit(event, {LLM_EVENT_TASK_ID: task_id, LLM_EVENT_KIND: kind})
+        except Exception:
+            log.exception("llm: не удалось эмитить %s", event)
+
+    async def _set_night_mode(self, args: dict[str, Any]) -> dict[str, Any]:
+        night = args.get("night")
+        if not isinstance(night, bool):
+            raise ProtoError(ERR_BAD_REQUEST, "night должен быть булевым значением")
+        changed = night != self._night
+        self._night = night
+        if changed:
+            try:
+                await self._emit(EVENT_LLM_NIGHT_MODE, {LLM_EVENT_NIGHT: night})
+            except Exception:
+                log.exception("llm: не удалось эмитить %s", EVENT_LLM_NIGHT_MODE)
+        return {"night": night, "changed": changed}
+
+    async def _dispatch_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == ACTION_LLM_SET_NIGHT_MODE:
+            return await self._set_night_mode(args)
         if action == ACTION_SET_SPEECH_CLEAR:
             user_id = args.get("user_id")
             clear = args.get("clear")

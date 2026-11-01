@@ -117,3 +117,45 @@ def test_refresh_creates_missing_directory(sandbox, tmp_path):
 @pytest.mark.parametrize("name", ["", "../x", "-x", "A", "a b", "a;b"])
 def test_refresh_rejects_bad_name(sandbox, name):
     assert sandbox("refresh", name, stdin=tar_of({"a": b"1"})).returncode == 2
+
+
+def test_pause_and_unpause_one_container(sandbox):
+    for command in ("pause", "unpause"):
+        result = sandbox(command, "job1")
+        assert result.returncode == 0
+        assert result.stdout.decode().split("\n")[:2] == [command, "devlab-job1"]
+
+
+@pytest.mark.parametrize("command", ["pause", "unpause", "interrupt"])
+@pytest.mark.parametrize("name", ["Bad", "a;id", "-x", "$(id)", "a b"])
+def test_pause_family_rejects_bad_name(sandbox, command, name):
+    result = sandbox(command, name)
+    assert result.returncode == 2
+    assert result.stdout == b""
+
+
+def test_interrupt_needs_a_name(sandbox):
+    assert sandbox("interrupt").returncode == 2
+
+
+def test_interrupt_signals_everything_in_the_container(sandbox):
+    result = sandbox("interrupt", "job1")
+    lines = result.stdout.decode().split("\n")
+    assert lines[:3] == ["exec", "devlab-job1", "sh"]
+    assert "kill -TERM -1" in lines[4] and "kill -KILL -1" in lines[4]
+
+
+@pytest.mark.parametrize(("command", "state"), [("pause", "running"), ("unpause", "paused")])
+def test_pause_all_selects_devlab_containers_in_the_right_state(sandbox, command, state):
+    result = sandbox(command)
+    assert result.returncode == 0
+    lines = result.stdout.decode().split("\n")
+    assert lines[0] == command
+    assert "name=devlab-" in lines and f"status={state}" in lines
+
+
+def test_unknown_command_lists_new_subcommands(sandbox):
+    result = sandbox("nope")
+    assert result.returncode == 2
+    for word in ("pause", "unpause", "interrupt"):
+        assert word in result.stderr.decode()

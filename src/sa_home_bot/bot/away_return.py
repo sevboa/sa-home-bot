@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ from sa_home_bot.proto.messages import ProtoError
 log = logging.getLogger(__name__)
 
 TICK_S = 60.0
+NIGHT_REFRESH_S = 300.0
+
+NightSink = Callable[[bool], Awaitable[None]]
 
 RETURN_NOTE = (
     "Ты только что вернулся в замок из города, куда спускался по делам; пока "
@@ -278,6 +282,9 @@ class AwayRunner:
         notifier: Notifier,
         *,
         tick_s: float = TICK_S,
+        night_sink: NightSink | None = None,
+        night_refresh_s: float = NIGHT_REFRESH_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._service = service
         self._returner = returner
@@ -285,6 +292,11 @@ class AwayRunner:
         self._notifier = notifier
         self._tick_s = tick_s
         self._kick = asyncio.Event()
+        self._night_sink = night_sink
+        self._night_refresh_s = night_refresh_s
+        self._clock = clock
+        self._night_sent: bool | None = None
+        self._night_sent_at = 0.0
 
     def kick(self) -> None:
         self._kick.set()
@@ -305,6 +317,7 @@ class AwayRunner:
         for text in await self._service.take_notices():
             await notify_admins(self._book, self._notifier, text)
         state = await self._service.load()
+        await self._publish_night(state is not None and state.phase == PHASE_AWAY)
         if state is None:
             return
         now = self._service.now()
@@ -320,6 +333,24 @@ class AwayRunner:
                     reply_markup=reminder_keyboard(),
                 )
         await self._returner.run_pass()
+
+    async def _publish_night(self, night: bool) -> None:
+        if self._night_sink is None:
+            return
+        now = self._clock()
+        stale = now - self._night_sent_at >= self._night_refresh_s
+        if night == self._night_sent and not (night and stale):
+            return
+        try:
+            await self._night_sink(night)
+        except Exception:
+            (log.warning if night else log.debug)(
+                "away: ночной режим не доставлен службе llm", exc_info=True
+            )
+            self._night_sent = None
+            return
+        self._night_sent = night
+        self._night_sent_at = now
 
     @staticmethod
     def _reminder_text(state: AwayState, now: datetime) -> str:

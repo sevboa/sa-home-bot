@@ -118,7 +118,7 @@ async def test_edit_goes_to_host_and_is_synced_before_exec(work):
     result = await box.exec(["echo", "hi there"], 5)
     assert result.ok and result.output == "ok\n"
     assert fake.commands()[-3:] == ["refresh", "exec", "sync-out"]
-    assert fake.args_of("exec")[0] == ["job-1", "5", "echo 'hi there'"]
+    assert fake.args_of("exec")[0] == ["job-1", str(wrapper.exec_backstop(5)), "echo 'hi there'"]
     assert fake.files["src/a.py"] == b"print(2)\n"
     assert ".env" not in fake.files
 

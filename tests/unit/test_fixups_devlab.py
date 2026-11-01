@@ -5,7 +5,14 @@ from sa_home_bot.node.fixups.privileged import SUDOERS_DIR
 from tests.unit.fixups_world import FakeRoot, make_settings
 
 MYCRAFT_SUBIDS = "sevboa:100000:65536\ndavidr:165536:65536\n"
-DEVLAB_IDS = {"install-podman", "devlab-user", "devlab-subids", "devlab-linger", "devlab-sudoers"}
+DEVLAB_IDS = {
+    "install-podman",
+    "devlab-user",
+    "devlab-subids",
+    "devlab-linger",
+    "devlab-cpu-weight",
+    "devlab-sudoers",
+}
 
 
 @pytest.fixture
@@ -114,3 +121,29 @@ def test_sudoers_fixup_installs_exact_wrapper_and_snippet(root, settings, monkey
 def test_podman_check_needs_podman_and_newuidmap(root, missing, ok):
     root.missing_tools = missing
     assert devlab.INSTALL_PODMAN.check() is ok
+
+
+def test_cpu_weight_fixup_writes_dropin_for_the_devlab_user_slice(root, settings):
+    root.outputs["id -u devlab"] = "991\n"
+    fixup = devlab.make_devlab_cpu_weight_fixup(settings)
+    dropin = "/etc/systemd/system/user-991.slice.d/50-sa-home-devlab.conf"
+    assert fixup.check() is False
+    fixup.apply()
+    assert root.installed[dropin] == "[Slice]\nCPUWeight=10\n"
+    assert root.sudo_commands("systemctl") == [["systemctl", "daemon-reload"]]
+    assert fixup.check() is True
+    root.files[dropin] = "[Slice]\nCPUWeight=100\n"
+    assert fixup.check() is False
+
+
+def test_cpu_weight_fixup_needs_the_user(root, settings):
+    root.outputs["id -u devlab"] = None
+    fixup = devlab.make_devlab_cpu_weight_fixup(settings)
+    assert fixup.check() is False
+    with pytest.raises(FixupError):
+        fixup.apply()
+
+
+def test_wrapper_content_has_pause_subcommands(settings):
+    content = devlab.devlab_wrapper_content(settings)
+    assert "pause|unpause)" in content and "interrupt)" in content

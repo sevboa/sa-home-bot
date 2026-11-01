@@ -49,6 +49,7 @@ def test_describe_declares_ask_chat_sleep_warmup():
         "chat_progress",
         "sleep",
         "warmup",
+        "set_night_mode",
         "set_speech_clear",
     ]
     assert desc.find_action("ask").params[0].name == "prompt"
@@ -1230,3 +1231,72 @@ async def test_summarizer_role_own_system_temperature_zero_no_lisp(monkeypatch):
 async def test_describe_reports_effective_num_ctx():
     svc = LlmService(_settings(num_ctx=32768))
     assert svc.describe().model_profile["num_ctx"] == 32768
+
+
+async def test_cpu_commands_announce_start_and_finish_with_same_id(monkeypatch):
+    seen_during = {}
+
+    async def fake_synthesize(text, cfg):
+        seen_during["state"] = await svc.get_state()
+        return b"ogg"
+
+    monkeypatch.setattr(llm_service.tts, "synthesize_speech", fake_synthesize)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    await svc.run_command("synthesize_speech", {"text": "привет"})
+    (started, begin), (finished, end) = emitter.events
+    assert (started, finished) == ("llm_cpu_task_started", "llm_cpu_task_finished")
+    assert begin == end and begin["kind"] == "tts"
+    assert seen_during["state"]["cpu_tasks"] == [begin["task_id"]]
+    assert (await svc.get_state())["cpu_tasks"] == []
+
+
+async def test_cpu_command_announces_finish_even_when_it_fails(monkeypatch):
+    async def broken(raw, cfg):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(llm_service.stt, "transcribe_voice", broken)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    await svc.run_command("transcribe_voice", {"audio_b64": _b64(b"x")})
+    assert [name for name, _ in emitter.events] == ["llm_cpu_task_started", "llm_cpu_task_finished"]
+    assert emitter.events[0][1]["kind"] == "stt"
+
+
+async def test_rejected_cpu_command_still_closes_the_task():
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    with pytest.raises(ProtoError):
+        await svc.run_command("synthesize_speech", {"text": ""})
+    assert [name for name, _ in emitter.events] == ["llm_cpu_task_started", "llm_cpu_task_finished"]
+    assert (await svc.get_state())["cpu_tasks"] == []
+
+
+async def test_non_cpu_commands_do_not_announce():
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    await svc.run_command("set_speech_clear", {"user_id": 1, "clear": True})
+    assert emitter.events == []
+
+
+async def test_night_mode_event_only_on_change_and_in_state():
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(), emit=emitter)
+    assert (await svc.get_state())["night"] is False
+    assert await svc.run_command("set_night_mode", {"night": True}) == {
+        "night": True,
+        "changed": True,
+    }
+    assert (await svc.run_command("set_night_mode", {"night": True}))["changed"] is False
+    await svc.run_command("set_night_mode", {"night": False})
+    assert emitter.events == [
+        ("llm_night_mode", {"night": True}),
+        ("llm_night_mode", {"night": False}),
+    ]
+    assert (await svc.get_state())["night"] is False
+
+
+async def test_night_mode_rejects_non_bool():
+    with pytest.raises(ProtoError) as excinfo:
+        await LlmService(_settings()).run_command("set_night_mode", {"night": "yes"})
+    assert excinfo.value.code == ERR_BAD_REQUEST
