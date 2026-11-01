@@ -6567,12 +6567,17 @@ mycraft в тех же контейнерах и окружениях, что у
   сбоев); существующие персонажные строки и `llm-prompt.toml` не трогаем.
 - Кнопки: `question` → «Ответить», «Отпустить спать», «Остановить»; `failed` → «Продолжить»
   (`resume` без замечаний, той же моделью); `done` — без кнопок (приёмка за Claude-клиентом).
-  callback_data `dl:<код>:<job_id>` (`bot/ui/callback_data.pack`), коды `ans`, `rel`, `stop`, `res`.
+  callback_data `dl:<код>:<job_id>` (`bot/ui/callback_data.pack`), коды `ans`, `rel`, `stop`, `stopc`, `res`.
   «Ответить» — ForceReply-подсказка, ответ на неё уходит в `answer` (образец:
   `bot/handlers/vpn/reports.py::VpnReplyFilter`), ожидание ответа хранится в `app_state`, а не в
   памяти: после рестарта ответ на старую подсказку не утечёт в диалог с Альфредом.
 - Хаб уже умеет `answer`, `resume`, `stop`, `release` (`HubQueue.post_from_client` с проверкой
   переходов); добавляются только действия владельца поверх них.
+- Решения владельца (2026-11-02): кнопки как выше («Остановить» на `failed` не нужна, переходы хаба
+  не меняем); оповещаются только задания `agent` (`question`/`done`/`failed`), test-задания и
+  `stopped` — нет; «Остановить» подтверждается вторым нажатием (`stop` → `stopc`); обычный реплай
+  админа на оповещение `question` тоже уходит агенту ответом, наравне с «Ответить»;
+  `[devlab_notify] enabled = true` на alfred включает Claude при выкате по «катим».
 
 Задачи (каждая вливается отдельно; приём — ревью по CLAUDE.md, тесты; выкат по «катим»):
 Порядок: 62.1 → 62.2 → (62.3 ‖ 62.4) → 62.5.
@@ -6630,14 +6635,16 @@ mycraft в тех же контейнерах и окружениях, что у
     `docs/bot-rest/authorization-ui.md` (префикс `dl` в «Прочие префиксы»),
     `docs/bot-rest/handlers-and-routing.md` (место роутера), `docs/devlab/notify.md`.
   - Шаги: (1) Нажатие проверяет `subscription.is_owner` (как `handlers/away.py::_is_owner`), иначе
-    `DENIED_TEXT`. (2) `rel`/`stop`/`res` → `owner_post id kind`; успех — toast со статусом и снятие
+    `DENIED_TEXT`. (2) `stop` меняет клавиатуру на «Точно остановить?» (`stopc`) и «Отмена»; `rel`/`stopc`/`res` → `owner_post id kind`; успех — toast со статусом и снятие
     клавиатуры (`notifier.edit_markup` / `bot/ui/redraw`), отказ хаба — toast с текстом ошибки,
     клавиатура снимается. (3) `ans` → `owner_job id`; не `waiting_owner` — toast «уже …»; иначе
     ForceReply с номером задания, `app_state["devlab_reply:<chat_id>:<message_id>"] =
     {"job_id", "user_id", "created"}`, срок 24 ч. (4) `DevlabReplyFilter`: реплай на такую подсказку
     от того же пользователя, текст не команда → `owner_post kind=answer text=…`, ключ удаляется,
     ответ «передал»; просрочено — «подсказка устарела, нажмите «Ответить» ещё раз», в диалог не
-    уходит.
+    уходит. (5) Реплай админа прямо на оповещение `question` (message_id оповещения запоминается в
+    `app_state["devlab_notice:<chat_id>:<message_id>"] = job_id` при отправке, 62.2/62.3) идёт тем же путём, что и ответ на
+    ForceReply.
   - Тесты: новый `tests/unit/test_devlab_handlers.py` (`FakeCallback`, `FakeMessage`,
     `FakeNodeLink`): права, каждый код, ForceReply и ответ, просрочка, переживание «рестарта»
     (новый роутерный вызов, та же БД); `tests/unit/test_bot_ui.py` при необходимости.
