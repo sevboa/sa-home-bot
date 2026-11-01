@@ -31,6 +31,7 @@ async def run(
     stdout: Stream = asyncio.subprocess.PIPE,
     stderr: Stream = asyncio.subprocess.PIPE,
     env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
 ) -> ProcResult:
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -38,6 +39,7 @@ async def run(
         stdout=stdout,
         stderr=stderr,
         **({} if env is None else {"env": env}),
+        **({} if cwd is None else {"cwd": cwd}),
     )
     exchange = proc.communicate(input)
     if timeout is not None:

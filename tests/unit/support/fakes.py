@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import io
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from sa_home_bot.devlab.agent.model import ModelReply, ToolCall
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunResult
 from sa_home_bot.proto.errors import ServiceUnavailableError
 
@@ -350,3 +353,22 @@ class FakeTestRunner:
     async def cancel(self, job_id: str) -> None:
         self.cancelled.append(job_id)
         self._release.set()
+
+
+class ScriptedChatModel:
+    def __init__(self, *script: Any) -> None:
+        self.script = list(script)
+        self.seen: list[list[dict[str, Any]]] = []
+
+    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
+        self.seen.append(copy.deepcopy(messages))
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def tool_reply(name: str, call_id: str = "c1", **arguments: Any) -> ModelReply:
+    return ModelReply(
+        "", (ToolCall(call_id, name, json.dumps(arguments)),), tokens_in=100, tokens_out=10
+    )

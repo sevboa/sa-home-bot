@@ -13,6 +13,7 @@
 - [wake.md](wake.md) — пробуждение ноды исполнителя.
 - [client-test.md](client-test.md) — клиент тестов: `nodectl devlab snapshot`, скил `devlab-test`, предел `wait` (61.3).
 - [executor.md](executor.md) — исполнитель `devlab`: задания `test`, `.devlab.toml`, конфиг (61.2a).
+- [agent.md](agent.md) — агент-разработчик (60.5): цикл модели с инструментами, песочница, окно, страж финала.
 
 ## Что есть
 - `devlab/protocol.py` — имена действий, ролей (`client`, `executor`, `gateway`), статусов задания,
