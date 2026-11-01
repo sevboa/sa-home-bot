@@ -149,9 +149,12 @@ async def connect(
     reregistered = False
     if code != 0:
         print(f"claude mcp add завершился с кодом {code}, пробую снять прежнюю запись")
-        if runner(mcp_remove_command()) == 0:
+        remove_code = runner(mcp_remove_command())
+        if remove_code == 0:
             reregistered = True
             code = runner(mcp_add_command(url, path))
+        else:
+            print(f"claude mcp remove завершился с кодом {remove_code}")
     if code != 0:
         print(f"claude mcp add завершился с кодом {code}. Команда для ручного запуска:")
         print(mcp_add_hint(url, path))

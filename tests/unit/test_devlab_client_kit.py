@@ -186,15 +186,15 @@ async def run_connect(tmp_path, runner):
     )
 
 
-async def test_connect_adds_mcp_once_when_server_absent(tmp_path, capsys):
+async def test_connect_adds_mcp_once_without_remove_on_success(tmp_path, capsys):
     calls = []
 
     def runner(argv):
-        calls.append(argv[:3])
+        calls.append(argv)
         return 0
 
     assert await run_connect(tmp_path, runner) == 0
-    assert calls == [["claude", "mcp", "add"]]
+    assert [c[:3] for c in calls] == [["claude", "mcp", "add"]]
     assert "переподключите" not in capsys.readouterr().out
 
 
@@ -202,14 +202,38 @@ async def test_connect_replaces_existing_server(tmp_path, capsys):
     calls = []
 
     def runner(argv):
-        calls.append(argv[:3])
+        calls.append(argv)
         return 1 if len(calls) == 1 else 0
 
     assert await run_connect(tmp_path, runner) == 0
     assert [c[2] for c in calls] == ["add", "remove", "add"]
+    assert calls[1] == ["claude", "mcp", "remove", "--scope", "user", "devlab"]
     out = capsys.readouterr().out
     assert "переподключите devlab" in out
     assert "dlh_secret" not in out
+
+
+async def test_connect_remove_ok_but_second_add_fails(tmp_path, capsys):
+    calls = []
+
+    def runner(argv):
+        calls.append(argv[2])
+        return 0 if argv[2] == "remove" else 1
+
+    assert await run_connect(tmp_path, runner) == 1
+    assert calls == ["add", "remove", "add"]
+    out = capsys.readouterr().out
+    assert "$(cat " in out
+    assert "переподключите" not in out
+    assert "dlh_secret" not in out
+
+
+async def test_connect_remove_failure_is_reported(tmp_path, capsys):
+    def runner(argv):
+        return 3 if argv[2] == "remove" else 1
+
+    assert await run_connect(tmp_path, runner) == 1
+    assert "claude mcp remove завершился с кодом 3" in capsys.readouterr().out
 
 
 async def test_connect_add_failure_prints_manual_hint(tmp_path, capsys):
