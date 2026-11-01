@@ -6471,6 +6471,149 @@ Colibri) и контейнеры задач ему уступают:
 - **60.8.5 ✅ (влито в master)** `nodectl devlab connect` при уже существующем MCP-сервере `devlab` (`claude mcp add` упал): `claude mcp remove devlab --scope user`, повторный add, подсказка `/mcp` в открытых сессиях (`devlab/connect.py`, `test_devlab_client_kit.py`, `docs/devlab/client-agent.md`).
 - **60.8.6** Тесты в `[test] cmd` идут параллельно: `pytest-xdist` в dev-экстре, `python -m pytest -q -n auto` (воркеров по ядрам cpuset слота), тесты безопасны для xdist (`docs/devlab/devlab-toml.md`).
 
+#### 60.9 Надёжность агента после живых прогонов (2026-11-01)
+Разбор живых прогонов `cgpkp2` (sa-home-bot, клиент alfred), `bwmj63` и `aw5znh` (starvalorcoop, клиент
+arch-t480), `dn3t6q` (test): `docs/devlab/agent.md`, «Живые находки 2026-11-01, вечер». Порядок: сначала
+состояние (60.9.1–60.9.3), потом окно (60.9.4–60.9.5), потом поведение модели (60.9.6–60.9.8). Каждая задача
+вливается отдельно.
+
+- **60.9.1 Результат теста отправляется до уборки контейнера.** Цель: рестарт исполнителя после
+  окончания прогона не теряет готовый результат (в `dn3t6q` pytest закончился за 2 с до рестарта, а
+  `test_done` ждал `cleanup` ~10 с).
+  - Менять: `devlab/executor/podman.py` (`_pipeline`), `devlab/executor/worker.py` (`TestWorker.handle`,
+    `_run_job`), `docs/devlab/executor.md`. Не трогать: протокол, хаб.
+  - Шаги: (1) `_pipeline` возвращает `RunResult` сразу после `_sync_out`; `wrapper.cleanup(name)` идёт
+    фоновой задачей runner-а (словарь задач уборки, `aclose()`/ожидание в `cancel` и при следующем `run`
+    того же имени). Готово, когда: `run()` возвращает результат, не дожидаясь `cleanup`, а уборка всё равно
+    выполняется (в том числе при исключении). (2) В `_run_job` выгрузка логов и `test_done` после получения
+    результата идут под `asyncio.shield`; отмена задачи во время отправки дожидается её. Готово, когда:
+    отмена `handle` после возврата `runner.run` всё равно доставляет `test_done` и `state.current` = `None`.
+    (3) Абзац в `executor.md` («порядок: результат → хаб → уборка», находка 2026-11-01).
+  - Тесты: `tests/unit/test_devlab_podman_runner.py` (результат до конца уборки, уборка при ошибке),
+    `tests/unit/test_devlab_executor.py` (отмена после прогона доставляет `test_done`).
+  - Зависимости: нет.
+
+- **60.9.2 Прерванное test-задание возвращается в очередь.** Цель: рестарт исполнителя посреди
+  прогона ставит test-задание обратно в `queued`, а не в `failed` (`worker.py`, `recover`).
+  - Менять: `devlab/protocol.py` (`MSG_REQUEUE = "requeue"` в `EXECUTOR_MESSAGES`,
+    `MESSAGE_TARGET_STATUS[MSG_REQUEUE] = STATUS_QUEUED`, `PARAM_ATTEMPTS`, `TEST_MAX_ATTEMPTS = 2`),
+    `devlab/hub/queue.py` (`post_from_executor`), `devlab/executor/worker.py` (`recover`),
+    `docs/devlab/queue.md`, `docs/devlab/executor.md`. Не трогать: `TRANSITIONS` (клиентский `resume` из
+    `running` по-прежнему запрещён), агентский работник.
+  - Шаги: (1) `post_from_executor` для `MSG_REQUEUE`: только `kind == test` и статус `running`, иначе
+    `HubError`; отдельной веткой (без `_check_transition`) ставит `queued`, `executor = NULL`,
+    `params.attempts += 1`; при `attempts >= TEST_MAX_ATTEMPTS` вместо этого `failed` с текстом
+    «исполнитель перезапускался во время прогона N раз». Сообщение пишется клиенту, как прочие. Готово,
+    когда: после `requeue` задание снова отдаёт `claim`, а `wait_terminal` не просыпается терминалом.
+    (2) `TestWorker.recover` шлёт `MSG_REQUEUE` вместо `MSG_FAILED`; `HubError` от хаба (лимит попыток
+    или чужой статус) логируется, `current` сбрасывается. (3) `queue.md`: строка таблицы переходов
+    «executor requeue: running → queued (test)»; `executor.md`: раздел восстановления.
+  - Тесты: `tests/unit/test_devlab_queue.py` (requeue test, отказ для agent и не-running, лимит попыток →
+    failed), `tests/unit/test_devlab_executor.py` (`recover` шлёт requeue), `tests/unit/test_devlab_mcp.py`
+    (`devlab_test wait` не возвращает промежуточный `queued` как итог).
+  - Зависимости: 60.9.1 (тот же файл `worker.py`, вливать после).
+
+- **60.9.3 `restart_node` не рвёт работу мастерской (ждёт решения владельца, см. вопрос 1).** Цель:
+  само-рестарт ноды (в том числе после обновления) откладывается, пока служба занята.
+  - Менять: `node/service.py` (`_schedule_restart_node`), `docs/foundation/shutdown-and-sessions.md`,
+    `docs/devlab/executor.md`. Не трогать: протокол службы `devlab` (`busy` уже отдаётся роутеру).
+  - Шаги: (1) `restart_node` при непустом `self._router.busy_services()` без `force=true` отвечает
+    `{"deferred": [...службы]}` и ставит отложенный рестарт: проверка раз в 30 с, рестарт, как только
+    занятых нет, но не позже `RESTART_DEFER_MAX_S` (30 мин). Готово, когда: при занятом `devlab`
+    рестарт не происходит, после освобождения — происходит. (2) `force=true` — прежнее поведение.
+  - Тесты: `tests/unit/test_node_service.py`.
+  - Зависимости: нет.
+
+- **60.9.4 Окно агента из каталога моделей.** Цель: агент на `openrouter-free` (каталог: `context =
+  65536`) работает с окном модели, а не с общим `agent_context_tokens = 16000`.
+  - Менять: `devlab/executor/routing.py` (`CatalogEntry.context` из `protocol.MODEL_CONTEXT`),
+    `devlab/executor/agent_worker.py` (`_limits_for`, `_execute`), `docs/devlab/agent.md` (абзац
+    `context.py`), `docs/devlab/executor.md`. Не трогать: `config.py` (поле `agent_context_tokens`
+    остаётся), шлюз.
+  - Шаги: (1) `CatalogEntry.context: int = 0`, `from_hub` читает поле. (2) `_limits_for(spend, entries)`:
+    окно = минимум `context` по живым записям модели; для внешних (`remote`) — оно, для локальных —
+    `min(оно, agent_context_tokens)` (замер 60.2: Flint на CPU выше 16k деградирует); записи без `context`
+    — `agent_context_tokens`. Записи берутся тем же `self._catalog.entries(job.model)`, что в
+    `_check_model`. Готово, когда: задание на внешней модели с `context=65536` строит `AgentLoop` с
+    `context_tokens=65536`, на локальной с `32768` — с `16000`. (3) В `docs` — правило выбора окна.
+  - Тесты: `tests/unit/test_devlab_agent_worker.py` (три случая окна), `tests/unit/test_devlab_agent_spend.py`
+    (`CatalogEntry.from_hub` с `context`).
+  - Зависимости: нет.
+
+- **60.9.5 Свёртка всегда сходится, а раздутые правила видны сразу.** Цель: `CONTEXT_OVERFLOW` только
+  когда не влезают системное сообщение и задание; всё остальное сворачивается.
+  - Менять: `devlab/agent/context.py` (`fold_old_results`), `devlab/agent/loop.py` (`run`, текст причины),
+    `devlab/executor/agent_worker.py` (`_rules`: размеры), `docs/devlab/agent.md`. Не трогать: `dialog.py`
+    (формат `dialog.json`).
+  - Шаги: (1) Свёртка по ступеням, пока не влезет: старые выводы инструментов (как сейчас) → длинные
+    аргументы старых вызовов (как сейчас) → `content` старых сообщений ассистента длиннее
+    `FOLD_ARGUMENTS_MIN_CHARS` → свежие (`keep_recent`) выводы длиннее `RECENT_OUTPUT_CHARS` (2000)
+    обрезаются до конца с пометкой → выбрасываются целиком самые старые пары «ассистент с `tool_calls` +
+    все его `tool`-ответы» после закреплённых двух сообщений, на их место одно `user`-сообщение
+    «[свёрнуто N шагов]». Пары не рвутся (у каждого `tool` остаётся свой `tool_calls`). Готово, когда:
+    диалог из 200 шагов с выводами по 6000 симв. сворачивается в бюджет 13k, порядок ролей валиден.
+    (2) `CONTEXT_OVERFLOW` возникает только если закреплённые два сообщения больше бюджета; причина:
+    «системное сообщение и задание — N ток., бюджет окна M ток.: сократи `[agent] rules` или task.md».
+    (3) `_rules` пишет в лог размер каждого файла правил; причина из (2) для первой попытки дополняется
+    списком `rules` с размерами (агент-воркер получает их от `_rules`). Готово, когда: задание с файлом
+    правил на 130k симв. падает до первого запроса к модели с именем этого файла в тексте.
+  - Тесты: новый `tests/unit/test_devlab_agent_context.py` (ступени свёртки, целостность пар, сходимость),
+    `tests/unit/test_devlab_agent.py` (причина `CONTEXT_OVERFLOW`), `tests/unit/test_devlab_agent_worker.py`
+    (имя файла правил в `failed`).
+  - Зависимости: 60.9.4 (вливать после: оба трогают `agent_worker.py`).
+
+- **60.9.6 Журнал шагов агента на хабе.** Цель: после любого исхода видно, что модель делала по шагам
+  (в `cgpkp2` журнала нет: каталог задания удаляется, в `wip` попадают только правки).
+  - Менять: `devlab/agent/loop.py` (`StepListener` → наблюдатель шага с записью),
+    `devlab/executor/agent_worker.py` (запись в `<job root>/steps.jsonl`, выгрузка),
+    `devlab/protocol.py` (`LOG_FILE_STEPS = "steps.jsonl"` в `LOG_FILES`), `devlab/hub/executor_api.py`
+    (`upload_log`: агентское задание своего исполнителя — только `steps.jsonl`),
+    `devlab/hub/mcp_tools.py` (`test_log`: для `agent` разрешён `file=steps.jsonl`, `ref` необязателен),
+    `docs/devlab/agent.md`, `docs/devlab/api.md`. Не трогать: скилы (имя инструмента прежнее).
+  - Шаги: (1) Запись на каждый ответ модели: номер шага, время, `tokens_in/out`, оценка окна после свёртки,
+    для каждого вызова — имя, `path`/`command`/`title`/`question` и длина аргументов (не сами аргументы
+    `write_file`), первые 300 симв. результата, отклонён ли `finish`/`step_done`; ответ без вызова —
+    первые 300 симв. текста. Готово, когда: прогон фейковой модели даёт строку JSON на шаг.
+    (2) Выгрузка `steps.jsonl` (хвост до `LOG_MAX_BYTES`) при `question`, `done`, `failed`, `stopped`
+    до удаления каталога задания; сбой выгрузки — `warning`, исход не меняется. (3) `devlab_test_log
+    id=<agent> file=steps.jsonl` отдаёт хвост. Готово, когда: e2e на фейках видит журнал после `failed`.
+  - Тесты: `tests/unit/test_devlab_agent_worker.py`, `tests/unit/test_devlab_executor_api.py`,
+    `tests/unit/test_devlab_mcp.py`.
+  - Зависимости: 60.9.5 (вливать после).
+
+- **60.9.7 Обвязка мелких правок: финальный перевод строки и выборочные тесты.** Цель: тривиальная
+  правка не застревает на `W292` и не ждёт полный набор после каждого шага (в `cgpkp2`: `write_file` без
+  `\n` в конце, `finish` отклонён стражем `ruff check src tests`, после правки импорта `W292` остался;
+  каждый `run_tests` — полный набор ~4,5 мин).
+  - Менять: `devlab/agent/tools.py` (`_write_file`, `_edit_file`, схема `run_tests`, `_run_tests`),
+    `devlab/agent/prompt.py` (`SYSTEM_INTRO`: «`run_tests paths=…` для своих тестов, полный набор
+    проверит `finish`»), `docs/devlab/agent.md`. Не трогать: `guard.py` (страж гоняет полный набор).
+  - Шаги: (1) `write_file` и `edit_file` для текстового файла без завершающего `\n` дописывают его;
+    результат инструмента говорит об этом. Готово, когда: `write_file content="x"` даёт файл `x\n`.
+    (2) `run_tests` принимает необязательный `paths` (строка, пути через пробел, каждый через
+    `safe_relative`), команда = `test_argv` + пути. Готово, когда: `run_tests paths="tests/unit/a.py"`
+    выполняет `[...test_argv, "tests/unit/a.py"]`. (3) Отказ `finish`/`step_done` по стражу начинается
+    строкой «исправь и вызови finish снова; полный вывод стража ниже».
+  - Тесты: `tests/unit/test_devlab_agent.py` (`write_file`/`edit_file` с `\n`, `run_tests paths`, отказ
+    пути вне корня), `tests/unit/test_agent_mcp_tools.py`, если там сверяются схемы.
+  - Зависимости: нет (можно параллельно с 60.9.6).
+
+- **60.9.8 Стоп-кран на повторах.** Цель: модель, которая повторяет один и тот же вызов, останавливается
+  вопросом владельцу раньше 60 шагов.
+  - Менять: `devlab/agent/loop.py` (`Segment.recent_calls`, `Crane.REPEAT`, `_execute`),
+    `devlab/executor/agent_worker.py` (новый кран не продлевает бюджет: не в `SPEND_CRANES`),
+    `docs/devlab/agent.md` (раздел «Стоп-краны»).
+  - Шаги: (1) Ключ вызова = имя + канонический JSON аргументов. Тот же ключ второй раз подряд в окне
+    последних 6 вызовов при неизменном дереве (`sandbox.changed_paths()` и хэш содержимого изменённых
+    файлов не менялись) — результат инструмента дополняется «этот вызов уже был, результат тот же,
+    попробуй иначе». (2) Третий раз — `Crane.REPEAT` с причиной «модель повторяет `<имя> <path|command>`».
+    Готово, когда: фейковая модель, трижды зовущая `run_command ruff check x.py` без правок, получает
+    вопрос-кран на третьем шаге. (3) Пороги — `AgentLimits.max_repeats = 3`, поле `agent_max_repeats`
+    в `DevlabConfig` не заводится.
+  - Тесты: `tests/unit/test_devlab_agent.py` (повтор, повтор после правки не кран).
+  - Зависимости: 60.9.6 (по журналу живого прогона сверить, что повторы — реальная картина; если журнал
+    покажет другое, задача переписывается).
+
 **Выкат.**
 - mycraft: `nodectl fix` (владелец, sudo), исполнитель `devlab`, шлюз `devlab_models` с llama.cpp.
 - jeeves: шлюз `devlab_models` с API-моделями, ключи в конфиге инстанса — только после явного
