@@ -93,16 +93,31 @@ async def test_question_sent_to_admins_only_with_facts(store):
     assert link.commands[0][1][protocol.FIELD_SINCE] == 5
 
 
-async def test_question_notice_remembers_message_id(store):
+async def test_answer_hint_only_in_question(store):
     await store.set_state(devlab_notify.CURSOR_KEY, "0")
-    link = FakeNodeLink(results=inbox([message(1)]))
-    notifier_obj, notifier = make(store, link)
+    messages = [
+        message(1),
+        message(2, protocol.MSG_DONE, {protocol.PAYLOAD_SUMMARY: "Сделано"}, status="done"),
+    ]
+    notifier_obj, notifier = make(store, FakeNodeLink(results=inbox(messages)))
     await notifier_obj.tick()
-    key = f"devlab_notice:{OWNER}:1001"
-    assert devlab_notify.parse_entry(await store.get_state(key))["job_id"] == "j1"
+    assert notifier.sent[0][1].endswith(ai_lines.DEVLAB_ANSWER_HINT)
+    assert ai_lines.DEVLAB_ANSWER_HINT not in notifier.sent[1][1]
 
 
-async def test_done_and_failed_have_no_notice_key(store):
+async def test_purge_legacy_reply_keys(store):
+    legacy = [f"devlab_notice:{OWNER}:1", f"devlab_reply:{OWNER}:2"]
+    for key in legacy:
+        await store.set_state(key, '{"job_id": "j1"}')
+    await store.set_state(devlab_notify.CURSOR_KEY, "7")
+    notifier_obj, _ = make(store, None)
+    await notifier_obj.purge_legacy_keys()
+    for key in legacy:
+        assert await store.get_state(key) is None
+    assert await store.get_state(devlab_notify.CURSOR_KEY) == "7"
+
+
+async def test_done_and_failed_texts(store):
     await store.set_state(devlab_notify.CURSOR_KEY, "0")
     messages = [
         message(1, protocol.MSG_DONE, {protocol.PAYLOAD_SUMMARY: "Сделано"}, status="done"),
@@ -114,7 +129,6 @@ async def test_done_and_failed_have_no_notice_key(store):
     assert "Сделано" in notifier.sent[0][1]
     assert notifier.sent[1][1].startswith(ai_lines.DEVLAB_FAILED_TEXT)
     assert "Упал" in notifier.sent[1][1]
-    assert await store.get_state(f"devlab_notice:{OWNER}:1001") is None
 
 
 @pytest.mark.parametrize(
@@ -174,12 +188,11 @@ async def test_unavailable_hub_before_first_run_keeps_no_cursor(store):
     assert await store.get_state(devlab_notify.CURSOR_KEY) is None
 
 
-async def test_failed_send_does_not_store_notice(store):
+async def test_failed_send_still_moves_cursor(store):
     await store.set_state(devlab_notify.CURSOR_KEY, "0")
     link = FakeNodeLink(results=inbox([message(1)]))
     notifier_obj, _ = make(store, link, FakeNotifier(fail=True))
     await notifier_obj.tick()
-    assert await store.get_state(f"devlab_notice:{OWNER}:1001") is None
     assert await store.get_state(devlab_notify.CURSOR_KEY) == "1"
 
 
@@ -206,16 +219,12 @@ async def test_every_admin_gets_own_notice_and_guest_none(store):
     )
     await notifier_obj.tick()
     assert [chat for chat, _ in notifier.sent] == [OWNER, 33]
-    first = devlab_notify.parse_entry(await store.get_state(f"devlab_notice:{OWNER}:1001"))
-    second = devlab_notify.parse_entry(await store.get_state("devlab_notice:33:1002"))
-    assert first["job_id"] == second["job_id"] == "j1"
-    assert await store.get_state(f"devlab_notice:{GUEST}:1003") is None
 
 
 @pytest.mark.parametrize(
     ("kind", "codes"),
     [
-        (protocol.MSG_QUESTION, ["ans", "rel", "stop"]),
+        (protocol.MSG_QUESTION, ["rel", "stop"]),
         (protocol.MSG_FAILED, ["res"]),
         (protocol.MSG_DONE, None),
     ],

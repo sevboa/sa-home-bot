@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
-
 import pytest
-from aiogram.methods import AnswerCallbackQuery, SendMessage
+from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 from sa_home_bot.bot import ai_lines, invites
-from sa_home_bot.bot.devlab_notify import NOTICE_KEY, REPLY_KEY, encode_entry
+from sa_home_bot.bot.away import KIND_TEXT
+from sa_home_bot.bot.middlewares import DENIED_ALERT_TEXT
 from sa_home_bot.config import InvitesConfig, Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.subscriptions.guests import GuestStore
@@ -18,62 +17,76 @@ from tests.unit.support.fakes import FakeKicker, FakeNodeLink, FakeNotifier
 from .conftest import BASE_TIME
 
 OWNER = 188548043
+GUEST = 777
+STRANGER = 99
 NOTICE_ID = 26854
-PROMPT_ID = 26855
-
-CHAT = Chat(id=OWNER, type="private")
-OWNER_USER = User(id=OWNER, is_bot=False, first_name="Владелец")
 
 
-def waiting_link():
-    return FakeNodeLink(
-        results={
-            protocol.ACTION_OWNER_JOB: {protocol.FIELD_STATUS: protocol.STATUS_WAITING_OWNER},
-            protocol.ACTION_OWNER_POST: {protocol.FIELD_STATUS: protocol.STATUS_RUNNING},
-        }
+class SpyAway:
+    def __init__(self) -> None:
+        self.intercepted: list[str] = []
+
+    async def intercept(self, message, *, kind, **_):
+        self.intercepted.append((kind, message.text))
+        return True
+
+
+def chat(chat_id):
+    return Chat(id=chat_id, type="private")
+
+
+def person(user_id):
+    return User(id=user_id, is_bot=False, first_name="Человек")
+
+
+def notice(chat_id=OWNER):
+    return Message(
+        message_id=NOTICE_ID,
+        date=BASE_TIME,
+        chat=chat(chat_id),
+        from_user=BOT_USER,
+        text=ai_lines.DEVLAB_QUESTION_TEXT,
     )
 
 
-def bot_message(message_id, text):
-    return Message(message_id=message_id, date=BASE_TIME, chat=CHAT, from_user=BOT_USER, text=text)
-
-
-def reply_update(update_id, reply_to_id, text):
+def reply_update(update_id, text):
     return Update(
         update_id=update_id,
         message=Message(
             message_id=update_id + 30000,
             date=BASE_TIME,
-            chat=CHAT,
-            from_user=OWNER_USER,
+            chat=chat(OWNER),
+            from_user=person(OWNER),
             text=text,
-            reply_to_message=bot_message(reply_to_id, "вопрос агента"),
+            reply_to_message=notice(),
         ),
     )
 
 
-def button_update(update_id, data):
+def button_update(update_id, data, user_id=OWNER, chat_id=OWNER):
     return Update(
         update_id=update_id,
         callback_query=CallbackQuery(
             id=str(update_id),
-            from_user=OWNER_USER,
+            from_user=person(user_id),
             chat_instance="ci",
             data=data,
-            message=bot_message(NOTICE_ID, "вопрос агента"),
+            message=notice(chat_id),
         ),
     )
 
 
 @pytest.fixture
 async def live(store, tmp_path):
-    book = make_book(make_subscription(OWNER, "owner"))
+    book = make_book(make_subscription(OWNER, "owner"), make_subscription(GUEST, "guest", "status"))
     notifier = FakeNotifier()
     gate = invites.Gatekeeper(
         InvitesConfig(), store, book, GuestStore(tmp_path / "guests.toml"), notifier
     )
-    link = waiting_link()
-    kicker = FakeKicker()
+    link = FakeNodeLink(
+        results={protocol.ACTION_OWNER_POST: {protocol.FIELD_STATUS: protocol.STATUS_RUNNING}}
+    )
+    away = SpyAway()
     bot, session = recording_bot()
     workflow = {
         "store": store,
@@ -82,67 +95,56 @@ async def live(store, tmp_path):
         "notifier": notifier,
         "book": book,
         "gate": gate,
-        "devlab_notifier": kicker,
+        "away": away,
+        "active_ai_chats": object(),
+        "tool_calls": object(),
+        "devlab_notifier": FakeKicker(),
     }
     with prod_dispatcher(book, gate, store) as dp:
 
         async def feed(update):
             await dp.feed_update(bot, update, **workflow)
 
-        yield feed, link, session, kicker
+        yield feed, link, session, away
     await bot.session.close()
 
 
-async def test_reply_to_force_reply_prompt_reaches_hub(live, store):
-    feed, link, session, kicker = live
-    await store.set_state(
-        REPLY_KEY.format(chat_id=OWNER, message_id=PROMPT_ID),
-        encode_entry("cgpkp2", user_id=OWNER),
-    )
-    await feed(reply_update(1, PROMPT_ID, "go"))
-    assert link.commands == [
-        (
-            protocol.ACTION_OWNER_POST,
-            {
-                protocol.FIELD_ID: "cgpkp2",
-                protocol.FIELD_KIND: protocol.MSG_ANSWER,
-                protocol.PAYLOAD_TEXT: "go",
-            },
-        )
-    ]
-    assert [m.text for m in session.sent(SendMessage)] == [ai_lines.DEVLAB_SENT_TEXT]
-    assert kicker.kicked == 1
-
-
-async def test_reply_to_question_notice_reaches_hub(live, store):
-    feed, link, _, _ = live
-    notice_key = NOTICE_KEY.format(chat_id=OWNER, message_id=NOTICE_ID)
-    await store.set_state(notice_key, encode_entry("j9"))
-    await feed(reply_update(2, NOTICE_ID, "ответ"))
-    assert link.commands[0][1][protocol.FIELD_ID] == "j9"
-
-
-async def test_answer_button_then_reply_goes_to_hub(live, store):
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [("rel", protocol.MSG_RELEASE), ("stopc", protocol.MSG_STOP), ("res", protocol.MSG_RESUME)],
+)
+async def test_owner_buttons_reach_hub(live, code, kind):
     feed, link, session, _ = live
-    await feed(button_update(3, "dl:ans:cgpkp2"))
-    assert session.sent(AnswerCallbackQuery)
-    prompt = session.sent(SendMessage)[0]
-    assert prompt.text == ai_lines.DEVLAB_REPLY_PROMPT.format(job_id="cgpkp2")
-    keys = await store.state_keys("devlab_reply:")
-    assert len(keys) == 1
-    prompt_id = int(keys[0].rsplit(":", 1)[1])
-    assert json.loads(await store.get_state(keys[0]))["user_id"] == OWNER
-    await feed(reply_update(4, prompt_id, "go"))
-    assert link.commands[-1][0] == protocol.ACTION_OWNER_POST
-    assert link.commands[-1][1][protocol.PAYLOAD_TEXT] == "go"
-
-
-async def test_release_button_posts_to_hub(live):
-    feed, link, session, _ = live
-    await feed(button_update(5, "dl:rel:cgpkp2"))
+    await feed(button_update(1, f"dl:{code}:cgpkp2"))
     assert link.commands == [
-        (
-            protocol.ACTION_OWNER_POST,
-            {protocol.FIELD_ID: "cgpkp2", protocol.FIELD_KIND: protocol.MSG_RELEASE},
-        )
+        (protocol.ACTION_OWNER_POST, {protocol.FIELD_ID: "cgpkp2", protocol.FIELD_KIND: kind})
     ]
+    toast = session.sent(AnswerCallbackQuery)[0].text
+    assert toast == ai_lines.DEVLAB_POSTED_TOAST.format(status=protocol.STATUS_RUNNING)
+
+
+async def test_stop_asks_confirmation_first(live):
+    feed, link, session, _ = live
+    await feed(button_update(1, "dl:stop:cgpkp2"))
+    assert link.commands == []
+    markup = session.sent(EditMessageReplyMarkup)[0].reply_markup
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["dl:stopc:cgpkp2", "dl:cnl:cgpkp2"]
+
+
+@pytest.mark.parametrize(
+    ("user_id", "chat_id"), [(STRANGER, OWNER), (GUEST, GUEST)], ids=["stranger", "guest"]
+)
+async def test_foreign_buttons_denied(live, user_id, chat_id):
+    feed, link, session, _ = live
+    await feed(button_update(1, "dl:rel:cgpkp2", user_id=user_id, chat_id=chat_id))
+    assert link.commands == []
+    answer = session.sent(AnswerCallbackQuery)[0]
+    assert (answer.text, answer.show_alert) == (DENIED_ALERT_TEXT, True)
+
+
+async def test_owner_reply_to_notice_goes_to_dialogue(live):
+    feed, link, _, away = live
+    await feed(reply_update(1, "go"))
+    assert link.commands == []
+    assert away.intercepted == [(KIND_TEXT, "go")]

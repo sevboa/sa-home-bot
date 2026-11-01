@@ -41,43 +41,35 @@ mycraft (хост) ради оповещения не будится: спяща
 dedup_key="devlab:<seq>")`: при временном сбое Telegram сообщение уходит в outbox.
 `broadcast` не подходит: возвращает число доставок, а не `message_id`.
 
-## Привязка ответа к заданию
-Для `question` при успешной немедленной отправке пишется
-`app_state["devlab_notice:<chat_id>:<message_id>"] = {job_id, created}` (JSON; по нему 62.3 принимает реплай).
-При разбиении на чанки в `devlab_notice` пишется `message_id` первого чанка.
-Если отправка ушла в outbox, `message_id` неизвестен и запись не создаётся: реплай на такое
-сообщение 62.3 не свяжет, остаётся кнопка «Ответить».
-
-## Кнопки и ответ (Этап 62.3)
-`bot/handlers/devlab.py`, роутер включён сразу после `away`. Каждое нажатие и каждый реплай
-проверяют `subscription.is_owner` (не одно `allows_action`); чужим `DENIED_ALERT_TEXT`, реплаи
-чужих идут дальше по роутерам.
-- Кнопки (`bot/devlab_notify.py`, `callback_data = dl:<код>:<job_id>`): `question` — «Ответить»
-  (`ans`), «Отпустить спать» (`rel`), «Остановить» (`stop`); `failed` — «Продолжить» (`res`);
-  `done` без кнопок.
+## Кнопки (Этап 62.3)
+`bot/handlers/devlab.py`, роутер включён сразу после `away`, ловит только callback `dl:`.
+Каждое нажатие проверяет `subscription.is_owner` и `from_user.id == subscription.chat_id` (не одно
+`allows_action`); чужим `DENIED_ALERT_TEXT`.
+- Кнопки (`bot/devlab_notify.py`, `callback_data = dl:<код>:<job_id>`): `question` — «Отпустить
+  спать» (`rel`), «Остановить» (`stop`); `failed` — «Продолжить» (`res`); `done` без кнопок.
 - `stop` не шлёт ничего, а меняет клавиатуру на «Точно остановить?» (`stopc`) и «Отмена» (`cnl`,
   возвращает клавиатуру вопроса). `rel`/`stopc`/`res` → `owner_post id kind`; успех: toast со
   статусом, клавиатура снята, `DevlabNotifier.kick()` (если опрос включён). Отказ хаба
   (`bad_request`): toast с текстом, клавиатура снята. Хаб недоступен: toast, клавиатура остаётся.
-- `ans` → `owner_job`; не `waiting_owner` — toast «Задание уже <статус>», клавиатура снята; иначе
-  ForceReply и `app_state["devlab_reply:<chat_id>:<message_id>"] = {job_id, user_id, created}`,
-  срок 24 ч.
-- `DevlabReplyFilter`: реплай владельца (текст не пуст, не команда) на ForceReply-подсказку (тот же
-  пользователь) или на оповещение `question` (ключ `devlab_notice`) → `owner_post kind=answer`,
-  ответ «Передал агенту.». Ключи после ответа или отказа хаба НЕ удаляются: повторный реплай
-  уходит в хаб, тот отказывает (`bad_request`), владелец видит «Хаб отказал: …», в диалог с
-  Альфредом ничего не идёт. Реплай на старое оповещение уходит ответом на текущий вопрос того же
-  задания. Просроченное (подсказка 24 ч, оповещение 7 суток): «подсказка устарела», ключ
-  удаляется, в диалог не уходит. `DevlabNotifier.tick` в начале каждого прохода сносит
-  просроченные ключи `devlab_notice:*` и `devlab_reply:*`. Состояние в `app_state`, поэтому
-  переживает рестарт.
-- Владелец проверяется дважды: `subscription.is_owner` и `from_user.id == subscription.chat_id`
-  (и для нажатий, и для реплаев).
-- Находка 2026-11-02 (62.3.1): в проде реплай «go» на подсказку ушёл Альфреду, а не в хаб.
-  `AuthorizationMiddleware` висит inner-middleware на `dp.message`, а aiogram зовёт фильтры
-  роутера ДО inner-middleware, поэтому `subscription` в фильтре всегда `None` и фильтр молча
-  отвечал False (юнит-тесты передавали `subscription` руками). Теперь фильтр сам берёт подписку из
-  `book` (workflow-данные `start_polling` фильтрам видны), хендлер по-прежнему получает
-  `subscription` от middleware. Кнопки не страдали: их фильтр только `F.data`. Страж —
-  `tests/unit/test_devlab_dispatch.py`, апдейты через настоящий `build_dispatcher` +
-  `feed_update` с workflow-данными как в `app.py`.
+- В оповещении `question` последней строкой `DEVLAB_ANSWER_HINT`: ответить агенту можно через
+  Claude (`devlab_answer` по MCP).
+- Старые кнопки «Ответить» (`dl:ans:…`) в уже отправленных сообщениях: нажатие просто гасит
+  часики, ничего не делает.
+
+## Ответ агенту из Telegram убран (решение владельца 2026-11-02, 62.3.1)
+Кнопка «Ответить», ForceReply-подсказка, `DevlabReplyFilter` и ключи `app_state`
+`devlab_notice:*`/`devlab_reply:*` удалены. Реплай владельца на оповещение идёт в обычный диалог с
+Альфредом. Отвечать агенту — через Claude (`devlab_answer`); позже прямой диалог с агентами
+переедет в отдельный Telegram-бот мастерской. `owner_post` хаба не менялся, `kind=answer` из бота
+просто больше не шлётся. Оставшиеся на проде ключи `devlab_notice:*`/`devlab_reply:*`
+`DevlabNotifier.run` один раз сносит при старте (`purge_legacy_keys`); убрать вместе с
+константой `LEGACY_STATE_PREFIXES`, когда выкат пройдёт.
+
+Урок 2026-11-02: в проде реплай «go» на подсказку ушёл Альфреду, а не в хаб.
+`AuthorizationMiddleware` висит inner-middleware на `dp.message`, а aiogram зовёт фильтры роутера ДО
+inner-middleware, поэтому `subscription` в фильтре всегда была `None`, и фильтр молча отвечал False
+(юнит-тесты передавали `subscription` руками). Фильтру видны только workflow-данные
+`start_polling` (`store`, `book`, …) и то, что кладут outer-middleware. Кнопки не страдали: их фильтр
+только `F.data`, а `subscription` получает уже хендлер. Страж для такого класса ошибок —
+`tests/unit/test_devlab_dispatch.py`: апдейты идут через настоящий `build_dispatcher` +
+`feed_update` с workflow-данными как в `app.py`.
