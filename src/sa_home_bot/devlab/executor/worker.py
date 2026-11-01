@@ -39,6 +39,8 @@ FAILED_TEXT_CHARS = 1000
 class ExecutorState(BaseModel):
     cursor: int = 0
     current: str | None = None
+    project: str | None = None
+    ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,15 +186,41 @@ class TestWorker(WorkerLoops):
         orphan = self._state.current
         if orphan is None:
             return
+        outcome = await self._requeue_orphan(orphan)
+        if outcome == protocol.MSG_FAILED:
+            await self._drop_orphan_branch()
+        self._save(current=None, project=None, ref=None)
+
+    async def _requeue_orphan(self, orphan: str) -> str | None:
         try:
-            await self._hub.post(
+            return await self._hub.post(orphan, protocol.MSG_REQUEUE, {})
+        except HubRequestError as exc:
+            if not exc.permanent:
+                log.warning(
+                    "Осиротевшее задание %s не возвращено: %s", orphan, self.scrub(str(exc))
+                )
+                return None
+            log.warning("Хаб не принял возврат %s: %s", orphan, self.scrub(str(exc)))
+        try:
+            return await self._hub.post(
                 orphan,
                 protocol.MSG_FAILED,
                 {protocol.PAYLOAD_TEXT: "исполнитель перезапущен во время прогона"},
             )
         except HubRequestError as exc:
             log.warning("Осиротевшее задание %s не закрыто: %s", orphan, self.scrub(str(exc)))
-        self._save(current=None)
+            return None
+
+    async def _drop_orphan_branch(self) -> None:
+        project, ref = self._state.project, self._state.ref
+        if not project or not ref:
+            return
+        try:
+            mirror = self._mirror(project)
+        except Exception as exc:
+            log.warning("Ветка %s осиротевшего задания не удалена: %s", ref, self.scrub(str(exc)))
+            return
+        await self._drop_branch(mirror, ref)
 
     async def poll_once(self) -> None:
         messages, cursor = await self._hub.poll(self._state.cursor)
@@ -213,9 +241,9 @@ class TestWorker(WorkerLoops):
     async def handle(self, job: Job) -> None:
         self._current = job.id
         self._busy.started(job.id)
-        self._save(current=job.id)
-        workdir = self._settings.work_dir / JOBS_DIR / job.id
         ref = str(job.params.get(protocol.FIELD_REF, ""))
+        self._save(current=job.id, project=job.project, ref=ref)
+        workdir = self._settings.work_dir / JOBS_DIR / job.id
         mirror: ProjectMirror | None = None
         self._delivered = False
         try:
@@ -226,11 +254,13 @@ class TestWorker(WorkerLoops):
             except Exception as exc:
                 text = self.scrub(f"{type(exc).__name__}: {exc}")[:FAILED_TEXT_CHARS]
                 log.warning("Задание %s не выполнено: %s", job.id, text)
-                await self._post_quietly(job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text})
-                self._delivered = True
+                self._delivered = await self._post_quietly(
+                    job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
+                )
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
-            await self._drop_branch(mirror, ref)
+            if self._delivered:
+                await self._drop_branch(mirror, ref)
         except asyncio.CancelledError:
             if self._delivered:
                 await self._drop_branch(mirror, ref)
@@ -240,7 +270,7 @@ class TestWorker(WorkerLoops):
             self._current = None
             self._busy.finished(job.id)
             if self._delivered:
-                self._save(current=None)
+                self._save(current=None, project=None, ref=None)
 
     async def _drop_branch(self, mirror: ProjectMirror | None, ref: str) -> None:
         if mirror is None or not ref.startswith(protocol.TEST_BRANCH_PREFIX):
@@ -334,13 +364,15 @@ class TestWorker(WorkerLoops):
             },
         )
 
-    async def _post_quietly(self, job_id: str, kind: str, payload: dict) -> None:
+    async def _post_quietly(self, job_id: str, kind: str, payload: dict) -> bool:
         try:
             await self._hub.post(job_id, kind, payload)
         except HubRequestError as exc:
             log.warning(
                 "Сообщение %s по заданию %s не доставлено: %s", kind, job_id, self.scrub(str(exc))
             )
+            return False
+        return True
 
     async def run(self, heartbeat: bool = True) -> None:
         await self.recover()

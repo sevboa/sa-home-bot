@@ -54,8 +54,8 @@ class ExecutorHub(HubHttp):
         data = await self._post(protocol.HTTP_CATALOG_PATH, {})
         return data[protocol.FIELD_MODELS]
 
-    async def post(self, job_id: str, kind: str, payload: dict[str, Any]) -> None:
-        await self._post(
+    async def post(self, job_id: str, kind: str, payload: dict[str, Any]) -> str:
+        data = await self._post(
             protocol.HTTP_POST_PATH,
             {
                 protocol.FIELD_JOB_ID: job_id,
@@ -63,6 +63,7 @@ class ExecutorHub(HubHttp):
                 protocol.FIELD_PAYLOAD: payload,
             },
         )
+        return str(data.get(protocol.FIELD_KIND, kind))
 
     async def poll(self, since: int) -> tuple[list[Message], int]:
         data = await self._post(protocol.HTTP_POLL_PATH, {protocol.FIELD_SINCE: since})

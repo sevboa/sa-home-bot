@@ -61,6 +61,7 @@ MSG_DONE = "done"
 MSG_FAILED = "failed"
 MSG_STOPPED = "stopped"
 MSG_TEST_DONE = "test_done"
+MSG_REQUEUE = "requeue"
 MSG_STALLED = "stalled"
 EXECUTOR_MESSAGES = (
     MSG_STARTED,
@@ -70,6 +71,7 @@ EXECUTOR_MESSAGES = (
     MSG_FAILED,
     MSG_STOPPED,
     MSG_TEST_DONE,
+    MSG_REQUEUE,
 )
 
 MSG_ANSWER = "answer"
@@ -86,6 +88,7 @@ MESSAGE_TARGET_STATUS: dict[str, str | None] = {
     MSG_FAILED: STATUS_FAILED,
     MSG_STOPPED: STATUS_STOPPED,
     MSG_TEST_DONE: STATUS_DONE,
+    MSG_REQUEUE: STATUS_QUEUED,
 }
 
 PAYLOAD_TOKENS = "tokens"
@@ -182,6 +185,8 @@ MODEL_KIND_LLAMACPP = "llamacpp"
 MODEL_GATEWAY = "gateway"
 MODEL_URL = "url"
 PARAM_REMARKS = "remarks"
+PARAM_ATTEMPTS = "attempts"
+TEST_MAX_REQUEUES = 2
 DEVLAB_SLICE = "sa-home-devlab.slice"
 MODEL_UNIT_PREFIX = "sa-home-devlab-model-"
 DEVLAB_SLICE_CPU_WEIGHT = 10

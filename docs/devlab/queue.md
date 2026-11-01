@@ -13,7 +13,7 @@
 | из \ в | running | waiting_owner | done / failed | stopped | queued |
 |---|---|---|---|---|---|
 | queued | `claim` | нет | нет | `stop` | нет |
-| running | нет | `question` | `done` / `failed` | `stop` | нет |
+| running | нет | `question` | `done` / `failed` | `stop` | `requeue` (только test) |
 | waiting_owner | `answer` | нет | `failed` | `stop` | `resume` |
 | done / failed / stopped | нет | нет | нет | нет | `resume` |
 
@@ -28,6 +28,7 @@
 | `started`, `step_done` | к клиенту | только в статусе running, статус не меняют |
 | `question` | к клиенту | running → waiting_owner |
 | `done`, `failed`, `stopped` | к клиенту | финальный статус |
+| `requeue` | к клиенту | только `test` в running (иначе `HubError`): → queued, `executor` сбрасывается, `params.attempts` растёт; исполнитель шлёт при рестарте посреди прогона (60.9.2). После `TEST_MAX_REQUEUES` = 2 возвратов следующий `requeue` ставит `failed` с текстом «исполнитель перезапускался во время прогона N раз» (клиент получает `failed`). Мимо `TRANSITIONS`: клиентский `resume` из running по-прежнему запрещён. Ответ `post` содержит `kind` записанного сообщения (`requeue` или `failed`); старый хаб `requeue` отвергает |
 | `stalled` | к клиенту | кладёт сам хаб (`flag_stalled`), не исполнитель; статус не меняет; см. «Застой» ниже |
 | `answer` | к исполнителю | waiting_owner → running |
 | `resume` | к исполнителю | → queued; `payload.model` меняет модель задания, `payload.text` кладётся в `params.remarks` задания (прошлые замечания заменяются) |
@@ -92,6 +93,8 @@
   `summary` {`passed`, `failed`, `errors`, `skipped`}, `failures` (список объектов, например
   `{name, excerpt}`), `tail` (хвост вывода). Сводка живёт только в сообщении ящика, колонки нет:
   `HubQueue.last_message(job_id, kind)` отдаёт её MCP.
+- **Возврат в очередь (60.9.2).** `requeue` ставит прерванное test-задание обратно в queued; `wait_terminal`
+  его не принимает за итог и ждёт дальше (будится, но статус нетерминальный). Тот же `ref` и `cmd`.
 - **Ожидание.** `HubQueue.wait_terminal(job_id, timeout)` ждёт `asyncio.Event` задания, который
   будит `post_from_executor` и `post_from_client` после коммита; БД не опрашивается. По сроку
   возвращает текущее задание.

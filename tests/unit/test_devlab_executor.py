@@ -9,7 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.executor import mirror as mirror_module
-from sa_home_bot.devlab.executor.hub import ExecutorHub
+from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.mirror import GitError, ProjectMirror, remote_url
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE
 from sa_home_bot.devlab.executor.worker import (
@@ -319,21 +319,91 @@ async def test_cursor_survives_restart(env):
     assert cursor == first.cursor
 
 
-async def test_restart_closes_orphaned_job(env):
-    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/9"
+async def orphan_job(env, name, ref, attempts=0):
     await env.push(ref, {".devlab.toml": SPEC})
     job_id = await env.submit(ref)
-    worker = env.worker(FakeTestRunner())
+    worker = env.worker(FakeTestRunner(), name)
     claimed = await worker._hub.claim([protocol.JOB_KIND_TEST])
     assert claimed.id == job_id
-    state_path = env.tmp_path / "exec" / STATE_FILE
+    await worker._mirror(PROJECT).fetch()
+    state_path = env.tmp_path / name / STATE_FILE
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(ExecutorState(current=job_id).model_dump_json())
+    state_path.write_text(ExecutorState(current=job_id, project=PROJECT, ref=ref).model_dump_json())
+    return job_id, state_path
+
+
+async def test_restart_requeues_orphaned_job(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/9"
+    job_id, state_path = await orphan_job(env, "exec", ref)
 
     restarted = env.worker(FakeTestRunner())
     await restarted.recover()
+    assert await env.status(job_id) == protocol.STATUS_QUEUED
+    assert json.loads(state_path.read_text())["current"] is None
+    assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
+    assert protocol.MSG_FAILED not in await env.inbox_kinds()
+
+
+async def test_restart_after_limit_fails_job_and_drops_branch(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/10"
+    job_id, state_path = await orphan_job(env, "exec", ref)
+    state = ExecutorState(current=job_id, project=PROJECT, ref=ref).model_dump_json()
+    for _ in range(protocol.TEST_MAX_REQUEUES):
+        await env.worker(FakeTestRunner()).recover()
+        assert await env.status(job_id) == protocol.STATUS_QUEUED
+        await env.store.queue.claim("pc", [], [protocol.JOB_KIND_TEST])
+        state_path.write_text(state)
+    await env.worker(FakeTestRunner()).recover()
+    assert await env.status(job_id) == protocol.STATUS_FAILED
+    assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+async def test_recover_falls_back_to_failed_for_old_hub(env, monkeypatch):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/11"
+    job_id, state_path = await orphan_job(env, "exec", ref)
+    restarted = env.worker(FakeTestRunner())
+    original = restarted._hub.post
+
+    async def old_hub_post(job, kind, payload):
+        if kind == protocol.MSG_REQUEUE:
+            raise HubRequestError("недопустим", 400)
+        return await original(job, kind, payload)
+
+    monkeypatch.setattr(restarted._hub, "post", old_hub_post)
+    await restarted.recover()
     assert await env.status(job_id) == protocol.STATUS_FAILED
     assert json.loads(state_path.read_text())["current"] is None
+    assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+async def test_recover_keeps_branch_on_network_error(env, monkeypatch):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/12"
+    job_id, _ = await orphan_job(env, "exec", ref)
+    restarted = env.worker(FakeTestRunner())
+
+    async def broken_post(job, kind, payload):
+        raise HubRequestError("сеть")
+
+    monkeypatch.setattr(restarted._hub, "post", broken_post)
+    await restarted.recover()
+    assert await env.status(job_id) == protocol.STATUS_RUNNING
+    assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+async def test_failed_post_failure_keeps_current_and_branch(env, monkeypatch):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/13"
+    await env.push(ref, {"a.txt": b"x"})
+    job_id = await env.submit(ref)
+    worker = env.worker(FakeTestRunner())
+
+    async def broken_post(job, kind, payload):
+        raise HubRequestError("сеть")
+
+    monkeypatch.setattr(worker._hub, "post", broken_post)
+    assert await worker.claim_once()
+    state = load_model(ExecutorState, env.tmp_path / "exec" / STATE_FILE)
+    assert (state.current, state.ref) == (job_id, ref)
+    assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
 
 
 async def test_heartbeat_reports_busy(env):

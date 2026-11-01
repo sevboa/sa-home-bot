@@ -362,6 +362,26 @@ async def test_devlab_test_wait_returns_result_in_time(client, store, alice):
     assert done["result"][protocol.PAYLOAD_EXIT_CODE] == 1
 
 
+async def test_devlab_test_wait_survives_requeue(client, store, alice):
+    await register(client, store, alice)
+    waiting = asyncio.create_task(
+        call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE, wait=30)
+    )
+    job = None
+    while job is None:
+        await asyncio.sleep(0.01)
+        job = await claim_test(store)
+    await store.queue.post_from_executor(job.id, protocol.MSG_REQUEUE, executor="pc")
+    await asyncio.sleep(0.05)
+    assert not waiting.done()
+    again = await claim_test(store)
+    assert again.id == job.id
+    await store.queue.post_from_executor(job.id, protocol.MSG_TEST_DONE, DONE, executor="pc")
+    is_error, done = await asyncio.wait_for(waiting, 2)
+    assert not is_error
+    assert done["job"]["status"] == protocol.STATUS_DONE
+
+
 async def test_devlab_status_of_test_job_carries_result(client, store, alice):
     await register(client, store, alice)
     _, queued = await call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE)

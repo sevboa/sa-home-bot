@@ -387,8 +387,13 @@ class HubQueue:
                 kind == protocol.MSG_QUESTION and is_test
             ):
                 raise HubError(f"задание {job_id} ({job.kind}): {kind} недопустим")
-            confirm_stop = kind == protocol.MSG_STOPPED and job.status == protocol.STATUS_STOPPED
-            if not confirm_stop:
+            if kind == protocol.MSG_REQUEUE:
+                if not is_test or job.status != protocol.STATUS_RUNNING:
+                    raise HubError(
+                        f"задание {job_id} ({job.kind}, {job.status}): {kind} недопустим"
+                    )
+                kind, payload = await self._requeue(conn, job, payload)
+            elif not (kind == protocol.MSG_STOPPED and job.status == protocol.STATUS_STOPPED):
                 target = protocol.MESSAGE_TARGET_STATUS[kind]
                 if target is None:
                     if job.status != protocol.STATUS_RUNNING:
@@ -405,6 +410,26 @@ class HubQueue:
             message = await self._post(conn, job_id, protocol.DIRECTION_TO_CLIENT, kind, payload)
         self._wake_waiters(job_id)
         return message
+
+    async def _requeue(
+        self, conn: aiosqlite.Connection, job: Job, payload: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        attempts = int(job.params.get(protocol.PARAM_ATTEMPTS, 0))
+        if attempts >= protocol.TEST_MAX_REQUEUES:
+            self._check_transition(job, protocol.STATUS_FAILED)
+            await self._set_status(conn, job, protocol.STATUS_FAILED)
+            text = f"исполнитель перезапускался во время прогона {attempts + 1} раз"
+            return protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
+        params = {**job.params, protocol.PARAM_ATTEMPTS: attempts + 1}
+        await conn.execute(
+            "UPDATE jobs SET status = ?, executor = NULL, finished = NULL, params = ? WHERE id = ?",
+            (
+                protocol.STATUS_QUEUED,
+                json.dumps(params, ensure_ascii=False),
+                job.id,
+            ),
+        )
+        return protocol.MSG_REQUEUE, payload
 
     async def post_from_client(
         self, client: str, job_id: str, kind: str, payload: dict[str, Any] | None = None

@@ -48,7 +48,7 @@ async def post(request: web.Request) -> web.Response:
     message = await request.app[STORE_KEY].queue.post_from_executor(
         job_id, kind, payload, executor=request[PRINCIPAL_KEY].name
     )
-    return web.json_response({protocol.FIELD_SEQ: message.seq})
+    return web.json_response({protocol.FIELD_SEQ: message.seq, protocol.FIELD_KIND: message.kind})
 
 
 @roles(protocol.ROLE_EXECUTOR)
