@@ -186,7 +186,11 @@ async def list_jobs(ctx: Context, statuses: list[str] | None = None) -> Any:
 
 
 async def status(ctx: Context, id: str) -> Any:
-    return job_view(await ctx.store.queue.get_job(id, ctx.client))
+    job = await ctx.store.queue.get_job(id, ctx.client)
+    view = job_view(job)
+    if job.kind == protocol.JOB_KIND_TEST:
+        view["result"] = await test_outcome(ctx, job)
+    return view
 
 
 async def inbox(ctx: Context, since: int = 0, limit: int = 100) -> Any:
@@ -324,7 +328,13 @@ TOOLS: tuple[Tool, ...] = (
         ),
         list_jobs,
     ),
-    Tool(protocol.TOOL_STATUS, "Подробности вашего задания, включая task.md.", (ID,), status),
+    Tool(
+        protocol.TOOL_STATUS,
+        "Подробности вашего задания, включая task.md. У test-задания поле result: итог теста"
+        " (как у devlab_test), null пока задание не завершено.",
+        (ID,),
+        status,
+    ),
     Tool(
         protocol.TOOL_INBOX,
         "Новые сообщения агентов по вашим заданиям с номером больше since. Курсор в ответе"

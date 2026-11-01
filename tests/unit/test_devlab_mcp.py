@@ -362,6 +362,27 @@ async def test_devlab_test_wait_returns_result_in_time(client, store, alice):
     assert done["result"][protocol.PAYLOAD_EXIT_CODE] == 1
 
 
+async def test_devlab_status_of_test_job_carries_result(client, store, alice):
+    await register(client, store, alice)
+    _, queued = await call(client, alice, protocol.TOOL_TEST, project=PROJECT, ref=BASE)
+    job_id = queued["job"]["id"]
+    _, before = await call(client, alice, protocol.TOOL_STATUS, id=job_id)
+    assert before["result"] is None
+    job = await claim_test(store)
+    await store.queue.post_from_executor(job.id, protocol.MSG_TEST_DONE, DONE, executor="pc")
+    _, after = await call(client, alice, protocol.TOOL_STATUS, id=job_id)
+    assert after["status"] == protocol.STATUS_DONE
+    assert after["result"][protocol.PAYLOAD_EXIT_CODE] == 1
+    assert after["result"][protocol.PAYLOAD_SUMMARY][protocol.SUMMARY_FAILED] == 1
+
+
+async def test_devlab_status_of_agent_job_has_no_result(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    _, view = await call(client, alice, protocol.TOOL_STATUS, id=submitted["job"]["id"])
+    assert "result" not in view
+
+
 async def test_devlab_test_wait_failure_returns_reason(client, store, alice):
     await register(client, store, alice)
     waiting = asyncio.create_task(

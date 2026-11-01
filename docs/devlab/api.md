@@ -63,7 +63,7 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_test` | `project`, `ref`, `cmd`, `args`, `wait` | ставит задание `test`; `wait` секунд (0..1800) ждёт результата |
 | `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ) |
 | `devlab_list` | `statuses` | свои задания без текста task.md |
-| `devlab_status` | `id` | своё задание целиком |
+| `devlab_status` | `id` | своё задание целиком; у `test` поле `result` (как у `devlab_test`, `null` до завершения) |
 | `devlab_inbox` | `since`, `limit` | сообщения к клиенту с курсором `cursor` |
 | `devlab_ack` | `upto` | помечает прочитанным |
 | `devlab_answer` | `id`, `text` | ответ на `question` (waiting_owner → running) |
