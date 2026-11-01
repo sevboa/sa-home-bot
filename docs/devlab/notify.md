@@ -21,7 +21,17 @@
 Вступление-заглушка (`bot/ai_lines.py`: `DEVLAB_QUESTION_TEXT`, `DEVLAB_DONE_TEXT`,
 `DEVLAB_FAILED_TEXT`) и блок фактов: проект, номер, заголовок, модель, токены и $, ветка
 `agent/<id>`, текст вопроса / сводка / причина провала. Всё через `html.escape`, тело обрезается
-`facts_max_chars`. Вступление через gemma добавляет 62.4.
+`facts_max_chars`. 
+## Вступление через gemma (Этап 62.4)
+`DevlabNotifier.compose_lead(kind, chat_id)`: один вызов `chat` службы `llm` на сообщение (до цикла
+по админам, текст общий), `role="persona"`, `think=False`, `chat_id` первого админа, таймаут
+`llm_timeout_s`. В промпт идёт только инструкция по виду события (`LEAD_INSTRUCTION`,
+`LEAD_EVENTS`): «одна-две фразы, подробности ниже, чисел и названий не повторяй». Факты, цифры и
+текст вопроса в промпт не попадают, их вставляет код. Ответ: `clip(…, 400, at_word=True)`,
+`html.escape`, префикс `ALFRED_PREFIX_HTML`.
+Сухая заглушка из `ai_lines.py` ставится, если Альфред «в городе» (`AwayService.load()` не `None`,
+`chat` не зовётся), нет `node_link`/админов, ответ пуст или `done_reason == "length"`, ошибка
+связи или `TimeoutError`. mycraft ради оповещения не будится.
 
 ## Доставка
 Каждому админу (`WILDCARD in allowed_commands`) `Notifier.send_direct(outbox_kind=task,

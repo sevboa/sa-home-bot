@@ -12,6 +12,8 @@ from typing import Any
 from aiogram.types import InlineKeyboardMarkup
 
 from sa_home_bot.bot import ai_lines
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
+from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.notifier import Notifier, admin_subs
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
@@ -20,7 +22,9 @@ from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import OUTBOX_KIND_TASK, Store
 from sa_home_bot.devlab import protocol
-from sa_home_bot.proto.addresses import Address
+from sa_home_bot.llm_chat import ACTION_CHAT
+from sa_home_bot.proto.addresses import LLM_ADDRESS, Address
+from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.utils.text import clip
 
 log = logging.getLogger(__name__)
@@ -47,6 +51,19 @@ LEADS = {
     protocol.MSG_DONE: ai_lines.DEVLAB_DONE_TEXT,
     protocol.MSG_FAILED: ai_lines.DEVLAB_FAILED_TEXT,
 }
+LEAD_EVENTS = {
+    protocol.MSG_QUESTION: "агент задал вам вопрос и ждёт ответа",
+    protocol.MSG_DONE: "агент закончил порученное задание",
+    protocol.MSG_FAILED: "агент не справился с заданием",
+}
+LEAD_INSTRUCTION = (
+    "Скажи хозяину одну-две короткие фразы в своём образе: {event}. "
+    "Подробности (числа, суммы, названия моделей и веток, номера, текст вопроса или отчёта) "
+    "будут приведены ниже отдельным блоком, поэтому их не называй и не пересказывай, "
+    "никаких цифр. Без списков и без приветствия."
+)
+LEAD_MAX_CHARS = 400
+LLM_ERRORS = (*SERVICE_CALL_ERRORS, TimeoutError, OSError)
 BODY_FIELDS = {
     protocol.MSG_QUESTION: protocol.PAYLOAD_TEXT,
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
@@ -146,8 +163,8 @@ def facts_block(message: dict[str, Any], max_chars: int) -> str:
     return "\n".join(lines)
 
 
-def compose_text(message: dict[str, Any], max_chars: int) -> str:
-    return f"{LEADS[message['kind']]}\n\n{facts_block(message, max_chars)}"
+def compose_text(message: dict[str, Any], max_chars: int, lead: str | None = None) -> str:
+    return f"{lead or LEADS[message['kind']]}\n\n{facts_block(message, max_chars)}"
 
 
 class DevlabNotifier:
@@ -220,12 +237,47 @@ class DevlabNotifier:
             timeout=CALL_TIMEOUT_S,
         )
 
+    async def compose_lead(self, kind: str, chat_id: int | None) -> str | None:
+        node_link = self._get_node_link()
+        if node_link is None or chat_id is None:
+            return None
+        if await AwayService(self._store, self._config).load() is not None:
+            return None
+        args = {
+            "messages": [
+                {"role": "user", "content": LEAD_INSTRUCTION.format(event=LEAD_EVENTS[kind])}
+            ],
+            "role": "persona",
+            "think": False,
+            "chat_id": chat_id,
+        }
+        try:
+            result = await node_link.command(
+                ACTION_CHAT,
+                args,
+                dst=LLM_ADDRESS,
+                timeout=self._config.devlab_notify.llm_timeout_s,
+            )
+        except LLM_ERRORS as exc:
+            log.warning("devlab_notify: вступление не получено: %s", exc)
+            return None
+        if not isinstance(result, dict) or result.get("done_reason") == "length":
+            return None
+        raw = str(result.get("response") or "").strip()
+        if not raw:
+            return None
+        return ALFRED_PREFIX_HTML + html.escape(clip(raw, LEAD_MAX_CHARS, at_word=True))
+
     async def _deliver(self, message: dict[str, Any]) -> None:
-        text = compose_text(message, self._config.devlab_notify.facts_max_chars)
+        subs = admin_subs(self._book)
+        lead = await self.compose_lead(
+            message[protocol.FIELD_KIND], subs[0].chat_id if subs else None
+        )
+        text = compose_text(message, self._config.devlab_notify.facts_max_chars, lead)
         job_id = str(message[protocol.FIELD_JOB][protocol.FIELD_ID])
         seq = message[protocol.FIELD_SEQ]
         keyboard = notice_keyboard(message[protocol.FIELD_KIND], job_id)
-        for sub in admin_subs(self._book):
+        for sub in subs:
             message_id = await self._notifier.send_direct(
                 sub.chat_id,
                 text,
