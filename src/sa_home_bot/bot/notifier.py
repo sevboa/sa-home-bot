@@ -151,11 +151,14 @@ async def broadcast(subs: Iterable[Any], notifier: Notifier, text: str, **send_k
     return delivered
 
 
+def admin_subs(book) -> list[Any]:
+    return [sub for sub in book.all() if WILDCARD in sub.allowed_commands]
+
+
 async def notify_admins(
     book, notifier: Notifier, text: str, reply_markup: InlineKeyboardMarkup | None = None
 ) -> None:
-    admins = (sub for sub in book.all() if WILDCARD in sub.allowed_commands)
-    await broadcast(admins, notifier, text, reply_markup=reply_markup)
+    await broadcast(admin_subs(book), notifier, text, reply_markup=reply_markup)
 
 
 class Notifier:

@@ -8,14 +8,13 @@ from collections.abc import Callable
 from typing import Any
 
 from sa_home_bot.bot import ai_lines
-from sa_home_bot.bot.notifier import Notifier
+from sa_home_bot.bot.notifier import Notifier, admin_subs
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import OUTBOX_KIND_TASK, Store
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.addresses import Address
-from sa_home_bot.subscriptions.models import WILDCARD
 from sa_home_bot.utils.text import clip
 
 log = logging.getLogger(__name__)
@@ -39,26 +38,29 @@ BODY_FIELDS = {
 
 def wants_notice(message: dict[str, Any]) -> bool:
     job = message.get(protocol.FIELD_JOB) or {}
-    if job.get("kind") != protocol.JOB_KIND_AGENT:
+    if job.get(protocol.FIELD_KIND) != protocol.JOB_KIND_AGENT:
         return False
-    kind = message.get("kind")
+    kind = message.get(protocol.FIELD_KIND)
     if kind not in NOTIFIED_KINDS:
         return False
-    return kind != protocol.MSG_QUESTION or job.get("status") == protocol.STATUS_WAITING_OWNER
+    waiting = job.get(protocol.FIELD_STATUS) == protocol.STATUS_WAITING_OWNER
+    return kind != protocol.MSG_QUESTION or waiting
 
 
 def facts_block(message: dict[str, Any], max_chars: int) -> str:
     job = message.get(protocol.FIELD_JOB) or {}
-    kind = message["kind"]
-    job_id = job.get("id", "")
+    kind = message[protocol.FIELD_KIND]
+    job_id = job.get(protocol.FIELD_ID, "")
     lines = [
         f"Проект: {html.escape(str(job.get('project', '')))}, задание {html.escape(str(job_id))}",
     ]
     title = job.get(protocol.FIELD_TITLE)
     if title:
         lines.append(f"Заголовок: {html.escape(str(title))}")
-    lines.append(f"Модель: {html.escape(str(job.get('model', '')))}")
-    lines.append(f"Токены: {job.get('tokens', 0)}, ${float(job.get('cost_usd') or 0):.4f}")
+    lines.append(f"Модель: {html.escape(str(job.get(protocol.PAYLOAD_MODEL, '')))}")
+    tokens = job.get(protocol.PAYLOAD_TOKENS, 0)
+    cost = float(job.get(protocol.PAYLOAD_COST_USD) or 0)
+    lines.append(f"Токены: {tokens}, ${cost:.4f}")
     lines.append(f"Ветка: {html.escape(protocol.AGENT_BRANCH_PREFIX + str(job_id))}")
     payload = message.get(protocol.FIELD_PAYLOAD) or {}
     body = str(payload.get(BODY_FIELDS[kind]) or "").strip()
@@ -138,17 +140,15 @@ class DevlabNotifier:
 
     async def _deliver(self, message: dict[str, Any]) -> None:
         text = compose_text(message, self._config.devlab_notify.facts_max_chars)
-        job_id = str(message[protocol.FIELD_JOB]["id"])
+        job_id = str(message[protocol.FIELD_JOB][protocol.FIELD_ID])
         seq = message[protocol.FIELD_SEQ]
-        for sub in self._book.all():
-            if WILDCARD not in sub.allowed_commands:
-                continue
+        for sub in admin_subs(self._book):
             message_id = await self._notifier.send_direct(
                 sub.chat_id,
                 text,
                 outbox_kind=OUTBOX_KIND_TASK,
                 dedup_key=DEDUP_KEY.format(seq=seq),
             )
-            if message_id is not None and message["kind"] == protocol.MSG_QUESTION:
+            if message_id is not None and message[protocol.FIELD_KIND] == protocol.MSG_QUESTION:
                 key = NOTICE_KEY.format(chat_id=sub.chat_id, message_id=message_id)
                 await self._store.set_state(key, job_id)

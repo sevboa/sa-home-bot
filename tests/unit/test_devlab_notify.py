@@ -185,3 +185,23 @@ async def test_long_body_is_clipped(store):
     notifier_obj, notifier = make(store, FakeNodeLink(results=inbox([message(1, payload=long)])))
     await notifier_obj.tick()
     assert len(notifier.sent[0][1]) < 2000
+
+
+async def test_every_admin_gets_own_notice_and_guest_none(store):
+    await store.set_state(devlab_notify.CURSOR_KEY, "0")
+    link = FakeNodeLink(results=inbox([message(1)]))
+    notifier = FakeNotifier()
+    settings = Settings()
+    book = make_book(
+        make_subscription(OWNER),
+        make_subscription(33, "second"),
+        make_subscription(GUEST, "guest", "status"),
+    )
+    notifier_obj = DevlabNotifier(
+        get_node_link=lambda: link, store=store, config=settings, book=book, notifier=notifier
+    )
+    await notifier_obj.tick()
+    assert [chat for chat, _ in notifier.sent] == [OWNER, 33]
+    assert await store.get_state(f"devlab_notice:{OWNER}:1001") == "j1"
+    assert await store.get_state("devlab_notice:33:1002") == "j1"
+    assert await store.get_state(f"devlab_notice:{GUEST}:1003") is None
