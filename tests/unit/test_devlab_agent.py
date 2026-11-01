@@ -325,5 +325,85 @@ def test_parse_reply_rejects_garbage():
     assert parse_reply(reply_body("текст")).tool_calls == ()
 
 
+def provider_failure(code, message="апстрим упал"):
+    return {"error": {"message": message, "code": code}}
+
+
+@pytest.mark.parametrize(
+    ("code", "transient"),
+    [(429, True), (502, True), (None, True), ("upstream", True), (400, False), (401, False)],
+)
+def test_parse_reply_provider_error_body(code, transient, caplog):
+    with caplog.at_level("WARNING"), pytest.raises(ModelError, match="апстрим упал") as info:
+        parse_reply(provider_failure(code))
+    assert info.value.transient is transient
+    assert "апстрим упал" in caplog.text
+
+
+def test_parse_reply_string_error_is_transient():
+    with pytest.raises(ModelError, match="сломалось") as info:
+        parse_reply({"error": "сломалось"})
+    assert info.value.transient
+
+
+def test_parse_reply_empty_choices_is_transient_and_logs_raw(caplog):
+    with caplog.at_level("WARNING"), pytest.raises(ModelError, match="нет choices") as info:
+        parse_reply({"choices": [], "id": "gen-1"})
+    assert info.value.transient
+    assert "gen-1" in caplog.text
+
+
+def test_parse_reply_finish_reason_error():
+    body = {
+        "choices": [
+            {
+                "finish_reason": "error",
+                "error": {"message": "модель оборвалась", "code": 503},
+                "message": {"content": ""},
+            }
+        ]
+    }
+    with pytest.raises(ModelError, match="модель оборвалась") as info:
+        parse_reply(body)
+    assert info.value.transient
+    bare = {"choices": [{"finish_reason": "error", "message": {"content": ""}}]}
+    with pytest.raises(ModelError, match="finish_reason=error") as info:
+        parse_reply(bare)
+    assert info.value.transient
+
+
+def test_parse_reply_generates_missing_call_ids():
+    calls = [
+        {"type": "function", "function": {"name": "grep", "arguments": "{}"}},
+        {"id": "", "function": {"name": "read", "arguments": None}},
+        {"id": "own", "function": {"name": "ls"}},
+    ]
+    reply = parse_reply(reply_body("", calls), step=7)
+    assert [c.id for c in reply.tool_calls] == ["call_7_0", "call_7_1", "own"]
+    assert reply.tool_calls[1].arguments == "{}"
+
+
+def test_parse_reply_call_without_name_is_error_and_log_is_truncated(caplog):
+    calls = [{"id": "a", "function": {"arguments": "x" * 5000}}]
+    with caplog.at_level("WARNING"), pytest.raises(ModelError, match="без имени") as info:
+        parse_reply(reply_body("", calls))
+    assert not info.value.transient
+    assert 0 < len(caplog.text) < 2500
+
+
+async def test_gateway_chat_200_with_error_body_is_model_error():
+    async def handler(request):
+        return web.json_response(provider_failure(502))
+
+    server, chat = await run_gateway(handler)
+    try:
+        with pytest.raises(ModelError, match="апстрим упал") as info:
+            await chat.complete([], [])
+    finally:
+        await chat.close()
+        await server.close()
+    assert info.value.transient
+
+
 def test_model_timeout_is_at_least_half_hour():
     assert MODEL_TIMEOUT_S >= 1800

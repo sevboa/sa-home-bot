@@ -254,3 +254,24 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
 лимиты `AgentLimits` из `[devlab] agent_max_*` (`agent_limits`), модели из каталога хаба
 (`GatewayModels`). Агентский слот один; тесты не стоят за агентом. Подробности и выкат:
 `executor.md`, `deploy.md`. Сквозной тест: `tests/unit/test_devlab_executor_service.py`.
+
+## Живые находки первого запуска (2026-11-01)
+- Задание на `nvidia/nemotron-3-ultra-550b-a55b:free` через OpenRouter: 2 минуты, 133k токенов, провал с
+  `ответ модели не разобран: KeyError`; сырой ответ не логировался. Код: `agent/model.py::parse_reply`.
+- Разбор теперь различает случаи (`provider_error`, `parse_calls`):
+  - HTTP 200 с телом `{"error": {"message", "code"}}` (сбой апстрима OpenRouter) или `finish_reason == "error"`
+    в `choices[0]` — `ModelError` с текстом провайдера; `transient`, если код 429, >=500, не число или его нет;
+    коды 4xx (ключ, запрос) не transient.
+  - пустые или отсутствующие `choices` — transient (сбой провайдера, повтор имеет смысл);
+  - вызов инструмента без `id` — id генерируется `call_<число сообщений диалога>_<i>`, стабилен при повторе на
+    другом шлюзе; без `function.name` — не transient, ошибка разбора.
+- Любая ошибка разбора пишет `warning` с телом ответа, усечённым до 1500 символов (`RAW_LOG_CHARS`). Заголовки и
+  токен шлюза не логируются, в теле ответа модели их нет.
+- Повтор: `FailoverChat` на transient пробует следующий шлюз, затем до `ROUTE_ROUNDS` = 3 кругов с паузой
+  `ROUTE_RETRY_S`; после исчерпания `ModelError("все шлюзы ... отказали")` и `MODEL_FAILED` у цикла. Не-transient
+  ошибка прерывает сразу, без переключения.
+- Шлюз (`models/gateway.py`) проксирует тело как есть: 200 с `error` идёт насквозь, разбор на стороне исполнителя.
+  Шлюз лишь пишет `warning` с началом тела; учёт (ledger) не помечает ошибки отдельно, у такого ответа нет `usage`,
+  поэтому токены в нём нулевые, а запрос засчитан.
+- Тесты: `test_devlab_agent.py` (`parse_reply`: все случаи, 200+error через `GatewayChat`),
+  `test_devlab_agent_spend.py` (переключение на второй шлюз при 200+error, ограниченность повторов, не-transient).

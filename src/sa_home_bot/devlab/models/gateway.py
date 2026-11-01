@@ -18,6 +18,7 @@ from sa_home_bot.devlab.usage import usage_cost
 log = logging.getLogger(__name__)
 
 TOKENS_PER_PRICE_UNIT = 1_000_000
+ERROR_LOG_CHARS = 1500
 SSE_DATA_PREFIX = b"data:"
 
 
@@ -178,6 +179,13 @@ class Gateway:
                 data = await upstream.read()
                 if upstream.status < 400:
                     sniffer.read_usage(_json_usage(data))
+                    if _json_error(data) is not None:
+                        log.warning(
+                            "Провайдер %s вернул HTTP %s с телом-ошибкой: %s",
+                            backend.name,
+                            upstream.status,
+                            data[:ERROR_LOG_CHARS].decode("utf-8", "replace"),
+                        )
                 return web.Response(
                     body=data, status=upstream.status, content_type=upstream.content_type
                 )
@@ -214,6 +222,14 @@ class Gateway:
             tokens_out=sniffer.tokens_out,
             cost_usd=cost,
         )
+
+
+def _json_error(data: bytes) -> Any:
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        return None
+    return parsed.get(protocol.FIELD_ERROR) if isinstance(parsed, dict) else None
 
 
 def _json_usage(data: bytes) -> Any:

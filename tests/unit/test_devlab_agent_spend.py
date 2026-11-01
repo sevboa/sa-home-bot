@@ -36,11 +36,15 @@ async def noop_sleep(seconds: float) -> None:
     return None
 
 
-async def gateway_server(status: int = 200, usage: dict | None = None) -> tuple[TestServer, list]:
+async def gateway_server(
+    status: int = 200, usage: dict | None = None, error_body: dict | None = None
+) -> tuple[TestServer, list]:
     bodies: list = []
 
     async def handler(request):
         bodies.append(await request.json())
+        if error_body is not None:
+            return web.json_response(error_body)
         if status != 200:
             return web.json_response({"error": "лежит"}, status=status)
         return web.json_response(reply_body("ок", usage=usage))
@@ -107,6 +111,52 @@ async def test_failover_switches_gateway_keeping_dialog():
     assert len(alive_bodies) == 2
     assert alive_bodies[0]["messages"] == dead_bodies[0]["messages"] == MESSAGES
     assert second.content == "ок"
+
+
+async def test_failover_switches_gateway_on_200_with_transient_error_body():
+    sick, sick_bodies = await gateway_server(
+        error_body={"error": {"message": "апстрим", "code": 502}}
+    )
+    alive, alive_bodies = await gateway_server()
+    session = aiohttp.ClientSession()
+    try:
+        reply = await failover(
+            [entry_at(sick, "jeeves"), entry_at(alive, "wooster")], session
+        ).complete(MESSAGES, [])
+    finally:
+        await session.close()
+        await sick.close()
+        await alive.close()
+    assert reply.content == "ок"
+    assert len(sick_bodies) == 1 and len(alive_bodies) == 1
+
+
+async def test_failover_retries_are_bounded_on_200_error_body():
+    sick, bodies = await gateway_server(error_body={"error": {"message": "апстрим"}})
+    session = aiohttp.ClientSession()
+    try:
+        with pytest.raises(ModelError, match="все шлюзы.*апстрим"):
+            await failover([entry_at(sick, "a")], session).complete(MESSAGES, [])
+    finally:
+        await session.close()
+        await sick.close()
+    assert len(bodies) == 3
+
+
+async def test_failover_non_transient_error_body_fails_at_once():
+    bad, bad_bodies = await gateway_server(error_body={"error": {"message": "ключ", "code": 401}})
+    spare, spare_bodies = await gateway_server()
+    session = aiohttp.ClientSession()
+    try:
+        with pytest.raises(ModelError, match="ключ"):
+            await failover([entry_at(bad, "a"), entry_at(spare, "b")], session).complete(
+                MESSAGES, []
+            )
+    finally:
+        await session.close()
+        await bad.close()
+        await spare.close()
+    assert len(bad_bodies) == 1 and spare_bodies == []
 
 
 async def test_failover_all_gateways_down_fails_and_client_error_does_not_switch():
