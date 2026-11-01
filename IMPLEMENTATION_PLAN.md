@@ -6469,6 +6469,7 @@ Colibri) и контейнеры задач ему уступают:
     не менять без парсера).
   - Зависимости: нет; кода нет — можно влить вместе с 60.8.3.
 - **60.8.5 ✅ (влито в master)** `nodectl devlab connect` при уже существующем MCP-сервере `devlab` (`claude mcp add` упал): `claude mcp remove devlab --scope user`, повторный add, подсказка `/mcp` в открытых сессиях (`devlab/connect.py`, `test_devlab_client_kit.py`, `docs/devlab/client-agent.md`).
+- **60.8.6** Тесты в `[test] cmd` идут параллельно: `pytest-xdist` в dev-экстре, `python -m pytest -q -n auto` (воркеров по ядрам cpuset слота), тесты безопасны для xdist (`docs/devlab/devlab-toml.md`).
 
 **Выкат.**
 - mycraft: `nodectl fix` (владелец, sudo), исполнитель `devlab`, шлюз `devlab_models` с llama.cpp.

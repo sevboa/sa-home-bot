@@ -1,7 +1,7 @@
 project = "sa-home-bot"
 
 [test]
-cmd = "python -m pytest -q"
+cmd = "python -m pytest -q -n auto"
 timeout_s = 3600
 image = "docker.io/library/python:3.13-slim"
 setup_files = ["pyproject.toml"]
