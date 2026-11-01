@@ -29,10 +29,11 @@
 `devlab_hub` (`protocol.ACTION_OWNER_*`), объявлены в `describe`, обрабатываются в
 `HubService._dispatch`:
 - `owner_inbox since limit`: `since < 0` — `{messages: [], cursor: max_seq}` (первый запуск бота,
-  историю не шлём); иначе сообщения к клиенту всех клиентов после `since` (по умолчанию 50) и
-  `cursor`. В каждом сообщении вложенное `job` без `task`: `kind`, `project`, `client`, `model`,
-  `status`, `title` (первая непустая строка task.md без `#`, до 120 символов). `read_at` не меняется.
-- `owner_job id`: то же `job` + `question` (текст последнего `question`, иначе пусто).
+  историю не шлём); иначе сообщения к клиенту всех клиентов после `since` (по умолчанию 100, потолок
+  `OWNER_INBOX_MAX_LIMIT` = 200, больше обрезается) и `cursor`. В каждом сообщении вложенное `job`:
+  все поля задания (`job_view` без `task`) плюс `title` (первая непустая строка task.md без `#`,
+  до 120 символов). `read_at` не меняется.
+- `owner_job id`: то же `job` (все поля без `task` + `title`) + `question` (текст последнего `question`, иначе пусто).
 - `owner_post id kind text model`: `kind` из `CLIENT_MESSAGES`; `answer` требует непустой `text`;
   вызывает `post_from_client(job.client, …)` с `payload[via] = "telegram"`; ответ
   `{seq, status}`. Недопустимый переход и чужие виды — `ERR_BAD_REQUEST` с текстом `HubError`.

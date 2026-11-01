@@ -23,6 +23,7 @@ from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.text import clip
 
 TITLE_MAX_CHARS = 120
+OWNER_INBOX_MAX_LIMIT = 200
 
 NAME_PARAM = ActionParam(name="name", title="Имя токена")
 TOKEN_ACTIONS = (
@@ -124,7 +125,7 @@ class HubService:
             return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: await queue.max_seq()}
         if limit < 1:
             raise HubError("limit не меньше 1")
-        pairs = await queue.inbox_all(since, limit)
+        pairs = await queue.inbox_all(since, min(limit, OWNER_INBOX_MAX_LIMIT))
         messages = [
             {**asdict(message), protocol.FIELD_JOB: owner_job_view(job)} for message, job in pairs
         ]

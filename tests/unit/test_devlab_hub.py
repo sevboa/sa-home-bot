@@ -6,6 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import http
+from sa_home_bot.devlab.hub import service as hub_service
 from sa_home_bot.devlab.hub.mcp_tools import TOOLS_BY_NAME
 from sa_home_bot.devlab.hub.service import HubService, task_title
 from sa_home_bot.devlab.hub.store import HubStore, hash_token
@@ -280,3 +281,12 @@ async def test_owner_post_rejects_bad_requests(owner, args, prepare):
         protocol.STATUS_WAITING_OWNER,
         protocol.STATUS_RUNNING,
     )
+
+
+async def test_owner_inbox_limit_is_capped(owner, monkeypatch):
+    service, queue, jobs = owner
+    monkeypatch.setattr(hub_service, "OWNER_INBOX_MAX_LIMIT", 2)
+    for _ in range(3):
+        await queue.post_from_executor(jobs[CLIENT_A].id, protocol.MSG_STEP_DONE)
+    result = await service.run_command(protocol.ACTION_OWNER_INBOX, {"since": 0, "limit": 1000})
+    assert len(result["messages"]) == 2
