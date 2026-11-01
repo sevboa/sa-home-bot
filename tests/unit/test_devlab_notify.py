@@ -226,6 +226,7 @@ async def test_every_admin_gets_own_notice_and_guest_none(store):
     [
         (protocol.MSG_QUESTION, ["rel", "stop"]),
         (protocol.MSG_FAILED, ["res"]),
+        (protocol.MSG_STALLED, ["stopw"]),
         (protocol.MSG_DONE, None),
     ],
 )
@@ -373,3 +374,32 @@ async def test_long_lead_is_clipped(store):
     await notifier_obj.tick()
     lead = notifier.sent[0][1].split("\n\n")[0]
     assert len(lead) <= len("<b>Альфред:</b> ") + devlab_notify.LEAD_MAX_CHARS + 5
+
+
+STALLED_PAYLOAD = {protocol.PAYLOAD_SILENT_MIN: 42, protocol.PAYLOAD_EXECUTOR_ALIVE: False}
+
+
+async def test_stalled_notice_text_and_stop_button(store):
+    msg = message(1, protocol.MSG_STALLED, STALLED_PAYLOAD, status=protocol.STATUS_RUNNING)
+    link = FakeNodeLink(results=inbox([msg]))
+    notifier_obj, notifier = make(store, link)
+    await store.set_state(devlab_notify.CURSOR_KEY, "0")
+    assert await notifier_obj.tick() == 1
+    text = notifier.sent[0][1]
+    assert text.startswith(ai_lines.DEVLAB_STALLED_TEXT)
+    assert "Без вестей: 42 мин" in text
+    assert "Исполнитель: не отвечает" in text
+    assert "glm" in text
+    keyboard = notifier.markups[0]
+    data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert data == ["dl:stopw:j1"]
+
+
+async def test_stalled_skipped_when_job_no_longer_running(store):
+    msg = message(1, protocol.MSG_STALLED, STALLED_PAYLOAD, status=protocol.STATUS_STOPPED)
+    link = FakeNodeLink(results=inbox([msg]))
+    notifier_obj, notifier = make(store, link)
+    await store.set_state(devlab_notify.CURSOR_KEY, "0")
+    assert await notifier_obj.tick() == 0
+    assert notifier.sent == []
+    assert await store.get_state(devlab_notify.CURSOR_KEY) == "1"

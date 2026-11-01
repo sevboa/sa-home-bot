@@ -392,3 +392,26 @@ async def test_log_upload_limit_is_enforced_and_leaves_no_file(
 async def test_log_upload_needs_executor_role(client, store):
     headers = await token_for(store, "me", protocol.ROLE_CLIENT)
     assert await upload(client, headers, "zzzzzz", b"x") == 403
+
+
+async def test_stall_loop_flags_and_survives_errors():
+    calls = []
+
+    class FakeQueue:
+        async def flag_stalled(self, threshold_s, executor_alive):
+            calls.append((threshold_s, executor_alive))
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return []
+
+    class FakeStore:
+        queue = FakeQueue()
+
+        async def executor_alive(self):
+            return True
+
+    task = asyncio.create_task(hub_app.stall_loop(FakeStore(), 1800.0, 0))
+    while len(calls) < 3:
+        await asyncio.sleep(0)
+    task.cancel()
+    assert calls[:3] == [(1800.0, True)] * 3

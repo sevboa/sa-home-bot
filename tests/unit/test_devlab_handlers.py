@@ -52,7 +52,7 @@ async def press(cb, link, subscription=None, notifier=None):
     )
 
 
-@pytest.mark.parametrize("code", ["rel", "stop", "stopc", "res", "cnl"])
+@pytest.mark.parametrize("code", ["rel", "stop", "stopc", "res", "cnl", "stopw", "cnlw"])
 async def test_guest_is_denied_for_every_code(code):
     link = waiting_link()
     cb = callback(f"dl:{code}:j1", GUEST)
@@ -65,9 +65,7 @@ async def test_guest_is_denied_for_every_code(code):
 async def test_missing_subscription_is_denied():
     link = waiting_link()
     cb = callback("dl:rel:j1")
-    await handlers.on_devlab_callback(
-        cb, config=Settings(), node_link=link, subscription=None
-    )
+    await handlers.on_devlab_callback(cb, config=Settings(), node_link=link, subscription=None)
     assert link.calls == []
 
 
@@ -134,7 +132,6 @@ def test_router_included_before_ai():
     assert order.index("devlab") < order.index("ai")
 
 
-
 async def test_callback_without_message():
     link = waiting_link()
     cb = callback("dl:rel:j1")
@@ -149,4 +146,20 @@ async def test_callback_from_other_user_in_owner_chat_is_denied():
     cb = FakeCallback("dl:rel:j1", chat_id=OWNER, from_user=FakeUser(id=99))
     await press(cb, link)
     assert cb.answered[0][0] == (DENIED_ALERT_TEXT,)
+    assert link.calls == []
+
+
+async def test_stalled_stop_confirm_and_cancel_keep_stop_button():
+    link = waiting_link()
+    cb = callback("dl:stopw:j1")
+    await press(cb, link)
+    assert link.calls == []
+    data = [
+        b.callback_data for row in cb.message.reply_markup_edits[0].inline_keyboard for b in row
+    ]
+    assert data == ["dl:stopc:j1", "dl:cnlw:j1"]
+    cancel = callback("dl:cnlw:j1")
+    await press(cancel, link)
+    restored = cancel.message.reply_markup_edits[0]
+    assert [b.callback_data for row in restored.inline_keyboard for b in row] == ["dl:stopw:j1"]
     assert link.calls == []

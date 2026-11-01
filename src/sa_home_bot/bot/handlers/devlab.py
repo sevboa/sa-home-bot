@@ -11,14 +11,17 @@ from aiogram.types import CallbackQuery
 from sa_home_bot.bot import ai_lines
 from sa_home_bot.bot.devlab_notify import (
     CB_CANCEL,
+    CB_CANCEL_STALLED,
     CB_PREFIX,
     CB_RELEASE,
     CB_RESUME,
     CB_STOP,
     CB_STOP_CONFIRM,
+    CB_STOP_STALLED,
     DevlabNotifier,
     hub_address,
     question_keyboard,
+    stalled_keyboard,
     stop_confirm_keyboard,
 )
 from sa_home_bot.bot.middlewares import DENIED_ALERT_TEXT
@@ -112,6 +115,12 @@ async def on_devlab_callback(
     code, job_id = pieces
     if code == CB_STOP:
         await _clear_markup(callback, stop_confirm_keyboard(job_id))
+        await callback.answer()
+    elif code == CB_STOP_STALLED:
+        await _clear_markup(callback, stop_confirm_keyboard(job_id, CB_CANCEL_STALLED))
+        await callback.answer()
+    elif code == CB_CANCEL_STALLED:
+        await _clear_markup(callback, stalled_keyboard(job_id))
         await callback.answer()
     elif code == CB_CANCEL:
         await _clear_markup(callback, question_keyboard(job_id))

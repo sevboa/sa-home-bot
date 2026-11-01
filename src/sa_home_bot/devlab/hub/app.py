@@ -42,6 +42,17 @@ async def purge_loop(
         await asyncio.sleep(interval_s)
 
 
+async def stall_loop(store: HubStore, threshold_s: float, interval_s: float) -> None:
+    while True:
+        try:
+            flagged = await store.queue.flag_stalled(threshold_s, await store.executor_alive())
+            for message in flagged:
+                log.warning("Задание %s без вестей: %s", message.job_id, message.payload)
+        except Exception:
+            log.exception("Проверка застоя заданий не удалась")
+        await asyncio.sleep(interval_s)
+
+
 async def wake_loop(waker: ExecutorWaker, interval_s: float = WAKE_STEP_INTERVAL_S) -> None:
     while True:
         try:
@@ -62,9 +73,7 @@ async def tailscale_address() -> str:
     return words[0]
 
 
-def build_hub_app(
-    store: HubStore, nodes: NodeDirectory, swarm_token: str = ""
-) -> web.Application:
+def build_hub_app(store: HubStore, nodes: NodeDirectory, swarm_token: str = "") -> web.Application:
     app = build_app(store, nodes, swarm_token)
     connect_http.add_routes(app)
     git_http.add_routes(app)
@@ -97,12 +106,15 @@ async def run_hub(settings: Settings) -> None:
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)
     purge_task = asyncio.create_task(purge_loop(store.queue, cfg.mailbox_retention_days))
     wake_task = asyncio.create_task(wake_loop(waker))
+    stall_task = asyncio.create_task(
+        stall_loop(store, cfg.stalled_after_min * 60.0, cfg.stall_check_s)
+    )
     try:
         await lifespan.wait()
     finally:
-        for task in (purge_task, wake_task):
+        for task in (purge_task, wake_task, stall_task):
             task.cancel()
-        for task in (purge_task, wake_task):
+        for task in (purge_task, wake_task, stall_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await node_link.stop()

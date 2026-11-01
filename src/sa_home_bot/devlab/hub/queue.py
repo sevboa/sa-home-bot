@@ -542,6 +542,46 @@ class HubQueue:
         )
         return await cur.fetchone() is not None
 
+    async def flag_stalled(
+        self, threshold_s: float, executor_alive: bool, now: datetime | None = None
+    ) -> list[Message]:
+        now = now or utc_now()
+        flagged: list[Message] = []
+        async with self._tx() as conn:
+            cur = await conn.execute(
+                "SELECT j.id, j.started, ("
+                " SELECT MAX(created) FROM messages WHERE job_id = j.id AND kind != ?) AS news,"
+                " (SELECT MAX(created) FROM messages WHERE job_id = j.id AND kind = ?) AS flagged"
+                " FROM jobs j WHERE j.status = ? AND j.kind = ?",
+                (
+                    protocol.MSG_STALLED,
+                    protocol.MSG_STALLED,
+                    protocol.STATUS_RUNNING,
+                    protocol.JOB_KIND_AGENT,
+                ),
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                stamps = [s for s in (row["started"], row["news"]) if s]
+                if not stamps:
+                    continue
+                last = max(datetime.fromisoformat(s) for s in stamps)
+                silent = (now - last).total_seconds()
+                if silent < threshold_s:
+                    continue
+                if row["flagged"] and datetime.fromisoformat(row["flagged"]) > last:
+                    continue
+                payload = {
+                    protocol.PAYLOAD_SILENT_MIN: int(silent // 60),
+                    protocol.PAYLOAD_EXECUTOR_ALIVE: executor_alive,
+                }
+                flagged.append(
+                    await self._post(
+                        conn, row["id"], protocol.DIRECTION_TO_CLIENT, protocol.MSG_STALLED, payload
+                    )
+                )
+        return flagged
+
     async def purge(self, retention_days: int, now: datetime | None = None) -> int:
         border = ((now or utc_now()) - timedelta(days=retention_days)).isoformat()
         async with self._tx() as conn:

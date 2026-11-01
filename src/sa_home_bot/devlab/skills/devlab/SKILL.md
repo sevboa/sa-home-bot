@@ -57,7 +57,7 @@ description: Отдать задачу агенту-разработчику н�
 Всякий раз, когда вернулся к задаче или владелец спрашивает «что с агентом»:
 1. `devlab_inbox since=<курсор>` (первый раз 0), разбери сообщения, затем `devlab_ack upto=<курсор>`.
    Общая картина: `devlab_list`, подробности: `devlab_status id=<id>`.
-2. Сообщения: `started`, `step_done`, `question`, `done`, `failed`, `stopped`.
+2. Сообщения: `started`, `step_done`, `question`, `done`, `failed`, `stopped`, `stalled`.
    - `question`: задание в `waiting_owner`. Ответь сам, если ответ следует из правил проекта и
      задачи, иначе спроси владельца. Ответ: `devlab_answer id=<id> text=<ответ>`.
      Не отвечаешь сейчас и не хочешь держать mycraft бодрым: `devlab_release id=<id>`.
@@ -65,6 +65,8 @@ description: Отдать задачу агенту-разработчику н�
    - `failed`: прочитай причину. Мелочь или слабая модель: `devlab_resume id=<id> text=<что
      исправить>`, при повторных провалах `model=<другая из devlab_models>` (новая модель начнёт с
      `wip/<id>`, task.md и журнала шагов). Задача не нужна: `devlab_stop id=<id>`.
+   - `stalled`: задание `running`, но вестей давно нет (порог в конфиге хаба). `devlab_status id=<id>`:
+     если задание всё ещё `running` и исполнитель не отвечает, `devlab_stop`, затем `devlab_resume`.
    - `done`: переходи к приёмке.
 3. Зависшее `queued` или `running` без вестей: `devlab_status`, при необходимости спроси владельца,
    `devlab_stop`. Ожидание: `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (останавливается на `done`,

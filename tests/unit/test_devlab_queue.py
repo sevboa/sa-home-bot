@@ -525,3 +525,48 @@ async def test_open_migrates_jobs_without_params(tmp_path):
     reopened = HubStore(tmp_path)
     await reopened.open()
     await reopened.close()
+
+
+STALL_S = 1800.0
+
+
+def stalled_messages(queue_messages):
+    return [m for m in queue_messages if m.kind == S.MSG_STALLED]
+
+
+async def test_flag_stalled_after_threshold_once(queue):
+    job = await running_job(queue)
+    now = utc_now()
+    assert await queue.flag_stalled(STALL_S, True, now + timedelta(seconds=STALL_S - 60)) == []
+    first = await queue.flag_stalled(STALL_S, False, now + timedelta(seconds=STALL_S + 60))
+    assert [m.job_id for m in first] == [job.id]
+    assert first[0].kind == S.MSG_STALLED
+    assert first[0].payload == {S.PAYLOAD_SILENT_MIN: 31, S.PAYLOAD_EXECUTOR_ALIVE: False}
+    assert await queue.flag_stalled(STALL_S, True, now + timedelta(seconds=STALL_S * 3)) == []
+    inbox = await queue.inbox(CLIENT)
+    assert len(stalled_messages(inbox)) == 1
+
+
+async def test_flag_stalled_again_after_news(queue):
+    job = await running_job(queue)
+    await queue.flag_stalled(STALL_S, True, utc_now() + timedelta(seconds=STALL_S + 60))
+    await queue.post_from_executor(job.id, S.MSG_STEP_DONE)
+    later = utc_now() + timedelta(seconds=STALL_S * 2)
+    again = await queue.flag_stalled(STALL_S, True, later)
+    assert len(again) == 1
+    assert len(stalled_messages(await queue.inbox(CLIENT))) == 2
+
+
+async def test_flag_stalled_step_done_resets_clock(queue):
+    job = await running_job(queue)
+    await queue.post_from_executor(job.id, S.MSG_STEP_DONE)
+    soon = utc_now() + timedelta(seconds=STALL_S - 60)
+    assert await queue.flag_stalled(STALL_S, True, soon) == []
+
+
+async def test_flag_stalled_ignores_other_states_and_kinds(queue):
+    await waiting_job(queue)
+    await submit(queue, model=OTHER_MODEL)
+    await queue.submit_test(CLIENT, PROJECT, "master")
+    far = utc_now() + timedelta(days=2)
+    assert await queue.flag_stalled(STALL_S, True, far) == []

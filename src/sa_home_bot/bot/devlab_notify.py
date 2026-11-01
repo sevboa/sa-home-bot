@@ -32,20 +32,29 @@ LEGACY_STATE_PREFIXES = ("devlab_notice:", "devlab_reply:")
 CB_PREFIX = "dl"
 CB_RELEASE = "rel"
 CB_STOP = "stop"
+CB_STOP_STALLED = "stopw"
+CB_CANCEL_STALLED = "cnlw"
 CB_STOP_CONFIRM = "stopc"
 CB_CANCEL = "cnl"
 CB_RESUME = "res"
 DEDUP_KEY = "devlab:{seq}"
-NOTIFIED_KINDS = (protocol.MSG_QUESTION, protocol.MSG_DONE, protocol.MSG_FAILED)
+NOTIFIED_KINDS = (
+    protocol.MSG_QUESTION,
+    protocol.MSG_DONE,
+    protocol.MSG_FAILED,
+    protocol.MSG_STALLED,
+)
 LEADS = {
     protocol.MSG_QUESTION: ai_lines.DEVLAB_QUESTION_TEXT,
     protocol.MSG_DONE: ai_lines.DEVLAB_DONE_TEXT,
     protocol.MSG_FAILED: ai_lines.DEVLAB_FAILED_TEXT,
+    protocol.MSG_STALLED: ai_lines.DEVLAB_STALLED_TEXT,
 }
 LEAD_EVENTS = {
     protocol.MSG_QUESTION: "агент задал вам вопрос и ждёт ответа",
     protocol.MSG_DONE: "агент закончил порученное задание",
     protocol.MSG_FAILED: "агент не справился с заданием",
+    protocol.MSG_STALLED: "работа агента встала, вестей от него давно нет",
 }
 LEAD_INSTRUCTION = (
     "Скажи хозяину одну-две короткие фразы в своём образе: {event}. "
@@ -58,6 +67,7 @@ BODY_FIELDS = {
     protocol.MSG_QUESTION: protocol.PAYLOAD_TEXT,
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
     protocol.MSG_FAILED: protocol.PAYLOAD_TEXT,
+    protocol.MSG_STALLED: protocol.PAYLOAD_TEXT,
 }
 
 
@@ -74,13 +84,17 @@ def question_keyboard(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def stop_confirm_keyboard(job_id: str) -> InlineKeyboardMarkup:
+def stop_confirm_keyboard(job_id: str, cancel: str = CB_CANCEL) -> InlineKeyboardMarkup:
     return markup(
         [
             button(ai_lines.DEVLAB_BTN_STOP_CONFIRM, pack(CB_PREFIX, CB_STOP_CONFIRM, job_id)),
-            button(ai_lines.DEVLAB_BTN_CANCEL, pack(CB_PREFIX, CB_CANCEL, job_id)),
+            button(ai_lines.DEVLAB_BTN_CANCEL, pack(CB_PREFIX, cancel, job_id)),
         ]
     )
+
+
+def stalled_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return markup([button(ai_lines.DEVLAB_BTN_STOP, pack(CB_PREFIX, CB_STOP_STALLED, job_id))])
 
 
 def failed_keyboard(job_id: str) -> InlineKeyboardMarkup:
@@ -92,6 +106,8 @@ def notice_keyboard(kind: str, job_id: str) -> InlineKeyboardMarkup | None:
         return question_keyboard(job_id)
     if kind == protocol.MSG_FAILED:
         return failed_keyboard(job_id)
+    if kind == protocol.MSG_STALLED:
+        return stalled_keyboard(job_id)
     return None
 
 
@@ -102,8 +118,12 @@ def wants_notice(message: dict[str, Any]) -> bool:
     kind = message.get(protocol.FIELD_KIND)
     if kind not in NOTIFIED_KINDS:
         return False
-    waiting = job.get(protocol.FIELD_STATUS) == protocol.STATUS_WAITING_OWNER
-    return kind != protocol.MSG_QUESTION or waiting
+    status = job.get(protocol.FIELD_STATUS)
+    if kind == protocol.MSG_QUESTION:
+        return status == protocol.STATUS_WAITING_OWNER
+    if kind == protocol.MSG_STALLED:
+        return status == protocol.STATUS_RUNNING
+    return True
 
 
 def facts_block(message: dict[str, Any], max_chars: int) -> str:
@@ -122,6 +142,10 @@ def facts_block(message: dict[str, Any], max_chars: int) -> str:
     lines.append(f"Токены: {tokens}, ${cost:.4f}")
     lines.append(f"Ветка: {html.escape(protocol.AGENT_BRANCH_PREFIX + str(job_id))}")
     payload = message.get(protocol.FIELD_PAYLOAD) or {}
+    if kind == protocol.MSG_STALLED:
+        lines.append(f"Без вестей: {int(payload.get(protocol.PAYLOAD_SILENT_MIN) or 0)} мин")
+        alive = "на связи" if payload.get(protocol.PAYLOAD_EXECUTOR_ALIVE) else "не отвечает"
+        lines.append(f"Исполнитель: {alive}")
     body = str(payload.get(BODY_FIELDS[kind]) or "").strip()
     if body:
         lines.append("")

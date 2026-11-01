@@ -61,6 +61,7 @@ MSG_DONE = "done"
 MSG_FAILED = "failed"
 MSG_STOPPED = "stopped"
 MSG_TEST_DONE = "test_done"
+MSG_STALLED = "stalled"
 EXECUTOR_MESSAGES = (
     MSG_STARTED,
     MSG_STEP_DONE,
@@ -97,6 +98,8 @@ PAYLOAD_SUMMARY = "summary"
 PAYLOAD_FAILURES = "failures"
 PAYLOAD_TAIL = "tail"
 PAYLOAD_VIA = "via"
+PAYLOAD_SILENT_MIN = "silent_min"
+PAYLOAD_EXECUTOR_ALIVE = "executor_alive"
 VIA_TELEGRAM = "telegram"
 FAILURE_NAME = "name"
 FAILURE_EXCERPT = "excerpt"

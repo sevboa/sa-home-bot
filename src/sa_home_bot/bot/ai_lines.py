@@ -70,6 +70,7 @@ TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кули
 DEVLAB_QUESTION_TEXT = "Агент devlab ждёт ответа."
 DEVLAB_DONE_TEXT = "Агент devlab закончил задание."
 DEVLAB_FAILED_TEXT = "Агент devlab не справился с заданием."
+DEVLAB_STALLED_TEXT = "Агент devlab давно не подаёт вестей."
 DEVLAB_ANSWER_HINT = "Ответить агенту можно через Claude: devlab_answer по MCP."
 DEVLAB_BTN_RELEASE = "Отпустить спать"
 DEVLAB_BTN_STOP = "Остановить"

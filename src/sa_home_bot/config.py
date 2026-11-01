@@ -222,6 +222,8 @@ class DevlabHubConfig(BaseModel):
     data_dir: Path = Path("/mnt/data/devlab")
     bind_host: str = ""
     mailbox_retention_days: int = Field(default=30, ge=1)
+    stalled_after_min: int = Field(default=30, ge=1)
+    stall_check_s: float = Field(default=60.0, gt=0)
     executor_node: str = "mycraft"
     hub_node: str = "alfred"
 
