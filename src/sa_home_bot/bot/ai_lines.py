@@ -66,3 +66,7 @@ TOOL_STATUS_TEXT: dict[str, str] = {
     "item_action": "Альфред готовит вещь поместья",
 }
 TOOL_STATUS_DEFAULT = "Альфред что-то мастерит за кулисами"
+
+DEVLAB_QUESTION_TEXT = "Агент devlab ждёт ответа."
+DEVLAB_DONE_TEXT = "Агент devlab закончил задание."
+DEVLAB_FAILED_TEXT = "Агент devlab не справился с заданием."

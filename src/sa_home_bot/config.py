@@ -237,6 +237,13 @@ LLAMACPP_DEFAULTS: dict[str, Any] = {
 }
 
 
+class DevlabNotifyConfig(BaseModel):
+    enabled: bool = False
+    poll_s: float = Field(default=30.0, gt=0)
+    llm_timeout_s: float = Field(default=90.0, gt=0)
+    facts_max_chars: int = Field(default=1500, ge=100)
+
+
 class DevlabModelConfig(BaseModel):
     kind: Literal["openai", "llamacpp"] = "openai"
     base_url: str = ""
@@ -651,6 +658,7 @@ class Settings(BaseSettings):
     graph_memory: GraphMemoryConfig = Field(default_factory=GraphMemoryConfig)
     devlab_hub: DevlabHubConfig = Field(default_factory=DevlabHubConfig)
     devlab_models: DevlabModelsConfig = Field(default_factory=DevlabModelsConfig)
+    devlab_notify: DevlabNotifyConfig = Field(default_factory=DevlabNotifyConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)

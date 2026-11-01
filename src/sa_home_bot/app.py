@@ -11,6 +11,7 @@ from sa_home_bot.bot.ai_flow import ActiveAiChats
 from sa_home_bot.bot.ai_lines import RESTART_TEXT
 from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.away_return import AwayReturn, AwayRunner
+from sa_home_bot.bot.devlab_notify import DevlabNotifier
 from sa_home_bot.bot.dispatch import TelegramEventDispatcher
 from sa_home_bot.bot.egress import EgressManager, make_fetch_candidates
 from sa_home_bot.bot.egress_app import (
@@ -232,6 +233,16 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         night_sink=_send_night_mode,
     )
     away_task = asyncio.create_task(away_runner.run(), name="away")
+    devlab_notify_task: asyncio.Task | None = None
+    if settings.devlab_notify.enabled:
+        devlab_notifier = DevlabNotifier(
+            get_node_link=_get_node_link,
+            store=store,
+            config=settings,
+            book=book,
+            notifier=notifier,
+        )
+        devlab_notify_task = asyncio.create_task(devlab_notifier.run(), name="devlab-notify")
     people_seed_task = asyncio.create_task(
         people_seed.graph_seed_loop(store, book, node_link), name="people-seed"
     )
@@ -288,6 +299,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             polling_task=polling_task,
             active_ai_chats=active_ai_chats,
             away_task=away_task,
+            devlab_notify_task=devlab_notify_task,
             people_seed_task=people_seed_task,
             egress=egress,
             outbox_flusher=outbox_flusher,
@@ -321,6 +333,7 @@ async def _shutdown(
     bot,
     db: Database,
     away_task: asyncio.Task | None = None,
+    devlab_notify_task: asyncio.Task | None = None,
     people_seed_task: asyncio.Task | None = None,
     egress: EgressManager | None = None,
     outbox_flusher: OutboxFlusher | None = None,
@@ -354,6 +367,16 @@ async def _shutdown(
             pass
         except Exception:
             log.warning("away-задача упала при остановке", exc_info=True)
+
+    if devlab_notify_task is not None:
+        if not devlab_notify_task.done():
+            devlab_notify_task.cancel()
+        try:
+            await devlab_notify_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.warning("devlab-notify-задача упала при остановке", exc_info=True)
 
     if people_seed_task is not None and not people_seed_task.done():
         people_seed_task.cancel()

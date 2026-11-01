@@ -226,6 +226,15 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
 - `executor_node: str = "mycraft"` — нода исполнителя: её хаб будит (WoL через `wake_core`), когда
   есть работа, а heartbeat молчит. С именем токена исполнителя не связана.
 
+## DevlabNotifyConfig
+
+Секция `[devlab_notify]` (Этап 62.2): оповещения админам о заданиях агентов devlab, `docs/devlab/notify.md`.
+
+- `enabled: bool = false` — выключено: задача наблюдателя не стартует.
+- `poll_s: float = 30` — период опроса ящика хаба.
+- `llm_timeout_s: float = 90` — таймаут вступления через gemma (используется с 62.4).
+- `facts_max_chars: int = 1500` — обрезка текста вопроса / сводки / причины в блоке фактов.
+
 ## DevlabModelsConfig
 
 Служба devlab_models (`sa-home-bot --service devlab_models`, Этап 60.4.1), по экземпляру на ноду,
