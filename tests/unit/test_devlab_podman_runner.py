@@ -6,12 +6,14 @@ import tarfile
 import pytest
 
 from sa_home_bot.config import DevlabConfig
-from sa_home_bot.devlab.executor import podman
+from sa_home_bot.devlab.executor import image as images
+from sa_home_bot.devlab.executor import podman, wrapper
 from sa_home_bot.devlab.executor.app import build_runner
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest
+from sa_home_bot.node.fixups.devlab import DEVLAB_WRAPPER_PATH
 from sa_home_bot.utils.process import ProcResult
 
-WRAPPER = str(podman.DEVLAB_WRAPPER_PATH)
+WRAPPER = str(DEVLAB_WRAPPER_PATH)
 IMAGE = "docker.io/library/python:3.13-slim"
 
 
@@ -119,20 +121,20 @@ async def test_full_pipeline_argv_and_junit(tmp_path):
 
 async def test_cached_image_skips_build(tmp_path):
     req = request(tmp_path)
-    files = podman.read_setup_files(tmp_path, req.setup_files)
-    tag = podman.image_tag(IMAGE, req.setup, files, ())
+    files = images.read_setup_files(tmp_path, req.setup_files)
+    tag = images.image_tag(IMAGE, req.setup, files, ())
     fake = FakeWrapper(images=[tag])
     await make_runner(fake).run(req)
     assert "build" not in fake.commands()
 
 
 def test_image_tag_depends_on_content():
-    base = podman.image_tag("img", ["a"], {"f": b"1"}, ())
-    assert base == podman.image_tag("img", ["a"], {"f": b"1"}, ())
-    assert base != podman.image_tag("img2", ["a"], {"f": b"1"}, ())
-    assert base != podman.image_tag("img", ["b"], {"f": b"1"}, ())
-    assert base != podman.image_tag("img", ["a"], {"f": b"2"}, ())
-    assert base != podman.image_tag("img", ["a"], {"f": b"1"}, (("K", "v"),))
+    base = images.image_tag("img", ["a"], {"f": b"1"}, ())
+    assert base == images.image_tag("img", ["a"], {"f": b"1"}, ())
+    assert base != images.image_tag("img2", ["a"], {"f": b"1"}, ())
+    assert base != images.image_tag("img", ["b"], {"f": b"1"}, ())
+    assert base != images.image_tag("img", ["a"], {"f": b"2"}, ())
+    assert base != images.image_tag("img", ["a"], {"f": b"1"}, (("K", "v"),))
 
 
 async def test_timeout_inside_container_sets_flag(tmp_path):
@@ -142,7 +144,7 @@ async def test_timeout_inside_container_sets_flag(tmp_path):
 
 
 async def test_outer_timeout_kills_container(tmp_path, monkeypatch):
-    monkeypatch.setattr(podman, "EXEC_GRACE_S", 0.05)
+    monkeypatch.setattr(wrapper, "EXEC_GRACE_S", 0.05)
     fake = FakeWrapper(block_exec=True)
     result = await make_runner(fake).run(request(tmp_path, timeout_s=0.01))
     assert result.timed_out
@@ -183,7 +185,7 @@ async def test_outer_cancellation_propagates_and_cleans(tmp_path):
 
 async def test_build_failure_raises_and_cleans(tmp_path):
     fake = FakeWrapper(fail={"build"})
-    with pytest.raises(podman.RunnerError, match="сборка образа"):
+    with pytest.raises(wrapper.RunnerError, match="сборка образа"):
         await make_runner(fake).run(request(tmp_path))
     assert fake.commands()[-2:] == ["rm", "clean"]
     assert "exec" not in fake.commands()
@@ -203,25 +205,25 @@ async def test_config_overrides_reach_create(tmp_path):
 
 @pytest.mark.parametrize("job_id", ["", "-x", "A b", "a/b", "a;b"])
 def test_job_name_rejects_bad_ids(job_id):
-    with pytest.raises(podman.RunnerError):
-        podman.job_name(job_id)
+    with pytest.raises(wrapper.RunnerError):
+        wrapper.job_name(job_id)
 
 
 @pytest.mark.parametrize("name", ["/etc/passwd", "../x", "missing.toml", ""])
 def test_setup_files_rejects_escapes(tmp_path, name):
-    with pytest.raises(podman.RunnerError):
-        podman.read_setup_files(tmp_path, [name])
+    with pytest.raises(wrapper.RunnerError):
+        images.read_setup_files(tmp_path, [name])
 
 
 @pytest.mark.parametrize("image", ["a b", "a\nRUN x", "-x", ""])
 def test_image_rejects_injection(image):
-    with pytest.raises(podman.RunnerError):
-        podman.check_image(image)
+    with pytest.raises(wrapper.RunnerError):
+        images.check_image(image)
 
 
 def test_env_key_validated():
-    with pytest.raises(podman.RunnerError):
-        podman.containerfile("img", [], {}, (("A B", "1"),))
+    with pytest.raises(wrapper.RunnerError):
+        images.containerfile("img", [], {}, (("A B", "1"),))
 
 
 def test_build_runner_returns_podman_runner():
