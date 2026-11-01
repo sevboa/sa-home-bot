@@ -49,8 +49,9 @@
 - Вывод: скилы `devlab-test` и `devlab` ставят `wait=0` и ждут через CLI. Потолок хаба 1800 с
   остаётся для клиентов с поднятым idle-тайм-аутом. `connect` печатает подсказку, настройки
   пользователя не меняет.
-- Ожидание вне MCP (так делают скилы): `devlab_test wait=0`, затем `nodectl devlab wait <id>` (Bash, лучше фоном с
-  уведомлением о выходе), затем `devlab_status id=<id>` с `result`.
+- Ожидание вне MCP (так делают скилы): `devlab_test wait=0` (ответ содержит `job.id` нового test-задания; для `ref=agent/<id>`
+  это тоже новое задание, не id агента), затем `nodectl devlab wait <job.id>` (Bash, лучше фоном с
+  уведомлением о выходе), затем `devlab_status id=<job.id>` с `result`.
 
 ## `nodectl devlab wait <id>`
 - Раз в `--interval` (20 с) зовёт `devlab_status` хаба по HTTP (JSON-RPC `tools/call`, заголовок
