@@ -23,29 +23,60 @@ class GitError(Exception):
     pass
 
 
-class ProjectMirror:
-    def __init__(self, git_dir: Path, remote_url: str, token: str) -> None:
-        self._git_dir = git_dir
-        self._remote_url = remote_url
+class GitRunner:
+    def __init__(self, token: str) -> None:
         self._token = token
 
-    def _env(self) -> dict[str, str]:
+    def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         return {
             **os.environ,
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "http.extraHeader",
             "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {self._token}",
+            **(extra or {}),
         }
 
-    async def _git(self, *argv: str, stdout=None) -> bytes:
-        command = ["git", f"--git-dir={self._git_dir}", *argv]
+    async def run(
+        self,
+        *argv: str,
+        git_dir: Path,
+        work_tree: Path | None = None,
+        stdout=None,
+        extra_env: dict[str, str] | None = None,
+    ) -> bytes:
+        command = ["git", f"--git-dir={git_dir}"]
+        if work_tree is not None:
+            command.append(f"--work-tree={work_tree}")
+        command.extend(argv)
         kwargs = {} if stdout is None else {"stdout": stdout}
-        result = await run(command, timeout=GIT_TIMEOUT_S, env=self._env(), **kwargs)
+        result = await run(command, timeout=GIT_TIMEOUT_S, env=self.env(extra_env), **kwargs)
         if result.returncode != 0:
             message = result.stderr_text.replace(self._token, SECRET_MASK)
             raise GitError(f"git {argv[0]}: {message}")
         return result.stdout
+
+
+class ProjectMirror:
+    def __init__(self, git_dir: Path, remote_url: str, token: str) -> None:
+        self._git_dir = git_dir
+        self._remote_url = remote_url
+        self._runner = GitRunner(token)
+
+    @property
+    def git_dir(self) -> Path:
+        return self._git_dir
+
+    @property
+    def url(self) -> str:
+        return self._remote_url
+
+    @property
+    def runner(self) -> GitRunner:
+        return self._runner
+
+    async def _git(self, *argv: str, stdout=None) -> bytes:
+        return await self._runner.run(*argv, git_dir=self._git_dir, stdout=stdout)
 
     async def fetch(self) -> None:
         if not (self._git_dir / "HEAD").exists():

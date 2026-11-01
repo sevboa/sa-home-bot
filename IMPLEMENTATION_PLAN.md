@@ -6283,7 +6283,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
   `LocalSandbox` на каталоге для тестов; инструменты `list_files`, `read_file`, `grep`,
   `edit_file`, `write_file`, `run_command`, `run_tests`, `finish`; сворачивание контекста;
   страж финала; цикл с лимитом шагов и результатом `AgentResult`. Тесты с фейковой моделью.
-- **60.5.2 Git агента.** `AgentRepo` поверх `ProjectMirror`: рабочая копия `base/<id>` →
+- **60.5.2 Git агента** (сделано, код без выката; `docs/devlab/agent.md`). `AgentRepo` поверх `ProjectMirror`: рабочая копия `base/<id>` →
   `wip/<id>`, коммит на каждое изменение файлов (сообщение из действия, автор
   `devlab-agent (<модель>)`), коммит-веха на `step_done`, push со склейкой подряд идущих,
   squash `wip/<id>` → `agent/<id>` (дерево совпадает), удаление `wip/<id>` на хабе и локально,
