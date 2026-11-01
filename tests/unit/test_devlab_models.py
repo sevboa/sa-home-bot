@@ -30,6 +30,7 @@ PRINCIPALS = {
 AUTH = {"Authorization": f"Bearer {EXECUTOR_TOKEN}", protocol.HEADER_JOB: JOB}
 CHAT = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}]}
 USAGE = {"prompt_tokens": 1000, "completion_tokens": 500}
+GATEWAY_URL = "http://gw.test:8721"
 
 
 class FakeClock:
@@ -52,6 +53,7 @@ class Provider:
         self.gate = asyncio.Event()
         self.stream_usage = True
         self.status = 200
+        self.usage = USAGE
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
@@ -61,13 +63,13 @@ class Provider:
             return web.json_response({"error": "provider says no"}, status=self.status)
         if not body.get("stream"):
             return web.json_response(
-                {"choices": [{"message": {"content": "hello"}}], "usage": USAGE}
+                {"choices": [{"message": {"content": "hello"}}], "usage": self.usage}
             )
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
         await response.write(b'data: {"choices": [{"delta": {"content": "one"}}]}\n\n')
         await self.gate.wait()
-        last = {"choices": [], "usage": USAGE} if self.stream_usage else {"choices": []}
+        last = {"choices": [], "usage": self.usage} if self.stream_usage else {"choices": []}
         await response.write(b"data: " + json.dumps(last).encode() + b"\n\ndata: [DONE]\n\n")
         return response
 
@@ -136,7 +138,7 @@ async def setup(tmp_path, provider, hub_state, clock):
         backend = build_backend(MODEL, spec)
         hub = HubClient(str(hub_server.make_url("")), "dlh_gateway", clock=clock)
         windows = {MODEL: RateWindow(spec.rpm, clock=clock, sleep=clock.sleep)}
-        gateway = Gateway({MODEL: backend}, ledger, hub, windows)
+        gateway = Gateway({MODEL: backend}, ledger, hub, windows, url=GATEWAY_URL)
         client = TestClient(TestServer(gateway.build_app()))
         await client.start_server()
         opened.extend([client, backend, hub])
@@ -193,6 +195,22 @@ async def test_ledger_counts_tokens_and_dollars_per_job(
     )
     assert totals["cost_usd"] == pytest.approx((tokens_in * 2.0 + tokens_out * 4.0) / 1e6)
     assert (await gateway.ledger.totals(MODEL, "other"))["requests"] == 0
+
+
+async def test_provider_fallback_fields_are_not_forwarded(setup, provider):
+    _, client = await setup()
+    body = {**CHAT, "models": ["paid/a"], "route": "fallback", "temperature": 0.2}
+    await client.post(protocol.HTTP_CHAT_PATH, json=body, headers=AUTH)
+    assert "models" not in provider.received[0] and "route" not in provider.received[0]
+    assert provider.received[0]["temperature"] == 0.2
+
+
+async def test_provider_reported_cost_beats_price_list(setup, provider):
+    gateway, client = await setup()
+    provider.usage = {**USAGE, "cost": 0.0123}
+    resp = await client.post(protocol.HTTP_CHAT_PATH, json=CHAT, headers=AUTH)
+    await resp.read()
+    assert (await gateway.ledger.totals(MODEL, JOB))["cost_usd"] == pytest.approx(0.0123)
 
 
 @pytest.mark.parametrize(
@@ -277,6 +295,7 @@ async def test_heartbeat_body_has_catalog_and_remaining_day_limit(setup):
         }
     ]
     assert body[protocol.FIELD_LIMITS] == {MODEL: {protocol.LIMIT_RPD_LEFT: 9}}
+    assert body[protocol.FIELD_URL] == GATEWAY_URL
 
 
 async def test_heartbeat_reaches_hub_and_network_error_is_logged(setup, hub_state, caplog):

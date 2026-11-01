@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
 BEARER = "Bearer "
+FALLBACK_FIELDS = frozenset({"models", "route"})
 LOCAL_HOST = "127.0.0.1"
 LLAMA_HEALTH_PATH = "/health"
 LLAMA_CHAT_PATH = "/v1/chat/completions"
@@ -76,8 +77,9 @@ class OpenAiBackend(HttpBackend):
         if self.spec.api_key:
             headers["Authorization"] = BEARER + self.spec.api_key
         url = self.spec.base_url.rstrip("/") + "/chat/completions"
+        body = {k: v for k, v in payload.items() if k not in FALLBACK_FIELDS}
         return await self._post(
-            url, {**payload, "model": self.spec.model}, headers, self.spec.proxy or None
+            url, {**body, "model": self.spec.model}, headers, self.spec.proxy or None
         )
 
 

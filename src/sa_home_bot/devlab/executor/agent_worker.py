@@ -5,7 +5,7 @@ import contextlib
 import logging
 import shutil
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -14,12 +14,13 @@ from pydantic import BaseModel, Field
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
-from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus
+from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus, Crane
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.agent.prompt import build_system, build_task
 from sa_home_bot.devlab.agent.repo import PUSH_INTERVAL_S, AgentRepo, agent_author
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, ManagedSandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
+from sa_home_bot.devlab.agent.spend import JobSpend, MeteredChat, SpendState
 from sa_home_bot.devlab.agent.tools import ToolBox
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, SandboxRequest
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
@@ -29,6 +30,7 @@ from sa_home_bot.devlab.executor.mirror import (
     check_project_name,
     remote_url,
 )
+from sa_home_bot.devlab.executor.routing import Catalog
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, ProjectSpec, parse_spec
 from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
 from sa_home_bot.devlab.hub.queue import Job, Message
@@ -50,12 +52,21 @@ RETRY_INTERVAL_S = 5.0
 ABANDON_ATTEMPTS = 3
 FAILED_TEXT_CHARS = 1000
 STOPPED_REASON = "остановлено владельцем"
+REMOTE_FORBIDDEN_REASON = (
+    "модель {model!r} внешняя, а проект запрещает внешние модели (allow_remote_models = false)"
+)
+MODEL_MISSING_REASON = "модели {model!r} нет на живых шлюзах"
+SPEND_CRANES = (Crane.COST, Crane.TOKENS)
 LOST_DIALOG_REASON = "диалог агента потерян, ответ владельца некуда вернуть"
 FAILURE_PREFIX = {
     AgentStatus.MODEL_FAILED: "модель",
     AgentStatus.CONTEXT_OVERFLOW: "контекст",
     AgentStatus.STUCK: "агент застрял",
 }
+
+
+class ModelUnavailable(Exception):
+    pass
 
 
 class ParkedEntry(BaseModel):
@@ -67,7 +78,7 @@ class AgentState(BaseModel):
     cursor: int = 0
     job: dict[str, Any] | None = None
     parked: dict[str, ParkedEntry] = Field(default_factory=dict)
-    remarks: dict[str, str] = Field(default_factory=dict)
+    spend: dict[str, SpendState] = Field(default_factory=dict)
 
 
 class OutboxItem(BaseModel):
@@ -82,7 +93,6 @@ class Outbox(BaseModel):
 
 @dataclass(frozen=True)
 class AgentSettings(WorkerSettings):
-    models: tuple[str, ...] = ()
     limits: AgentLimits = AgentLimits()
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
@@ -105,11 +115,14 @@ class AgentWorker(WorkerLoops):
         models: ModelFactory,
         sandboxes: SandboxFactory,
         settings: AgentSettings,
+        catalog: Catalog,
     ) -> None:
         super().__init__(hub, settings)
         self._settings: AgentSettings = settings
         self._models = models
         self._sandboxes = sandboxes
+        self._catalog = catalog
+        self._spends: dict[str, JobSpend] = {}
         self._state_path = settings.work_dir / AGENT_STATE_FILE
         self._outbox_path = settings.work_dir / OUTBOX_FILE
         self._state = load_model(AgentState, self._state_path)
@@ -187,8 +200,6 @@ class AgentWorker(WorkerLoops):
         elif message.kind == protocol.MSG_RESUME:
             if job_id in self._state.parked:
                 await self._forget(job_id)
-            if text.strip():
-                self._save(remarks={**self._state.remarks, job_id: text})
 
     def _job_root(self, job_id: str) -> Path:
         return self._settings.work_dir / AGENT_DIR / job_id
@@ -206,7 +217,26 @@ class AgentWorker(WorkerLoops):
     def _without_parked(self, job_id: str) -> dict[str, ParkedEntry]:
         return {key: value for key, value in self._state.parked.items() if key != job_id}
 
+    def _spend_of(self, job: Job) -> JobSpend:
+        spend = self._spends.get(job.id)
+        if spend is None:
+            state = self._state.spend.get(job.id) or SpendState(
+                base_cost=job.cost_usd, base_tokens=job.tokens
+            )
+            spend = JobSpend(state, lambda saved: self._save_spend(job.id, saved))
+            self._spends[job.id] = spend
+        return spend
+
+    def _save_spend(self, job_id: str, state: SpendState) -> None:
+        self._save(spend={**self._state.spend, job_id: state})
+
+    def _drop_spend(self, job_id: str) -> None:
+        self._spends.pop(job_id, None)
+        if job_id in self._state.spend:
+            self._save(spend={k: v for k, v in self._state.spend.items() if k != job_id})
+
     async def _forget(self, job_id: str) -> None:
+        self._drop_spend(job_id)
         self._save(parked=self._without_parked(job_id))
         sandbox = self._parked_sandboxes.pop(job_id, None)
         if sandbox is not None:
@@ -237,7 +267,14 @@ class AgentWorker(WorkerLoops):
             ready = next((key for key, entry in self._state.parked.items() if entry.answered), None)
             if ready is not None:
                 resumed = Job(**self._state.parked[ready].job)
-        job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], self._settings.models)
+        available: list[str] = []
+        if resumed is None:
+            try:
+                available = await self._catalog.names()
+            except HubRequestError as exc:
+                log.info("Каталог моделей недоступен: %s", self.scrub(str(exc)))
+                return False
+        job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], available)
         if job is None:
             return False
         await self.handle(job, resumed=resumed is not None)
@@ -260,6 +297,7 @@ class AgentWorker(WorkerLoops):
                 self._task = None
         if job.id not in self._state.parked:
             shutil.rmtree(root, ignore_errors=True)
+            self._drop_spend(job.id)
         self._stopped.discard(job.id)
         self._current = None
         self._save(job=None)
@@ -280,6 +318,8 @@ class AgentWorker(WorkerLoops):
                 await asyncio.shield(self._suspend(run))
                 raise
             await self._fail_or_stop(run, protocol.MSG_STOPPED, STOPPED_REASON)
+        except ModelUnavailable as exc:
+            await self._fail_or_stop(run, protocol.MSG_FAILED, str(exc))
         except Exception as exc:
             text = self.scrub(f"{type(exc).__name__}: {exc}")[:FAILED_TEXT_CHARS]
             log.warning("Задание %s не выполнено: %s", job.id, text)
@@ -306,6 +346,7 @@ class AgentWorker(WorkerLoops):
         await repo.open()
         project = parse_spec(await run.mirror.read_file(repo.base, SPEC_FILE))
         spec = AgentSpec.from_project(project)
+        await self._check_model(job, project)
         baseline = await self._baseline(run, repo.base)
         held = self._parked_sandboxes.pop(job.id, None)
         sandbox = held or self._sandboxes(
@@ -313,13 +354,16 @@ class AgentWorker(WorkerLoops):
         )
         run.sandbox = sandbox
         await (sandbox.resume() if held else sandbox.start())
+        spend = self._spend_of(job)
         loop = AgentLoop(
-            self._models(job.model, job.id),
+            MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
             FinishGuard(sandbox, spec),
-            self._settings.limits,
+            self._limits_for(spend),
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
+            spend=spend.total_cost,
+            tokens=spend.total_tokens,
         )
         system = build_system(await self._rules(run, project, repo.base))
         dialog = self._answered_dialog(run)
@@ -329,7 +373,7 @@ class AgentWorker(WorkerLoops):
             job.task,
             await sandbox.changed_paths(),
             await repo.milestones(),
-            self._take_remarks(job.id),
+            job.params.get(protocol.PARAM_REMARKS, ""),
         )
         return await loop.run(system, task)
 
@@ -340,17 +384,29 @@ class AgentWorker(WorkerLoops):
         dialog = load_model(Dialog, path)
         return dialog if dialog.answer is not None else None
 
-    def _take_remarks(self, job_id: str) -> str:
-        remarks = dict(self._state.remarks)
-        text = remarks.pop(job_id, "")
-        if text:
-            self._save(remarks=remarks)
-        return text
+    def _limits_for(self, spend: JobSpend) -> AgentLimits:
+        limits = self._settings.limits
+        factor = 1 + spend.extensions
+        return replace(
+            limits,
+            max_cost_usd=limits.max_cost_usd * factor,
+            max_tokens=limits.max_tokens * factor,
+        )
+
+    async def _check_model(self, job: Job, project: ProjectSpec) -> None:
+        entries = await self._catalog.entries(job.model)
+        if not entries:
+            raise ModelUnavailable(MODEL_MISSING_REASON.format(model=job.model))
+        if not project.agent.allow_remote_models and any(e.remote for e in entries):
+            raise ModelUnavailable(REMOTE_FORBIDDEN_REASON.format(model=job.model))
 
     async def _step_done(self, run: JobRun, title: str) -> None:
         assert run.repo is not None
         await self._retry(lambda: run.repo.milestone(title), ABANDON_ATTEMPTS)
-        await self.send(run.job.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: title})
+        report = self._spend_of(run.job).take_report()
+        await self.send(
+            run.job.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: title, **report}
+        )
 
     async def _baseline(self, run: JobRun, base: str) -> dict[str, str]:
         target = run.root / BASE_DIR
@@ -371,12 +427,12 @@ class AgentWorker(WorkerLoops):
     async def _conclude(self, run: JobRun, result: AgentResult) -> None:
         job = run.job
         assert run.repo is not None
-        usage = {
-            protocol.PAYLOAD_TOKENS: result.tokens_in + result.tokens_out,
-            protocol.PAYLOAD_MODEL: job.model,
-        }
+        spend = self._spend_of(job)
+        usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
         if result.status is AgentStatus.ASKED:
             assert result.dialog is not None
+            if result.crane in SPEND_CRANES:
+                spend.extend()
             await self._park(run, result.dialog, usage)
             return
         if result.status is AgentStatus.FINISHED:
@@ -409,6 +465,7 @@ class AgentWorker(WorkerLoops):
     async def _fail_or_stop(self, run: JobRun, kind: str, text: str) -> None:
         await self._abandon(run, text)
         payload = {protocol.PAYLOAD_TEXT: text} if kind == protocol.MSG_FAILED else {}
+        payload.update(self._spend_of(run.job).take_report())
         await self.send(run.job.id, kind, payload)
 
     async def _abandon(self, run: JobRun, reason: str) -> None:

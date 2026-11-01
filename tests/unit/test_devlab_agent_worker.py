@@ -18,7 +18,7 @@ from sa_home_bot.devlab.executor.agent_worker import (
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.utils.files import load_model
 from tests.unit import test_devlab_executor as executor_tests
-from tests.unit.support.fakes import ScriptedChatModel, tool_reply
+from tests.unit.support.fakes import ScriptedChatModel, StaticCatalog, local_entry, tool_reply
 from tests.unit.test_devlab_agent_repo import hub_branch, tracked_files
 
 env = executor_tests.env
@@ -62,7 +62,7 @@ class FlakyHub(ExecutorHub):
 
 
 def make_worker(
-    env, model, hub_class=ExecutorHub, models=(MODEL,), sandboxes=None, limits=None
+    env, model, hub_class=ExecutorHub, models=(MODEL,), sandboxes=None, limits=None, catalog=None
 ) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
@@ -76,11 +76,11 @@ def make_worker(
             work_dir=env.tmp_path / "exec",
             poll_interval_s=0.01,
             heartbeat_interval_s=0.01,
-            models=models,
             **({"limits": limits} if limits else {}),
             push_interval_s=0.0,
             retry_interval_s=0.01,
         ),
+        catalog or StaticCatalog(*(local_entry(name) for name in models)),
     )
 
 

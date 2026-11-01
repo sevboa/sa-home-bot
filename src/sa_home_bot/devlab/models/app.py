@@ -41,7 +41,7 @@ async def run_models(settings: Settings) -> None:
     ledger = Ledger(cfg.data_dir)
     await ledger.open()
     hub = HubClient(cfg.hub_url, cfg.hub_token)
-    gateway = Gateway(backends, ledger, hub, windows)
+    gateway = Gateway(backends, ledger, hub, windows, url=f"http://{host}:{cfg.port}")
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     runner = web.AppRunner(gateway.build_app())

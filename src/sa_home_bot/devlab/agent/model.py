@@ -8,12 +8,19 @@ from typing import Any, Protocol
 import aiohttp
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.usage import usage_cost
 
 MODEL_TIMEOUT_S = 1800.0
 ERROR_SNIPPET_CHARS = 300
 
 
 class ModelError(Exception):
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+class PaidFreeModelError(ModelError):
     pass
 
 
@@ -30,6 +37,8 @@ class ModelReply:
     tool_calls: tuple[ToolCall, ...] = ()
     tokens_in: int = 0
     tokens_out: int = 0
+    cost_usd: float | None = None
+    paid_free: bool = False
 
     def as_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
@@ -67,10 +76,12 @@ class GatewayChat:
         self._model = model
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
         self._temperature = temperature
+        self._owns_session = session is None
         self._session = session or aiohttp.ClientSession()
 
     async def close(self) -> None:
-        await self._session.close()
+        if self._owns_session:
+            await self._session.close()
 
     async def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -87,12 +98,15 @@ class GatewayChat:
             ) as resp:
                 text = await resp.text()
                 if resp.status != 200:
-                    raise ModelError(f"шлюз ответил HTTP {resp.status}: {error_text(text)}")
+                    raise ModelError(
+                        f"шлюз ответил HTTP {resp.status}: {error_text(text)}",
+                        transient=resp.status >= 500 or resp.status == 429,
+                    )
                 data = await resp.json(content_type=None)
         except TimeoutError as exc:
             raise ModelError(f"модель не ответила за {self._timeout.total:g} с") from exc
         except aiohttp.ClientError as exc:
-            raise ModelError(f"шлюз недоступен: {type(exc).__name__}") from exc
+            raise ModelError(f"шлюз недоступен: {type(exc).__name__}", transient=True) from exc
         return parse_reply(data)
 
 
@@ -122,25 +136,10 @@ def parse_reply(data: Any) -> ModelReply:
             tool_calls=calls,
             tokens_in=int(usage.get("prompt_tokens") or 0),
             tokens_out=int(usage.get("completion_tokens") or 0),
+            cost_usd=usage_cost(usage),
         )
     except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise ModelError(f"ответ модели не разобран: {type(exc).__name__}") from exc
 
 
 ModelFactory = Callable[[str, str], ChatModel]
-
-
-class GatewayModels:
-    def __init__(self, base_url: str, token: str) -> None:
-        self._base_url = base_url
-        self._token = token
-        self._session: aiohttp.ClientSession | None = None
-
-    def __call__(self, model: str, job_id: str) -> GatewayChat:
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
-        return GatewayChat(self._base_url, self._token, model, job_id, session=self._session)
-
-    async def close(self) -> None:
-        if self._session is not None:
-            await self._session.close()

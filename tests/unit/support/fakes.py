@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sa_home_bot.devlab.agent.model import ModelReply, ToolCall
+from sa_home_bot.devlab.executor.routing import CatalogEntry
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunResult
 from sa_home_bot.proto.errors import ServiceUnavailableError
 
@@ -366,6 +367,21 @@ class ScriptedChatModel:
         if isinstance(step, Exception):
             raise step
         return step
+
+
+class StaticCatalog:
+    def __init__(self, *entries: CatalogEntry) -> None:
+        self.items = list(entries)
+
+    async def names(self) -> list[str]:
+        return sorted({e.name for e in self.items})
+
+    async def entries(self, model: str, fresh: bool = False) -> list[CatalogEntry]:
+        return [e for e in self.items if e.name == model]
+
+
+def local_entry(name: str, gateway: str = "g1", **fields: Any) -> CatalogEntry:
+    return CatalogEntry(name, gateway, f"http://{gateway}.test", remote=False, **fields)
 
 
 def tool_reply(name: str, call_id: str = "c1", **arguments: Any) -> ModelReply:

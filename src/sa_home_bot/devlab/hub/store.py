@@ -165,6 +165,8 @@ class HubStore:
                 isinstance(m, dict) and m.get(protocol.MODEL_NAME) for m in models
             ):
                 raise HubError("heartbeat шлюза: models — список объектов с непустым name")
+            if not isinstance(data.get(protocol.FIELD_URL, ""), str):
+                raise HubError("heartbeat шлюза: url — строка")
         async with self._db.transaction() as conn:
             await conn.execute(
                 "INSERT INTO heartbeats (name, role, data, seen) VALUES (?, ?, ?, ?)"
@@ -185,7 +187,7 @@ class HubStore:
         )
         return await cur.fetchone() is not None
 
-    async def models(self) -> list[dict[str, Any]]:
+    async def models(self, with_urls: bool = False) -> list[dict[str, Any]]:
         border = (utc_now() - timedelta(seconds=HEARTBEAT_FRESH_S)).isoformat()
         cur = await self._db.conn.execute(
             "SELECT name, data FROM heartbeats WHERE role = ? AND seen >= ? ORDER BY name",
@@ -195,8 +197,14 @@ class HubStore:
         for row in await cur.fetchall():
             data = json.loads(row["data"])
             limits = data.get(protocol.FIELD_LIMITS)
+            url = {protocol.MODEL_URL: data.get(protocol.FIELD_URL, "")} if with_urls else {}
             catalog.extend(
-                {**model, protocol.MODEL_GATEWAY: row["name"], protocol.FIELD_LIMITS: limits}
+                {
+                    **model,
+                    protocol.MODEL_GATEWAY: row["name"],
+                    protocol.FIELD_LIMITS: limits,
+                    **url,
+                }
                 for model in data[protocol.FIELD_MODELS]
             )
         return catalog

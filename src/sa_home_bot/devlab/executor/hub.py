@@ -46,6 +46,10 @@ class ExecutorHub(HubHttp):
         job = data.get(protocol.FIELD_JOB)
         return Job(**job) if job else None
 
+    async def catalog(self) -> list[dict[str, Any]]:
+        data = await self._post(protocol.HTTP_CATALOG_PATH, {})
+        return data[protocol.FIELD_MODELS]
+
     async def post(self, job_id: str, kind: str, payload: dict[str, Any]) -> None:
         await self._post(
             protocol.HTTP_POST_PATH,

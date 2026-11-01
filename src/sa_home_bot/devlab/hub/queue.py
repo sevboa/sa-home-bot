@@ -422,6 +422,15 @@ class HubQueue:
                 if model is not None and (not isinstance(model, str) or not model.strip()):
                     raise HubError("model: непустая строка")
                 await self._set_status(conn, job, protocol.STATUS_QUEUED)
+                text = payload.get(protocol.PAYLOAD_TEXT)
+                remarks = text.strip() if isinstance(text, str) else ""
+                params = {k: v for k, v in job.params.items() if k != protocol.PARAM_REMARKS}
+                if remarks:
+                    params[protocol.PARAM_REMARKS] = remarks
+                await conn.execute(
+                    "UPDATE jobs SET params = ? WHERE id = ?",
+                    (json.dumps(params, ensure_ascii=False), job_id),
+                )
                 if model is not None:
                     await conn.execute(
                         "UPDATE jobs SET model = ? WHERE id = ?", (model.strip(), job_id)

@@ -11,7 +11,7 @@ from typing import Any
 from sa_home_bot.devlab.agent.context import estimate_tokens, fold_old_results
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
-from sa_home_bot.devlab.agent.model import ChatModel, ModelError, ToolCall
+from sa_home_bot.devlab.agent.model import ChatModel, ModelError, PaidFreeModelError, ToolCall
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_FINISH,
@@ -33,6 +33,15 @@ ASK_SKIPPED = "не выполнено: задан вопрос владельц
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
+
+
+class Crane(StrEnum):
+    RED_RUNS = "red_runs"
+    STEPS = "steps"
+    WALL = "wall"
+    COST = "cost"
+    TOKENS = "tokens"
+    PAID_FREE = "paid_free"
 
 
 class AgentStatus(StrEnum):
@@ -65,18 +74,19 @@ class AgentResult:
     tokens_in: int = 0
     tokens_out: int = 0
     dialog: Dialog | None = None
+    crane: Crane | None = None
 
 
 ChangeListener = Callable[[str], Awaitable[None]]
 StepListener = Callable[[str], Awaitable[None]]
 SpendMeter = Callable[[], float]
+TokenMeter = Callable[[], int]
 
 
 @dataclass
 class Segment:
     messages: list[dict[str, Any]]
     started: float
-    spend_base: float
     steps: int = 0
     idle: int = 0
     red_runs: int = 0
@@ -95,6 +105,7 @@ class AgentLoop:
         on_change: ChangeListener | None = None,
         on_step: StepListener | None = None,
         spend: SpendMeter | None = None,
+        tokens: TokenMeter | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._model = model
@@ -104,6 +115,7 @@ class AgentLoop:
         self._on_change = on_change
         self._on_step = on_step
         self._spend = spend
+        self._tokens = tokens
         self._clock = clock
 
     def _result(self, status: AgentStatus, seg: Segment, **fields: Any) -> AgentResult:
@@ -115,18 +127,31 @@ class AgentLoop:
             **fields,
         )
 
-    def _crane(self, seg: Segment) -> str | None:
+    def _crane_result(
+        self, seg: Segment, messages: list[dict[str, Any]], crane: Crane, reason: str
+    ) -> AgentResult:
+        question = CRANE_QUESTION.format(reason=reason)
+        return self._result(
+            AgentStatus.ASKED,
+            seg,
+            reason=reason,
+            dialog=Dialog(messages=messages, question=question),
+            crane=crane,
+        )
+
+    def _crane(self, seg: Segment) -> tuple[Crane, str] | None:
         limits = self._limits
         if seg.red_runs >= limits.max_red_runs:
-            return f"{seg.red_runs} красных прогонов тестов подряд"
+            return Crane.RED_RUNS, f"{seg.red_runs} красных прогонов тестов подряд"
         if seg.steps >= limits.max_steps:
-            return f"исчерпан лимит шагов {limits.max_steps}"
+            return Crane.STEPS, f"исчерпан лимит шагов {limits.max_steps}"
         if self._clock() - seg.started >= limits.max_wall_s:
-            return f"исчерпан бюджет времени {limits.max_wall_s:g} с"
-        if self._spend is not None and self._spend() - seg.spend_base >= limits.max_cost_usd:
-            return f"исчерпан потолок расхода ${limits.max_cost_usd:g}"
-        if limits.max_tokens and seg.tokens_in + seg.tokens_out >= limits.max_tokens:
-            return f"исчерпан потолок токенов {limits.max_tokens}"
+            return Crane.WALL, f"исчерпан бюджет времени {limits.max_wall_s:g} с"
+        if self._spend is not None and self._spend() >= limits.max_cost_usd:
+            return Crane.COST, f"исчерпан потолок расхода ${limits.max_cost_usd:g}"
+        spent_tokens = self._tokens() if self._tokens else seg.tokens_in + seg.tokens_out
+        if limits.max_tokens and spent_tokens >= limits.max_tokens:
+            return Crane.TOKENS, f"исчерпан потолок токенов {limits.max_tokens}"
         return None
 
     async def run(self, system: str, task: str, resume: Dialog | None = None) -> AgentResult:
@@ -136,20 +161,14 @@ class AgentLoop:
             if resume is not None
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
-        seg = Segment(messages, self._clock(), self._spend() if self._spend else 0.0)
+        seg = Segment(messages, self._clock())
         budget = (
             limits.context_tokens - limits.reply_tokens - estimate_tokens(self._tools.definitions)
         )
         while True:
-            reason = self._crane(seg)
-            if reason is not None:
-                question = CRANE_QUESTION.format(reason=reason)
-                return self._result(
-                    AgentStatus.ASKED,
-                    seg,
-                    reason=reason,
-                    dialog=Dialog(messages=messages, question=question),
-                )
+            crane = self._crane(seg)
+            if crane is not None:
+                return self._crane_result(seg, messages, *crane)
             if fold_old_results(messages, budget, limits.keep_recent) > budget:
                 return self._result(
                     AgentStatus.CONTEXT_OVERFLOW,
@@ -159,6 +178,8 @@ class AgentLoop:
             seg.steps += 1
             try:
                 reply = await self._model.complete(messages, self._tools.definitions)
+            except PaidFreeModelError as exc:
+                return self._crane_result(seg, messages, Crane.PAID_FREE, str(exc))
             except ModelError as exc:
                 return self._result(AgentStatus.MODEL_FAILED, seg, reason=str(exc))
             seg.tokens_in += reply.tokens_in

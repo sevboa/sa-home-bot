@@ -94,6 +94,12 @@ async def poll(request: web.Request) -> web.Response:
     )
 
 
+@roles(protocol.ROLE_EXECUTOR)
+async def catalog(request: web.Request) -> web.Response:
+    models = await request.app[STORE_KEY].models(with_urls=True)
+    return web.json_response({protocol.FIELD_MODELS: models})
+
+
 @roles(protocol.ROLE_EXECUTOR, protocol.ROLE_GATEWAY)
 async def heartbeat(request: web.Request) -> web.Response:
     await request.app[STORE_KEY].heartbeat(request[PRINCIPAL_KEY], await json_body(request))
@@ -125,5 +131,6 @@ def add_routes(app: web.Application) -> None:
     app.router.add_post(protocol.HTTP_POST_PATH, post)
     app.router.add_put(protocol.HTTP_LOG_PATH, upload_log)
     app.router.add_post(protocol.HTTP_POLL_PATH, poll)
+    app.router.add_post(protocol.HTTP_CATALOG_PATH, catalog)
     app.router.add_post(protocol.HTTP_HEARTBEAT_PATH, heartbeat)
     app.router.add_post(protocol.HTTP_INTROSPECT_PATH, introspect)

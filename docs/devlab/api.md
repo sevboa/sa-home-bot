@@ -13,7 +13,8 @@
 | `PUT /api/log` | executor | заголовок `X-Devlab-Job` (id), query `name` = `output.log` или `junit.xml`, тело потоком | `name`, `bytes`; только свой `test`, не `queued`; больше `LOG_MAX_BYTES` (50 МБ) — 413, файла не остаётся; чужое/неизвестное задание — 400 |
 | `/api/post` | executor | `job_id`, `kind` (из `EXECUTOR_MESSAGES`), `payload` | `seq` сообщения; переходы статусов и расход (`tokens`, `cost_usd`) считает `HubQueue.post_from_executor` |
 | `/api/poll` | executor | `since` (по умолчанию 0) | `messages` (answer, resume, stop, release по заданиям этого исполнителя), `cursor` |
-| `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models` и `limits` | `ok` |
+| `/api/catalog` | executor | пусто | `models`: каталог живых моделей с адресом шлюза (`url`) на каждой записи |
+| `/api/heartbeat` | executor, gateway | исполнитель: `busy`, `jobs`; шлюз: `models`, `limits` и `url` (адрес шлюза) | `ok` |
 | `/api/introspect` | gateway | `token`: токен, предъявленный шлюзу; `address`: адрес клиента у шлюза (должен быть IP ноды токена) | `name`, `role`; 404 для неизвестного, отозванного и любого не-executor токена |
 
 - `poll`: `cursor` — `seq` последнего выданного, его исполнитель передаёт в следующем `since`
@@ -25,7 +26,8 @@
 - Каталог моделей: `HubStore.models()` — объединение `models` шлюзов, чей heartbeat свежее
   `HEARTBEAT_FRESH_S` (120 с); у каждой записи добавлены `gateway` (имя токена шлюза) и `limits`
   шлюза. Одна модель у нескольких шлюзов даёт несколько записей, выбор по приоритету — за клиентом
-  и исполнителем. Из каталога читает MCP-инструмент `devlab_models` (60.3.5).
+  и исполнителем. Из каталога читает MCP-инструмент `devlab_models` (60.3.5), без адресов шлюзов:
+  `url` из heartbeat отдаёт только `/api/catalog` (роль executor, 60.5.6), клиентам он не нужен.
 - Проверки `allow_remote_models` и remote-моделей на хабе нет: это клиент и исполнитель.
 - Очистка ящика: `app.purge_loop` — фоновая задача `run_hub`, раз в сутки (`PURGE_INTERVAL_S`)
   зовёт `HubQueue.purge(mailbox_retention_days)`; сбой пишется в журнал и не останавливает цикл.

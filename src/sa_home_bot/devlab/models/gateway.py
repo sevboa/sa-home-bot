@@ -13,6 +13,7 @@ from sa_home_bot.devlab.models.backends import ModelBackend, ModelUnavailableErr
 from sa_home_bot.devlab.models.hubclient import HubClient, HubUnavailableError
 from sa_home_bot.devlab.models.ledger import Ledger
 from sa_home_bot.devlab.models.limits import RateWindow
+from sa_home_bot.devlab.usage import usage_cost
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class UsageSniffer:
     def __init__(self) -> None:
         self.tokens_in = 0
         self.tokens_out = 0
+        self.cost_usd: float | None = None
         self._tail = b""
 
     def feed(self, chunk: bytes) -> None:
@@ -40,6 +42,7 @@ class UsageSniffer:
         if isinstance(usage, dict):
             self.tokens_in = int(usage.get("prompt_tokens") or 0)
             self.tokens_out = int(usage.get("completion_tokens") or 0)
+            self.cost_usd = usage_cost(usage)
 
     def _line(self, line: bytes) -> None:
         if not line.startswith(SSE_DATA_PREFIX):
@@ -59,7 +62,9 @@ class Gateway:
         ledger: Ledger,
         hub: HubClient,
         windows: dict[str, RateWindow],
+        url: str = "",
     ) -> None:
+        self.url = url
         self.backends = backends
         self.ledger = ledger
         self.hub = hub
@@ -94,7 +99,11 @@ class Gateway:
             if spec.rpd:
                 left = max(0, spec.rpd - await self.ledger.requests_today(name))
             limits[name] = {protocol.LIMIT_RPD_LEFT: left}
-        return {protocol.FIELD_MODELS: models, protocol.FIELD_LIMITS: limits}
+        return {
+            protocol.FIELD_MODELS: models,
+            protocol.FIELD_LIMITS: limits,
+            protocol.FIELD_URL: self.url,
+        }
 
     @web.middleware
     async def _auth(self, request: web.Request, handler: Handler) -> web.StreamResponse:
@@ -193,9 +202,11 @@ class Gateway:
 
     async def _record(self, backend: ModelBackend, job: str, sniffer: UsageSniffer) -> None:
         spec = backend.spec
-        cost = (
-            sniffer.tokens_in * spec.price_in_per_m + sniffer.tokens_out * spec.price_out_per_m
-        ) / TOKENS_PER_PRICE_UNIT
+        cost = sniffer.cost_usd
+        if cost is None:
+            cost = (
+                sniffer.tokens_in * spec.price_in_per_m + sniffer.tokens_out * spec.price_out_per_m
+            ) / TOKENS_PER_PRICE_UNIT
         await self.ledger.add(
             backend.name,
             job,
