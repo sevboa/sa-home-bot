@@ -205,6 +205,14 @@ async def test_provider_fallback_fields_are_not_forwarded(setup, provider):
     assert provider.received[0]["temperature"] == 0.2
 
 
+@pytest.mark.parametrize(("report_cost", "expected"), [(True, {"include": True}), (False, None)])
+async def test_usage_cost_is_requested_only_when_configured(setup, provider, report_cost, expected):
+    _, client = await setup(report_cost=report_cost)
+    resp = await client.post(protocol.HTTP_CHAT_PATH, json=CHAT, headers=AUTH)
+    await resp.read()
+    assert provider.received[0].get("usage") == expected
+
+
 async def test_provider_reported_cost_beats_price_list(setup, provider):
     gateway, client = await setup()
     provider.usage = {**USAGE, "cost": 0.0123}

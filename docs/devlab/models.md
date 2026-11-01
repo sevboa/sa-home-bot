@@ -44,6 +44,12 @@ context = 65536
 remote = true
 ```
 
+`report_cost = true` (только OpenRouter): шлюз добавляет к запросу `usage: {include: true}`, провайдер
+присылает фактическую стоимость в `usage.cost`, она идёт в учёт вместо цены из конфига. Строгие API
+неизвестное поле могут отвергнуть, поэтому по умолчанию `false`. Для локальной `llamacpp` ключ `--jinja`
+кладётся в `extra_args`. Адрес в heartbeat — `http://<bind_host или tailscale0>:<port>`
+(`models/app.py`); на jeeves и wooster шлюз слушает tailscale-адрес.
+
 Токен шлюза выпускается на alfred: `nodectl call devlab_hub issue_token name=<имя> role=gateway`.
 
 ## Доступ и introspect
@@ -122,4 +128,5 @@ idle_unload_s = 600
 ```
 
 ## Не сделано
-Выкат (назначение службы на jeeves/mycraft, токены, instance-конфиги) — за владельцем.
+Выкат (назначение службы на jeeves/wooster, токены, instance-конфиги) — за владельцем, чек-лист в
+[deploy.md](deploy.md).

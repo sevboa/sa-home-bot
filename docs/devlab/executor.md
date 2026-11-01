@@ -5,7 +5,8 @@
 `sa_home_bot.devlab.executor.app:run_executor`), назначается на mycraft. Агентский слот — `AgentWorker` (60.5.4, `agent.md`); с `TestWorker` их роднит `WorkerLoops`.
 
 ## Устройство
-- `executor/app.py` — `run_executor`: конфиг `[devlab]`, `ExecutorHub`, `TestWorker`, останов по сигналу.
+- `executor/app.py` — `run_executor`: конфиг `[devlab]`, `ExecutorHub`, `TestWorker` и `AgentWorker` рядом
+  (каждый в своей задаче со своими poll и claim), один общий heartbeat (`beat_forever`), останов по сигналу.
   `build_runner` возвращает `PodmanTestRunner`: чужой код исполняется только в контейнере.
 - `executor/worker.py` — `TestWorker`: три фоновых цикла (heartbeat, poll, claim) и обработка задания.
 - `executor/hub.py` — `ExecutorHub`: `claim`, `post`, `poll`, `upload_log` поверх `devlab/hubhttp.HubHttp`
@@ -23,7 +24,8 @@
 - `executor/agent_sandbox.py` — `PodmanSandbox`, контейнер задачи агента (`agent.md`).
 
 ## Цикл
-1. heartbeat каждые `heartbeat_interval_s`: `{busy, jobs}`; `busy` истинно, пока есть текущее задание.
+1. heartbeat каждые `heartbeat_interval_s`: `{busy, jobs}`; `busy` истинно, пока есть текущее задание
+   любого работника (слоты и общий heartbeat — ниже).
 2. claim с `kinds=["test"]` (слот test; agent не берём), `models=[]`; пусто: пауза `poll_interval_s`.
 3. Задание, по порядку:
    1. `git fetch` всех веток хаба в bare-зеркало `<work_dir>/mirrors/<проект>.git` (`+refs/heads/*:refs/hub/*`,
@@ -48,6 +50,21 @@
 6. Состояние `<work_dir>/state.json`: `cursor` (poll переживает рестарт, прочитанное не разбирается
    повторно) и `current` (задание в работе). На старте непустой `current` — исполнитель умер на
    прогоне: задание закрывается `failed` «исполнитель перезапущен во время прогона».
+
+## Слоты и heartbeat (60.5.7)
+- Слот test постоянный: `TestWorker` берёт только `kind=test` и не ждёт агента. Слот agent один
+  (`AgentWorker` держит одну задачу и свои `parked`); параллельных агентов нет: состояние, outbox и
+  каталог задач `AgentWorker` рассчитаны на одно активное задание. Второй агентский слот потребует
+  отдельных экземпляров работника со своим состоянием и общей очередью claim — не сделано.
+- Heartbeat один на службу (хаб хранит запись на имя токена, два heartbeat перезаписывали бы друг
+  друга): `busy` истинно, если занят любой работник, `jobs` — объединение их текущих заданий
+  (`WorkerLoops.jobs`, `heartbeat_body`). Работники запускаются с `heartbeat=False`.
+- Состояний два, и они не сливаются: `state.json` (курсор poll и `current` test) и
+  `agent-state.json` (курсор, задание, parked, расход агента), плюс `agent-outbox.json`. Курсоры
+  независимы: каждый работник читает ящик исполнителя сам и разбирает только свои сообщения.
+- Каталог моделей и клиент шлюза (`ModelCatalog`, `GatewayModels`) создаются в `run_executor`,
+  токен у них тот же, что у хаба. Лимиты агента из `[devlab] agent_max_*`; модели в настройках нет.
+- Выкат: [deploy.md](deploy.md).
 
 ## Контейнерный запуск (61.2b)
 `PodmanTestRunner.run` вызывает обёртку `sudo -n -u <devlab.user> /usr/local/libexec/sa-home-devlab …`
@@ -110,12 +127,15 @@
 
 ## Конфиг
 Таблица `[devlab]`: `hub_url`, `hub_token`, `work_dir`, `poll_interval_s`, `heartbeat_interval_s`,
-`test_image`, `test_cpuset`, `test_cpus`, `test_memory`, `build_timeout_s`
-(см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
+`test_image`, `test_cpuset`, `test_cpus`, `test_memory`, `build_timeout_s`, `agent_cpuset`, `agent_cpus`,
+`agent_memory`, `agent_max_steps`, `agent_max_wall_s`, `agent_max_red_runs`, `agent_max_cost_usd`,
+`agent_max_tokens`, `agent_context_tokens`, `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
 
 ## Тесты
 `tests/unit/test_devlab_executor.py` (настоящий хаб `build_hub_app`, bare-репо, `FakeTestRunner`) и
-`tests/unit/test_devlab_executor_report.py` (разбор итогов, `.devlab.toml`),
+`tests/unit/test_devlab_executor_service.py` (сквозной: `run_executor` с настоящим хабом, двумя настоящими
+шлюзами на фейковом апстриме, настоящим репозиторием; клиент через MCP до `agent/<id>` и ящика, `test` проходит,
+пока агент занят, отказ одного шлюза посреди задачи) и `tests/unit/test_devlab_executor_report.py` (разбор итогов, `.devlab.toml`),
 `tests/unit/test_devlab_podman_runner.py` (раннер с фейковым запуском обёртки: argv, кэш образа,
 таймаут, cancel, очистка), `tests/unit/test_devlab_agent_sandbox.py` (песочница агента) и `tests/unit/test_devlab_wrapper_script.py` (настоящий текст обёртки в `sh`
 с фейковым `podman`: валидация `cpuset` и имени файла `sync-out`).

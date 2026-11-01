@@ -243,3 +243,9 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
 - Тесты: `tests/unit/test_devlab_agent_spend.py` (каталог с двумя шлюзами одной модели и отказ одного,
   запрет remote, $ через рестарт и вопрос, сквозной потолок, free с ненулевой стоимостью, гонка
   `claim`/`poll` для замечаний), `test_devlab_models.py` (поля `models`/`route`, фактическая стоимость, `url`).
+
+## Служба и слоты (60.5.7)
+Код: `executor/app.py`. `run_executor` запускает `TestWorker` и `AgentWorker` рядом, общий heartbeat,
+лимиты `AgentLimits` из `[devlab] agent_max_*` (`agent_limits`), модели из каталога хаба
+(`GatewayModels`). Агентский слот один; тесты не стоят за агентом. Подробности и выкат:
+`executor.md`, `deploy.md`. Сквозной тест: `tests/unit/test_devlab_executor_service.py`.

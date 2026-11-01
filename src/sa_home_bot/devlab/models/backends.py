@@ -78,6 +78,8 @@ class OpenAiBackend(HttpBackend):
             headers["Authorization"] = BEARER + self.spec.api_key
         url = self.spec.base_url.rstrip("/") + "/chat/completions"
         body = {k: v for k, v in payload.items() if k not in FALLBACK_FIELDS}
+        if self.spec.report_cost:
+            body["usage"] = {"include": True}
         return await self._post(
             url, {**body, "model": self.spec.model}, headers, self.spec.proxy or None
         )

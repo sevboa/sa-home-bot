@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from pathlib import Path
 
 from sa_home_bot.config import DevlabConfig, Settings
+from sa_home_bot.devlab.agent.loop import AgentLimits
+from sa_home_bot.devlab.agent.model import ModelFactory
+from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, podman_sandbox_factory
+from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
+from sa_home_bot.devlab.executor.routing import GatewayModels, ModelCatalog
 from sa_home_bot.devlab.executor.runner import TestRunner
-from sa_home_bot.devlab.executor.worker import TestWorker, WorkerSettings
+from sa_home_bot.devlab.executor.worker import (
+    TestWorker,
+    WorkerLoops,
+    WorkerSettings,
+    forever,
+    heartbeat_body,
+)
 from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
@@ -25,7 +35,24 @@ def work_dir_of(cfg: DevlabConfig) -> Path:
     return Path(cfg.work_dir) if cfg.work_dir else Path(cfg.root) / EXECUTOR_DIR
 
 
-async def run_executor(settings: Settings, runner: TestRunner | None = None) -> None:
+def agent_limits(cfg: DevlabConfig) -> AgentLimits:
+    return AgentLimits(
+        max_steps=cfg.agent_max_steps,
+        max_wall_s=cfg.agent_max_wall_s,
+        max_red_runs=cfg.agent_max_red_runs,
+        max_cost_usd=cfg.agent_max_cost_usd,
+        max_tokens=cfg.agent_max_tokens,
+        context_tokens=cfg.agent_context_tokens,
+        reply_tokens=cfg.agent_reply_tokens,
+    )
+
+
+async def run_executor(
+    settings: Settings,
+    runner: TestRunner | None = None,
+    sandboxes: SandboxFactory | None = None,
+    models: ModelFactory | None = None,
+) -> None:
     cfg = settings.devlab
     if not cfg.hub_url or not cfg.hub_token:
         raise RuntimeError("devlab: нужны hub_url и hub_token (роль executor)")
@@ -33,27 +60,47 @@ async def run_executor(settings: Settings, runner: TestRunner | None = None) -> 
     work_dir = work_dir_of(cfg)
     work_dir.mkdir(parents=True, exist_ok=True)
     hub = ExecutorHub(cfg.hub_url, cfg.hub_token)
-    worker = TestWorker(
+    worker_settings = WorkerSettings(
+        hub_url=cfg.hub_url,
+        token=cfg.hub_token,
+        work_dir=work_dir,
+        poll_interval_s=cfg.poll_interval_s,
+        heartbeat_interval_s=cfg.heartbeat_interval_s,
+    )
+    catalog = ModelCatalog(hub)
+    gateways = GatewayModels(catalog, cfg.hub_token)
+    tester = TestWorker(hub, runner, worker_settings)
+    agent = AgentWorker(
         hub,
-        runner,
-        WorkerSettings(
-            hub_url=cfg.hub_url,
-            token=cfg.hub_token,
-            work_dir=work_dir,
-            poll_interval_s=cfg.poll_interval_s,
-            heartbeat_interval_s=cfg.heartbeat_interval_s,
-        ),
+        models or gateways,
+        sandboxes or podman_sandbox_factory(cfg),
+        AgentSettings(**vars(worker_settings), limits=agent_limits(cfg)),
+        catalog,
     )
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
-    task = asyncio.create_task(worker.run())
+    tasks = [
+        asyncio.create_task(tester.run(heartbeat=False)),
+        asyncio.create_task(agent.run(heartbeat=False)),
+        asyncio.create_task(beat_forever(hub, (tester, agent), cfg.heartbeat_interval_s, agent)),
+    ]
     try:
         await lifespan.wait()
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         log.info("Останов службы devlab...")
+        await gateways.close()
         await hub.close()
         log.info("Служба devlab остановлена чисто")
+
+
+async def beat_forever(
+    hub: ExecutorHub, workers: tuple[WorkerLoops, ...], interval_s: float, scrubber: WorkerLoops
+) -> None:
+    async def beat() -> None:
+        await hub.heartbeat(heartbeat_body([job for worker in workers for job in worker.jobs]))
+
+    await forever(beat, interval_s, "Heartbeat", scrubber.scrub)

@@ -159,6 +159,13 @@ class DevlabConfig(BaseModel):
     agent_cpus: float = Field(default=6.0, gt=0)
     agent_memory: str = Field(default="12g", pattern=r"^[0-9]+[kmg]$")
     build_timeout_s: float = Field(default=1800.0, gt=0)
+    agent_max_steps: int = Field(default=60, ge=1)
+    agent_max_wall_s: float = Field(default=8 * 3600.0, gt=0)
+    agent_max_red_runs: int = Field(default=5, ge=1)
+    agent_max_cost_usd: float = Field(default=2.0, ge=0)
+    agent_max_tokens: int = Field(default=0, ge=0)
+    agent_context_tokens: int = Field(default=16000, ge=1000)
+    agent_reply_tokens: int = Field(default=2000, ge=100)
 
 
 class MonitorConfig(BaseModel):
@@ -228,6 +235,7 @@ class DevlabModelConfig(BaseModel):
     rpd: int = Field(default=0, ge=0)
     context: int = Field(default=0, ge=0)
     remote: bool = True
+    report_cost: bool = False
     gguf: str = ""
     threads: int = Field(default=0, ge=0)
     threads_night: int = Field(default=0, ge=0)

@@ -402,13 +402,17 @@ llamacpp_bin = "llama-server"
 llamacpp_port_min = 8730
 llamacpp_port_max = 8749
 
+# Одна и та же модель на двух нодах (jeeves и wooster) под одним именем: исполнитель
+# переключается между шлюзами без потери диалога. api_key — только в instance-конфиге ноды
+# (ключ лежит в ~/.config/sa-home-bot/devlab-openrouter.key).
 [devlab_models.openrouter-free]
 kind = "openai"
 base_url = "https://openrouter.ai/api/v1"
 model = "meta-llama/llama-3.3-70b-instruct:free"
-api_key = ""
+api_key = "ПЛЕЙСХОЛДЕР-КЛЮЧ-OPENROUTER"
 proxy = ""
 free = true
+report_cost = true                 # просить у провайдера фактическую стоимость (usage.include); только OpenRouter
 price_in_per_m = 0.0
 price_out_per_m = 0.0
 rpm = 20
@@ -426,7 +430,7 @@ remote = true
 # threads_night = 12
 # cpus = ""
 # idle_unload_s = 600
-# extra_args = []
+# extra_args = ["--jinja"]
 
 [tasks]
 socket = "./data/tasks.sock"
@@ -674,6 +678,16 @@ test_cpuset = "6-11,18-23"         # ядра контейнера теста (-
 test_cpus = 12.0                   # квота CPU контейнера (--cpus)
 test_memory = "24g"                # лимит памяти контейнера
 build_timeout_s = 1800.0           # таймаут сборки образа (setup из .devlab.toml)
+agent_cpuset = "6-11"              # ядра контейнера агента
+agent_cpus = 6.0
+agent_memory = "12g"
+agent_max_steps = 60               # стоп-краны агента (при срабатывании вопрос владельцу)
+agent_max_wall_s = 28800.0         # бюджет времени одного отрезка
+agent_max_red_runs = 5             # подряд красных прогонов тестов
+agent_max_cost_usd = 2.0           # сквозной потолок $ на задачу
+agent_max_tokens = 0               # потолок токенов, 0 — без потолка
+agent_context_tokens = 16000       # окно агента, старые выводы инструментов сворачиваются
+agent_reply_tokens = 2000          # максимум токенов ответа за шаг
 
 [logging]
 level = "INFO"

@@ -249,6 +249,8 @@ instance-конфиге ноды.
   - `free = false`, `price_in_per_m = 0.0`, `price_out_per_m = 0.0` — признак и цена за 1M токенов;
   - `rpm = 0`, `rpd = 0` — лимиты провайдера в минуту и в сутки, 0 — без лимита;
   - `context = 0` — окно контекста; `remote = true` — внешний API;
+  - `report_cost = false` — слать провайдеру `usage: {include: true}` и учитывать фактическую
+    стоимость из ответа; включать только для OpenRouter, строгие API такое поле отвергают;
   - только `llamacpp` (для него `free = true` и `remote = false` по умолчанию):
     `gguf` — путь к файлу (обязателен); `threads = 0` — потоки (0: не передавать, решает
     llama.cpp); `threads_night = 0` — потоки ночью (хранится, логика — 60.6);
@@ -273,6 +275,11 @@ instance-конфиге ноды.
 - `test_memory: str = "24g"` — лимит памяти контейнера, `<число>[kmg]`.
 - `agent_cpuset: str = "6-11"`, `agent_cpus: float = 6.0`, `agent_memory: str = "12g"` — квоты контейнера агента (60.5.3), проверки те же, что у `test_*`.
 - `build_timeout_s: float = 1800.0` — таймаут сборки образа, больше 0.
+- Стоп-краны агента (`AgentLimits`, `docs/devlab/agent.md`): `agent_max_steps = 60`,
+  `agent_max_wall_s = 28800.0` (отрезок), `agent_max_red_runs = 5`, `agent_max_cost_usd = 2.0`
+  (сквозной потолок задачи), `agent_max_tokens = 0` (0 — без потолка), `agent_context_tokens = 16000`
+  (не меньше 1000), `agent_reply_tokens = 2000` (не меньше 100). Модели в настройках нет: имя
+  берётся из задания, шлюзы — из каталога хаба. Число агентских слотов не настраивается, оно одно.
 
 ## TasksConfig
 

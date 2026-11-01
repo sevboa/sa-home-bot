@@ -502,6 +502,6 @@ class AgentWorker(WorkerLoops):
         if run.sandbox is not None and not run.parked:
             await asyncio.shield(run.sandbox.aclose())
 
-    async def run(self) -> None:
+    async def run(self, heartbeat: bool = True) -> None:
         await self.drain()
-        await self.run_loops(extra=[(self.drain, "Исходящие сообщения")])
+        await self.run_loops(extra=[(self.drain, "Исходящие сообщения")], heartbeat=heartbeat)

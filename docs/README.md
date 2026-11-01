@@ -26,7 +26,7 @@
 - [node-fixups/](node-fixups/README.md) — `nodectl fix`, `nodectl`, `sa-home-bot init`, пробники VPN,
   сеть и прокси.
 - [devlab/](devlab/hub.md) — мастерская роя: хаб `devlab_hub` (токены, очередь и ящик, git, API
-  исполнителя и MCP, будильник), чек-лист выката на alfred и шлюз моделей `devlab_models`.
+  исполнителя и MCP, будильник), чек-лист выката на alfred, шлюз моделей `devlab_models`, исполнитель и выкат (`devlab/deploy.md`).
 - [vpn-services/](vpn-services/README.md) — служба `vpn`, `vpn_check`, `reality/`, подписка Hiddify.
 - [platform-llm/](platform-llm/README.md) — служба `llm`: Ollama, STT/TTS, генерация картинок.
 - [platform/](platform/README.md) — конфиг, база данных, здоровье и пороги, бэкапы, торренты, задачи.
