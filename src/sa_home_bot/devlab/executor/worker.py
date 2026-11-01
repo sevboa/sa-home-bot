@@ -5,6 +5,7 @@ import logging
 import shlex
 import shutil
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,16 +49,80 @@ class WorkerSettings:
     heartbeat_interval_s: float
 
 
-class TestWorker:
+class WorkerLoops:
+    def __init__(self, hub: ExecutorHub, settings: WorkerSettings) -> None:
+        self._hub = hub
+        self._settings = settings
+        self._current: str | None = None
+
+    def scrub(self, text: str) -> str:
+        token = self._settings.token
+        return text.replace(token, "***") if token else text
+
+    async def beat(self) -> None:
+        busy = self._current is not None
+        jobs = [self._current] if busy else []
+        await self._hub.heartbeat({protocol.FIELD_BUSY: busy, protocol.FIELD_JOBS: jobs})
+
+    async def poll_once(self) -> None:
+        raise NotImplementedError
+
+    async def claim_once(self) -> bool:
+        raise NotImplementedError
+
+    async def _forever(self, step, interval_s: float, what: str) -> None:
+        while True:
+            try:
+                await step()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("%s: %s", what, self.scrub(f"{type(exc).__name__}: {exc}"))
+            await asyncio.sleep(interval_s)
+
+    async def _claim_loop(self) -> None:
+        while True:
+            claimed = False
+            try:
+                claimed = await self.claim_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("Запрос задания: %s", self.scrub(f"{type(exc).__name__}: {exc}"))
+            if not claimed:
+                await asyncio.sleep(self._settings.poll_interval_s)
+
+    async def run_loops(self, extra: Sequence[tuple[Callable, str]] = ()) -> None:
+        settings = self._settings
+        tasks = [
+            asyncio.create_task(
+                self._forever(self.beat, settings.heartbeat_interval_s, "Heartbeat")
+            ),
+            asyncio.create_task(
+                self._forever(self.poll_once, settings.poll_interval_s, "Опрос хаба")
+            ),
+            asyncio.create_task(self._claim_loop()),
+            *(
+                asyncio.create_task(self._forever(step, settings.poll_interval_s, what))
+                for step, what in extra
+            ),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class TestWorker(WorkerLoops):
     __test__ = False
 
     def __init__(self, hub: ExecutorHub, runner: TestRunner, settings: WorkerSettings) -> None:
-        self._hub = hub
+        super().__init__(hub, settings)
         self._runner = runner
-        self._settings = settings
         self._state_path = settings.work_dir / STATE_FILE
         self._state = load_model(ExecutorState, self._state_path)
-        self._current: str | None = None
         self._stopped: set[str] = set()
 
     @property
@@ -67,10 +132,6 @@ class TestWorker:
     def _save(self, **changes: int | str | None) -> None:
         self._state = self._state.model_copy(update=changes)
         save_model(self._state, self._state_path)
-
-    def scrub(self, text: str) -> str:
-        token = self._settings.token
-        return text.replace(token, "***") if token else text
 
     async def recover(self) -> None:
         orphan = self._state.current
@@ -85,11 +146,6 @@ class TestWorker:
         except HubRequestError as exc:
             log.warning("Осиротевшее задание %s не закрыто: %s", orphan, self.scrub(str(exc)))
         self._save(current=None)
-
-    async def beat(self) -> None:
-        busy = self._current is not None
-        jobs = [self._current] if busy else []
-        await self._hub.heartbeat({protocol.FIELD_BUSY: busy, protocol.FIELD_JOBS: jobs})
 
     async def poll_once(self) -> None:
         messages, cursor = await self._hub.poll(self._state.cursor)
@@ -204,42 +260,6 @@ class TestWorker:
                 "Сообщение %s по заданию %s не доставлено: %s", kind, job_id, self.scrub(str(exc))
             )
 
-    async def _forever(self, step, interval_s: float, what: str) -> None:
-        while True:
-            try:
-                await step()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("%s: %s", what, self.scrub(f"{type(exc).__name__}: {exc}"))
-            await asyncio.sleep(interval_s)
-
-    async def _claim_loop(self) -> None:
-        while True:
-            claimed = False
-            try:
-                claimed = await self.claim_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("Запрос задания: %s", self.scrub(f"{type(exc).__name__}: {exc}"))
-            if not claimed:
-                await asyncio.sleep(self._settings.poll_interval_s)
-
     async def run(self) -> None:
         await self.recover()
-        tasks = [
-            asyncio.create_task(
-                self._forever(self.beat, self._settings.heartbeat_interval_s, "Heartbeat")
-            ),
-            asyncio.create_task(
-                self._forever(self.poll_once, self._settings.poll_interval_s, "Опрос хаба")
-            ),
-            asyncio.create_task(self._claim_loop()),
-        ]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self.run_loops()

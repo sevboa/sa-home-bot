@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import aiohttp
@@ -13,7 +14,13 @@ ERROR_SNIPPET_CHARS = 300
 
 
 class HubRequestError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def permanent(self) -> bool:
+        return self.status is not None and 400 <= self.status < 500
 
 
 class ExecutorHub(HubHttp):
@@ -25,15 +32,16 @@ class ExecutorHub(HubHttp):
                 text = await resp.text()
                 if resp.status != 200:
                     raise HubRequestError(
-                        f"{path}: HTTP {resp.status} {text[:ERROR_SNIPPET_CHARS]}"
+                        f"{path}: HTTP {resp.status} {text[:ERROR_SNIPPET_CHARS]}", resp.status
                     )
                 return await resp.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise HubRequestError(f"{path}: {type(exc).__name__}") from exc
 
-    async def claim(self, kinds: list[str]) -> Job | None:
+    async def claim(self, kinds: list[str], models: Sequence[str] = ()) -> Job | None:
         data = await self._post(
-            protocol.HTTP_CLAIM_PATH, {protocol.FIELD_MODELS: [], protocol.FIELD_KINDS: kinds}
+            protocol.HTTP_CLAIM_PATH,
+            {protocol.FIELD_MODELS: list(models), protocol.FIELD_KINDS: kinds},
         )
         job = data.get(protocol.FIELD_JOB)
         return Job(**job) if job else None

@@ -134,3 +134,38 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
   размером с sa-home-bot доли секунды, для больших нужен выборочный sync.
 - Тесты: `tests/unit/test_devlab_agent_sandbox.py` (фейковая обёртка с состоянием контейнера),
   `tests/unit/test_devlab_wrapper_script.py` (`refresh` в настоящем `sh`).
+
+## Работник агента (60.5.4)
+`devlab/executor/agent_worker.py`, `AgentWorker` — связывает цикл, репозиторий и контейнер. Общие три фоновых цикла
+(heartbeat, poll, claim) вынесены в `WorkerLoops` (`executor/worker.py`), от него наследуются `TestWorker` и `AgentWorker`.
+- Вход: `ExecutorHub`, `ModelFactory` (`(модель, id задания) -> ChatModel`; боевая — `GatewayModels(base_url, token)`
+  с общей сессией), `SandboxFactory` (боевая — `podman_sandbox_factory(cfg)`, в тестах `LocalSandbox`) и `AgentSettings`
+  (`WorkerSettings` + `models`, `limits`, `push_interval_s`, `retry_interval_s`). Адрес шлюза и список моделей для `claim`
+  приходят снаружи; выбор и переключение шлюзов — 60.5.6. `ExecutorHub.claim(kinds, models)` теперь принимает модели.
+- Задание: `claim` вида `agent` → `post started` → в каталоге `<work_dir>/agent/<id>/` свой зеркальный bare-репозиторий,
+  `work/` (рабочая копия), `git/` (репозиторий агента), `base/` (временный экспорт базы) → `AgentRepo.open()`
+  (база — `job.base_branch`, не обязательно `base/<id>`; для этого у `AgentRepo` появился параметр `base_branch`) →
+  `.devlab.toml` и файлы `[agent] rules` читаются из коммита базы → `baseline` = снимок экспорта базы (одинаков для
+  первого запуска и для продолжения) → `sandbox.start()` → `AgentLoop` с `on_change=repo.on_change`.
+- Промпт (`agent/prompt.py`): системное сообщение — вводная и файлы `rules`; task.md — первое пользовательское сообщение.
+  При продолжении к task.md дописывается список файлов, уже изменённых относительно базы.
+- `ManagedSandbox` (`agent/sandbox.py`) — `Sandbox` плюс `start/stop/resume/aclose`; у `LocalSandbox` это пустышки.
+- Исходы: `FINISHED` → `repo.finish` (повтор без предела: результат нельзя потерять) → `done` (резюме, токены, модель);
+  `STEP_LIMIT`/`MODEL_FAILED`/`CONTEXT_OVERFLOW`/`STUCK` и исключения → `repo.abandon` (3 попытки) → `failed` с причиной;
+  `stop` из `poll` отменяет задачу цикла → `abandon` → `stopped` (`agent/<id>` остаётся с частичным результатом,
+  `wip/<id>` нет). Каталог задания удаляется после закрытия.
+- Остановка службы (отмена): под `shield` `repo.flush()`, затем `repo.aclose()` и `sandbox.aclose()`; состояние остаётся.
+- Состояние `<work_dir>/agent-state.json`: `cursor` и `job` (задание целиком). На старте непустой `job` значит, что задание
+  всё ещё `running` на хабе: первым в claim-цикле берётся оно же (без нового `claim` и без второго `started`), рабочая
+  копия поднимается с вершины `wip/<id>` (или локальной, если она впереди).
+- Исходящий outbox `<work_dir>/agent-outbox.json`: каждое сообщение хабу (`started`, `done`, `failed`, `stopped`) сначала
+  дописывается на диск, потом уходит; недоступность хаба и 5xx оставляют его в очереди (порядок сохраняется, повтор
+  каждый `poll_interval_s` и на старте), 4xx (`HubRequestError.permanent`) — сообщение отвергнуто, логируется и снимается.
+  Задание считается закрытым локально, как только терминальное сообщение записано в outbox.
+- Точки расширения для 60.5.5: `step_done` (`repo.milestone` + `post step_done`), `question`/`waiting_owner`
+  (`sandbox.stop/resume`), журнал шагов в промпте. Сейчас `step_done` работник не шлёт: его шлёт инструмент, которого
+  ещё нет.
+- Известное: токены до рестарта в `done` не входят (счётчик цикла в памяти); `poll` у `TestWorker` и `AgentWorker` идут
+  раздельно (общая служба — 60.5.7); у агента свой `agent-state.json`, чтобы не делить курсор с `state.json`.
+- Тесты: `tests/unit/test_devlab_agent_worker.py` (настоящие хаб и репозитории, `ScriptedChatModel`, `LocalSandbox`): полный
+  путь, stop, рестарт посреди задачи, outbox при недоступном хабе, отказ модели.

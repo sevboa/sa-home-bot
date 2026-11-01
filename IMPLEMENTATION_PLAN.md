@@ -6294,7 +6294,7 @@ jeeves. Агент коммитит каждый чих в ветку прогр
   в нём, синхронизация рабочей копии, остановка и подъём, удаление. Раздел `[agent]` рецепта:
   `rules`, `checks`, `allowed_commands`, `forbidden_paths`, `allow_remote_models`, ресурсы.
   Тесты с фейковой обёрткой, как у `PodmanTestRunner`.
-- **60.5.4 Работник агента.** `AgentWorker`: `claim` заданий `agent`, жизненный цикл
+- **60.5.4 Работник агента** (сделано, код без выката; `docs/devlab/agent.md`). `AgentWorker`: `claim` заданий `agent`, жизненный цикл
   (`started`, `step_done`, `done`, `failed`, `stopped`), системный промпт (файлы `rules` + task.md),
   `stop` из `poll`, локальный outbox недошедших сообщений и push, продолжение `running` с
   последнего коммита `wip/<id>` на старте. Связывает 60.5.1–60.5.3.

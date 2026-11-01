@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -124,3 +125,22 @@ def parse_reply(data: Any) -> ModelReply:
         )
     except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise ModelError(f"ответ модели не разобран: {type(exc).__name__}") from exc
+
+
+ModelFactory = Callable[[str, str], ChatModel]
+
+
+class GatewayModels:
+    def __init__(self, base_url: str, token: str) -> None:
+        self._base_url = base_url
+        self._token = token
+        self._session: aiohttp.ClientSession | None = None
+
+    def __call__(self, model: str, job_id: str) -> GatewayChat:
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+        return GatewayChat(self._base_url, self._token, model, job_id, session=self._session)
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()

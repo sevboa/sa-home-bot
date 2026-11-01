@@ -48,6 +48,16 @@ class Sandbox(Protocol):
     async def changed_paths(self) -> list[str]: ...
 
 
+class ManagedSandbox(Sandbox, Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def resume(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
 def safe_relative(path: str) -> str:
     pure = PurePosixPath(path.strip())
     if not path.strip() or pure.is_absolute() or ".." in pure.parts:
@@ -72,6 +82,18 @@ class LocalSandbox:
         return {
             rel: hashlib.sha256((self._root / rel).read_bytes()).hexdigest() for rel in self._walk()
         }
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def resume(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
 
     def snapshot(self) -> dict[str, str]:
         return self._snapshot()

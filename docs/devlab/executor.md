@@ -2,7 +2,7 @@
 
 Этап 61.2a (2026-11-01): ядро исполнителя для заданий `test`. Этап 61.2b (2026-11-01): контейнерный
 `PodmanTestRunner`. Служба `devlab` (`protocol.EXECUTOR_SERVICE`, runner
-`sa_home_bot.devlab.executor.app:run_executor`), назначается на mycraft. Агентский слот (60.5) — позже.
+`sa_home_bot.devlab.executor.app:run_executor`), назначается на mycraft. Агентский слот — `AgentWorker` (60.5.4, `agent.md`); с `TestWorker` их роднит `WorkerLoops`.
 
 ## Устройство
 - `executor/app.py` — `run_executor`: конфиг `[devlab]`, `ExecutorHub`, `TestWorker`, останов по сигналу.

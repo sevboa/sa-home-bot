@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from sa_home_bot.config import DevlabConfig
@@ -11,12 +12,14 @@ from sa_home_bot.devlab.agent.sandbox import (
     IGNORED_DIRS,
     ExecResult,
     LocalSandbox,
+    ManagedSandbox,
     SandboxPathError,
     safe_relative,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.executor.image import ImageRecipe, ensure_image
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE
+from sa_home_bot.devlab.executor.spec import ProjectSpec
 from sa_home_bot.devlab.executor.wrapper import (
     SYNC_TIMEOUT_S,
     RunnerError,
@@ -194,3 +197,25 @@ class PodmanSandbox:
                 self._stale = True
             else:
                 (self._workdir / relative).unlink(missing_ok=True)
+
+
+@dataclass(frozen=True)
+class SandboxRequest:
+    job_id: str
+    workdir: Path
+    project: ProjectSpec
+    spec: AgentSpec
+    baseline: dict[str, str]
+
+
+SandboxFactory = Callable[[SandboxRequest], ManagedSandbox]
+
+
+def podman_sandbox_factory(cfg: DevlabConfig, spawn: Spawn = process.run) -> SandboxFactory:
+    def make(request: SandboxRequest) -> PodmanSandbox:
+        recipe = ImageRecipe.from_section(request.project.test, cfg.test_image)
+        return PodmanSandbox(
+            cfg, request.job_id, request.workdir, recipe, request.spec, request.baseline, spawn
+        )
+
+    return make

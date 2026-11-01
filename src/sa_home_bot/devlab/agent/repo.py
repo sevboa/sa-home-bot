@@ -45,6 +45,7 @@ class AgentRepo:
         author: CommitAuthor,
         push_interval_s: float = PUSH_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
+        base_branch: str = "",
     ) -> None:
         self._mirror = mirror
         self._workdir = workdir
@@ -53,6 +54,7 @@ class AgentRepo:
         self._author = author
         self._interval = push_interval_s
         self._clock = clock
+        self._base_branch = base_branch or f"{protocol.BASE_BRANCH_PREFIX}{job_id}"
         self._wip_branch = f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
         self._agent_branch = f"{protocol.AGENT_BRANCH_PREFIX}{job_id}"
         self._wip_ref = f"{protocol.HEADS_REF_PREFIX}{self._wip_branch}"
@@ -104,7 +106,7 @@ class AgentRepo:
     async def open(self) -> str:
         async with self._lock:
             await self._mirror.fetch()
-            self._base = await self._mirror.resolve(f"{protocol.BASE_BRANCH_PREFIX}{self._job_id}")
+            self._base = await self._mirror.resolve(self._base_branch)
             try:
                 hub_tip = await self._mirror.resolve(self._wip_branch)
             except GitError:
