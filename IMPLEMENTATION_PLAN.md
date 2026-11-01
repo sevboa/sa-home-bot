@@ -6396,6 +6396,79 @@ Colibri) и контейнеры задач ему уступают:
   засыпает в ожидании; ответ с другого компьютера; результат забирается при спящем mycraft; одна
   задача переводится `resume model=…` на другую модель.
 
+**Хвосты после живого запуска v0.154.0–0.154.2 (2026-11-01).** Живая находка: MCP-вызов
+`devlab_test wait=240` клиент Claude Code обрывает раньше срока (`operation timed out`), а пауза
+`sleep 60` в Bash в свежем Claude Code запрещена (foreground sleep блокируется). Поэтому ожидание
+уходит из MCP в CLI: `devlab_test wait=0` → `nodectl devlab wait <id>` (в Bash, лучше фоном с
+уведомлением о выходе) → `devlab_status id=<id>` с результатом. Порядок: 60.8.1 → 60.8.2 → 60.8.3;
+60.8.4 независима.
+
+- **60.8.1 `devlab_status` отдаёт результат теста.** Цель: после опроса не нужен `devlab_inbox`,
+  итог теста приходит тем же `devlab_status`.
+  - Менять: `devlab/hub/mcp_tools.py` (`status`), `docs/devlab/api.md`. Не трогать: `queue.py`,
+    протокол исполнителя.
+  - Шаги: (1) `status` для задания `kind == test` добавляет поле `result` = `test_outcome(ctx, job)`
+    (тот же вид, что у `devlab_test`; `null`, пока не в терминальном статусе); для `agent` поля нет.
+    Готово, когда: `devlab_status` по завершённому test-заданию содержит `exit_code`, `summary`,
+    `failures`, `tail`. (2) Описание инструмента `TOOL_STATUS` упоминает `result` у test-заданий.
+    (3) Строка таблицы в `api.md`.
+  - Тесты: `tests/unit/test_devlab_mcp.py` (test-задание до и после `test_done`, агент без
+    `result`).
+  - Зависимости: нет.
+
+- **60.8.2 `nodectl devlab wait <id>`.** Цель: ожидание задания вне MCP, без `sleep` в Bash.
+  - Менять: `devlab/snapshot.py` (рядом с `branch_command`: тот же разбор argv, токен из
+    `TOKEN_PATH`, адрес из `connect.hub_url`), регистрация подкоманды там же, где `base|fetch|drop|
+    snapshot` (`nodectl.py`), `devlab/connect.py` (`TEST_WAIT_ADVICE_S` и подсказка: «`devlab_test
+    wait=0`, затем `nodectl devlab wait <id>`»), `docs/devlab/client-test.md`.
+  - Шаги: (1) Команда раз в `--interval` (по умолчанию 20 с) зовёт MCP хаба по HTTP
+    (`tools/call` `devlab_status`, JSON-RPC как в `hub/mcp_http.py`, заголовок `Authorization`
+    из файла токена, токен не в argv и не в выводе) до `done|failed|stopped|waiting_owner`.
+    Готово, когда: выход 0 и последней строкой JSON `{"id", "status", "result"?}`. (2) `--timeout`
+    (по умолчанию 1800 с): по истечении код 124 и текущий статус. (3) Хаб недоступен 3 опроса
+    подряд: код 1 с причиной. (4) Подсказка `connect` о `wait` переписана.
+  - Тесты: `tests/unit/test_devlab_snapshot.py` или новый `tests/unit/test_devlab_wait.py`
+    с хабом из `build_hub_app` (как в `test_devlab_client_kit.py`): дожидается `test_done`, таймаут
+    124, токен не в argv/выводе; `test_devlab_client_kit.py` (подсказка `connect`).
+  - Зависимости: 60.8.1.
+
+- **60.8.3 Скилы `devlab-test` и `devlab` на `wait=0`.** Цель: ни один шаг скила не держит
+  MCP-вызов дольше нескольких секунд.
+  - Менять: `devlab/skills/devlab-test/SKILL.md`, `devlab/skills/devlab/SKILL.md`,
+    `docs/devlab/client-test.md` («Предел ожидания»: живая находка 2026-11-01, вывод `wait=0`),
+    `docs/devlab/client-agent.md`, `devlab/hub/resources/usage.md` (если упоминает ожидание).
+  - Шаги: (1) `devlab-test` шаг 2: `devlab_test … wait=0`; шаг 3: `nodectl devlab wait <job.id>`
+    (Bash `run_in_background`, о выходе придёт уведомление; без фона — с `--timeout` не больше
+    600), затем `devlab_status id=<id>` → `result`; абзац про `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`
+    сокращён до ссылки на `client-test.md`. (2) `devlab`: приёмка `devlab_test … wait=0` + тот же
+    `nodectl devlab wait`; «ожидание опросом с паузой (`sleep 60`)» заменено на `nodectl devlab
+    wait <id>` (дожидается и `waiting_owner`). (3) Тексты скилов проходят
+    `test_skill_mentions_only_existing_hub_tools` и `test_skill_params_exist_on_tools` (параметры
+    вида `wait=0` разбираются регуляркой теста — менять тест не нужно). Готово, когда: в обоих
+    скилах нет `wait=240` и `sleep`.
+  - Тесты: `tests/unit/test_devlab_client_kit.py` целиком.
+  - Выкат: после влития на каждом клиенте `nodectl devlab connect` (обновляет скилы).
+  - Зависимости: 60.8.2.
+
+- **60.8.4 Доки после живого запуска (только docs и план).** Цель: доки описывают выкаченное, а не
+  «не выполнялось».
+  - Менять: `docs/devlab/deploy.md` (шапка «не выполнялся», «живого выката нет» → состояние на
+    v0.154.2: хаб alfred, шлюзы jeeves/wooster, исполнитель mycraft; находки cpuset и hub_url
+    остаются), `docs/devlab/hub.md` («Выкат хаба … не выполнялся»), `docs/devlab/devlab-toml.md`
+    («Сверка с sa-home-bot»: в `setup` ставится экстра `mcp` — без неё не собираются
+    `test_devlab_mcp`/`test_agent_mcp_tools`; `allow_remote_models = true` — решение владельца,
+    OpenRouter через шлюзы), `docs/devlab/executor.md` (образ тестов sa-home-bot: экстры `dev`+`mcp`),
+    `docs/devlab/client-agent.md`/`client-test.md`/`git.md`/`api.md` (ручные команды с
+    `alfred.tail61d88b.ts.net` оставить, добавить: `connect` пишет адрес из `connect.hub_url` — на
+    alfred tailscale-IP, на других нодах имя `hub_node`), «Не проверено» — что из этого уже
+    проверено вживую. В плане статусы 60.5–60.7, 61.1–61.3 «код без выката, не влито» → «в проде
+    v0.154.x».
+  - Готово, когда: `rg "не выполнялся|выката нет|без выката" docs/devlab` пусто или каждое
+    вхождение про то, что действительно не проверено.
+  - Тесты: `tests/unit/test_devlab_client_kit.py::test_templates_parse_with_real_parser` (шаблоны
+    не менять без парсера).
+  - Зависимости: нет; кода нет — можно влить вместе с 60.8.3.
+
 **Выкат.**
 - mycraft: `nodectl fix` (владелец, sudo), исполнитель `devlab`, шлюз `devlab_models` с llama.cpp.
 - jeeves: шлюз `devlab_models` с API-моделями, ключи в конфиге инстанса — только после явного
@@ -6465,6 +6538,146 @@ mycraft в тех же контейнерах и окружениях, что у
   перефразируются; без LLM или «в городе» — сухая заглушка.
 - Кнопки: «Ответить» (следующее сообщение → `devlab_answer`), «Продолжить», «Остановить»,
   «Отпустить спать». Ответ из Telegram ложится в тот же ящик, что и ответ по MCP.
+
+**Как сделано (детализация 2026-11-01, по коду v0.154.2).**
+- Канал бот → хаб — proto роя, не HTTP: хаб на alfred уже `ProtoServer` (`devlab/hub/service.py::
+  HubService`, сокет `[devlab_hub].socket`), бот зовёт его через свой `node_link`
+  (`Address(node=[devlab_hub].hub_node, service=protocol.SERVICE_NAME)`). Токен клиента боту не
+  нужен, адрес tailscale не важен. Права: `действие@devlab_hub`, у админа `*`.
+- Ящик хаба привязан к клиенту (`HubQueue.inbox(client, …)`, задания видны только своему токену).
+  Бот смотрит ящик всех клиентов отдельным действием владельца и действует от имени клиента
+  задания (`post_from_client(job.client, …)`). `ack` бот не зовёт: `read_at` и очистка ящика
+  (`purge`) остаются за клиентами Claude.
+- Курсор бота — `app_state["devlab_inbox_cursor"]` (seq последнего обработанного сообщения).
+  Порядок на каждое сообщение: собрать текст (в т.ч. gemma) → отправить → записать курсор. Рестарт
+  до отправки = сообщение обработается заново (ещё не ушло), дубль возможен только при падении
+  между отправкой и записью курсора. Первый запуск без курсора: курсор = текущий максимум seq,
+  старую историю не шлём.
+- Оповещаются только задания `kind == agent`, сообщения `question`, `done`, `failed`. `question`
+  пропускается, если задание уже не `waiting_owner` (ответили по MCP, пока бот не видел). `test_done`,
+  `started`, `step_done`, `stopped` не шлются.
+- Текст = вступление Альфреда + блок фактов. Блок фактов собирает код (проект, номер, заголовок
+  task.md, модель, токены и $, ветка `agent/<id>`, текст вопроса / сводка / причина провала — дословно,
+  `html.escape`, обрезка `utils.text.clip`). Gemma пишет только вступление 1–2 фразы через `chat`
+  службы `llm` с `role="persona"` (персонаж из `llm-prompt.toml`, вне репозитория), `think=False`;
+  цифры и факты ей запрещено повторять, поэтому они не искажаются. Без LLM (служба недоступна,
+  ошибка, таймаут) или пока Альфред «в городе» (`AwayService.load()` не `None`, любая фаза) —
+  сухая заглушка-вступление. mycraft ради оповещения не будим (`wake_core` не зовём).
+- Новые реплики-заглушки — константы в `bot/ai_lines.py` (там живут реплики Альфреда и персонажей
+  сбоев); существующие персонажные строки и `llm-prompt.toml` не трогаем.
+- Кнопки: `question` → «Ответить», «Отпустить спать», «Остановить»; `failed` → «Продолжить»
+  (`resume` без замечаний, той же моделью); `done` — без кнопок (приёмка за Claude-клиентом).
+  callback_data `dl:<код>:<job_id>` (`bot/ui/callback_data.pack`), коды `ans`, `rel`, `stop`, `res`.
+  «Ответить» — ForceReply-подсказка, ответ на неё уходит в `answer` (образец:
+  `bot/handlers/vpn/reports.py::VpnReplyFilter`), ожидание ответа хранится в `app_state`, а не в
+  памяти: после рестарта ответ на старую подсказку не утечёт в диалог с Альфредом.
+- Хаб уже умеет `answer`, `resume`, `stop`, `release` (`HubQueue.post_from_client` с проверкой
+  переходов); добавляются только действия владельца поверх них.
+
+Задачи (каждая вливается отдельно; приём — ревью по CLAUDE.md, тесты; выкат по «катим»):
+Порядок: 62.1 → 62.2 → (62.3 ‖ 62.4) → 62.5.
+
+- **62.1 Хаб: действия владельца по proto.** Цель: бот читает ящик всех клиентов и отвечает за
+  клиента задания.
+  - Менять: `devlab/protocol.py` (`ACTION_OWNER_INBOX = "owner_inbox"`, `ACTION_OWNER_JOB =
+    "owner_job"`, `ACTION_OWNER_POST = "owner_post"`, `PAYLOAD_VIA = "via"`), `devlab/hub/queue.py`
+    (`inbox_all(since, limit)` — сообщения `direction=client` всех клиентов с полями задания
+    `kind`, `project`, `client`, `model`, `status`, `task`; `max_seq()`), `devlab/hub/service.py`
+    (`ActionSpec` трёх действий в `describe`, ветки в `_dispatch`), `docs/devlab/hub.md`,
+    `docs/devlab/queue.md`. Не трогать: MCP-инструменты, `ack`, `purge`.
+  - Шаги: (1) `owner_inbox since limit`: `since < 0` → `{messages: [], cursor: max_seq()}`; иначе
+    сообщения после `since` (до `limit`, по умолчанию 50) с вложенным `job` (без полного task.md:
+    `title` — первая непустая строка task.md без `#`, обрезка 120) и `cursor`. Готово, когда: видны
+    сообщения двух разных клиентов, `read_at` не меняется. (2) `owner_job id`: `job_view` без task +
+    `title` + текст последнего `question`. (3) `owner_post id kind text model`: `kind` ∈
+    `CLIENT_MESSAGES`, `answer` требует непустой `text`, вызывает `post_from_client(job.client, …)`
+    с `payload[via] = "telegram"`; ответ `{seq, status}`; недопустимый переход — `ProtoError`
+    `ERR_BAD_REQUEST` с текстом `HubError`. (4) Скил `devlab` и `hub/resources/usage.md`: одна
+    строка «вопрос мог ответить владелец из Telegram: `devlab_status` уже `running`».
+  - Тесты: `tests/unit/test_devlab_queue.py` (`inbox_all`, `max_seq`, `read_at` не трогается),
+    `tests/unit/test_devlab_hub.py` (три действия через `HubService.run_command`, чужой клиент,
+    недопустимый переход), `tests/unit/test_devlab_client_kit.py` (скил).
+  - Зависимости: нет. Выкат: alfred (хаб).
+
+- **62.2 Бот: наблюдатель ящика и сухие оповещения.** Цель: админы получают `question`/`done`/
+  `failed` с блоком фактов и заглушкой-вступлением, без дублей после рестарта.
+  - Менять: новый `bot/devlab_notify.py` (`DevlabNotifier`: `tick()`, `run()` по образцу
+    `bot/away_return.py::AwayRunner` — цикл с `kick`, исключения в лог), `bot/ai_lines.py`
+    (заглушки `DEVLAB_QUESTION_TEXT`, `DEVLAB_DONE_TEXT`, `DEVLAB_FAILED_TEXT`), `config.py`
+    (`DevlabNotifyConfig`: `enabled = False`, `poll_s = 30`, `llm_timeout_s = 90`,
+    `facts_max_chars = 1500`; поле `devlab_notify` в `Settings`), `app.py` (задача рядом с
+    `away_task`, отмена в `_shutdown`), `docs/devlab/notify.md` (новый: механизм, курсор, фильтры),
+    `docs/platform/config-reference.md`, ссылка в `docs/README.md`.
+  - Шаги: (1) Нет курсора → `owner_inbox since=-1`, записать `cursor`. (2) Проход: `owner_inbox
+    since=<курсор>`; на каждое сообщение — фильтр (kind задания `agent`; `question`/`done`/`failed`;
+    `question` только при `status == waiting_owner`) → текст (вступление-заглушка + блок фактов) →
+    `notifier.broadcast(админы (WILDCARD in allowed_commands, как notify_admins), …,
+    outbox_kind=OUTBOX_KIND_TASK, dedup_key=f"devlab:{seq}")` → `store.set_state(курсор, seq)`;
+    пропущенное фильтром тоже двигает курсор. (3) Хаб недоступен (`SERVICE_CALL_ERRORS`) — лог,
+    курсор не двигается, следующий проход. (4) `enabled = False` — задача не стартует.
+    Готово, когда: повторный `tick` после «рестарта» (новый объект на той же БД) ничего не шлёт.
+  - Тесты: новый `tests/unit/test_devlab_notify.py` (`FakeNodeLink` с `results["owner_inbox"]`,
+    `FakeNotifier`, настоящий `Store`): первый запуск без истории, фильтры, отвеченный `question`,
+    курсор после рестарта, хаб недоступен, экранирование HTML в фактах.
+  - Зависимости: 62.1.
+
+- **62.3 Кнопки и «Ответить».** Цель: админ из Telegram отвечает, продолжает, останавливает и
+  отпускает задание.
+  - Менять: `bot/devlab_notify.py` (клавиатура по виду сообщения через `bot/ui/keyboards`,
+    `pack("dl", код, job_id)`), новый `bot/handlers/devlab.py` (router: callback `dl:*`, ForceReply,
+    `DevlabReplyFilter`), `bot/setup.py` (include сразу после `away`: до `ai` и `ai.catchall_router`),
+    `bot/ai_lines.py` (подписи кнопок, подсказка «ваш ответ агенту», «передал», «задание уже …»),
+    `docs/bot-rest/authorization-ui.md` (префикс `dl` в «Прочие префиксы»),
+    `docs/bot-rest/handlers-and-routing.md` (место роутера), `docs/devlab/notify.md`.
+  - Шаги: (1) Нажатие проверяет `subscription.is_owner` (как `handlers/away.py::_is_owner`), иначе
+    `DENIED_TEXT`. (2) `rel`/`stop`/`res` → `owner_post id kind`; успех — toast со статусом и снятие
+    клавиатуры (`notifier.edit_markup` / `bot/ui/redraw`), отказ хаба — toast с текстом ошибки,
+    клавиатура снимается. (3) `ans` → `owner_job id`; не `waiting_owner` — toast «уже …»; иначе
+    ForceReply с номером задания, `app_state["devlab_reply:<chat_id>:<message_id>"] =
+    {"job_id", "user_id", "created"}`, срок 24 ч. (4) `DevlabReplyFilter`: реплай на такую подсказку
+    от того же пользователя, текст не команда → `owner_post kind=answer text=…`, ключ удаляется,
+    ответ «передал»; просрочено — «подсказка устарела, нажмите «Ответить» ещё раз», в диалог не
+    уходит.
+  - Тесты: новый `tests/unit/test_devlab_handlers.py` (`FakeCallback`, `FakeMessage`,
+    `FakeNodeLink`): права, каждый код, ForceReply и ответ, просрочка, переживание «рестарта»
+    (новый роутерный вызов, та же БД); `tests/unit/test_bot_ui.py` при необходимости.
+  - Зависимости: 62.2.
+
+- **62.4 Вступление Альфреда через gemma.** Цель: оповещение начинается фразой дворецкого, факты
+  не тронуты.
+  - Менять: `bot/devlab_notify.py` (`compose_lead(kind, facts) -> str`), `docs/devlab/notify.md`.
+    Не трогать: `llm/`, `llm-prompt.toml`, существующие строки `ai_lines.py`.
+  - Шаги: (1) Альфред в городе (`AwayService(store, settings).load()` не `None`) → заглушка 62.2,
+    `chat` не зовётся. (2) Иначе `node_link.command(ACTION_CHAT, {"messages": [user: инструкция +
+    факты], "role": "persona", "think": False, "chat_id": <чат первого админа>}, dst=LLM_ADDRESS,
+    timeout=llm_timeout_s)` (`ACTION_CHAT` из `llm_chat`, адрес из `proto.addresses`); инструкция
+    — константа модуля: «одна-две фразы хозяину, что агент <спросил/закончил/упал>; цифры, имена
+    веток, модель и текст не повторяй, они будут ниже». (3) Ответ пустой, `done_reason ==
+    "length"`, `LLM_CALL_ERRORS`/`TimeoutError` → заглушка. Ответ обрезается `clip(…, 400,
+    at_word=True)`, префикс `alfred_voice.ALFRED_PREFIX_HTML`, `html.escape`. (4) Один текст на
+    сообщение для всех админов (gemma зовётся один раз).
+  - Тесты: `tests/unit/test_devlab_notify.py` (в городе — без вызова `chat`; ошибка и таймаут —
+    заглушка; успех — вступление + неизменный блок фактов; один вызов на несколько админов).
+  - Зависимости: 62.2 (параллельно с 62.3).
+
+- **62.5 Чек-лист живой проверки (без кода).** Цель: проверить оповещения на проде после выката
+  62.1–62.4 (хаб и бот на alfred; `[devlab_notify] enabled = true` в instance-конфиге бота — правит
+  владелец). Записать результат в `docs/devlab/notify.md` с датой.
+  1. Рестарт бота при пустом ящике: старые сообщения не пришли, в `app_state` появился курсор.
+  2. Агент-задание с `ask_owner` (бесплатная модель): в Telegram вопрос с вступлением Альфреда и
+     дословным текстом вопроса, кнопки «Ответить / Отпустить спать / Остановить».
+  3. «Ответить» → ForceReply → текст: задание `running`, агент продолжил; Claude-клиент видит
+     `running` в `devlab_status`.
+  4. Второй вопрос → «Отпустить спать»: mycraft засыпает раньше `owner_wait_s`; потом ответ из
+     Telegram будит его (будильник хаба).
+  5. `failed` (например, недоступная модель) → «Продолжить»: задание снова `queued`.
+  6. `done`: факты (модель, токены, $, ветка `agent/<id>`) совпадают с `devlab_status`.
+  7. `sa-home-bot away set 1h` → следующее оповещение с сухой заглушкой, без вызова gemma
+     (журнал `llm` на mycraft пуст); `away back`.
+  8. mycraft спит при `done`: оповещение с заглушкой, mycraft не проснулся ради него.
+  9. Рестарт бота между двумя сообщениями ящика: каждое пришло один раз.
+  10. Ответ на ForceReply после рестарта бота уходит агенту, а не Альфреду в диалог.
+  - Зависимости: 62.1–62.4 в проде.
 
 ### Дальше (не детализируем)
 
