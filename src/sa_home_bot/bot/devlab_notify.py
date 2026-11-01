@@ -7,10 +7,14 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from aiogram.types import InlineKeyboardMarkup
+
 from sa_home_bot.bot import ai_lines
 from sa_home_bot.bot.notifier import Notifier, admin_subs
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
+from sa_home_bot.bot.ui.callback_data import pack
+from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import OUTBOX_KIND_TASK, Store
 from sa_home_bot.devlab import protocol
@@ -22,6 +26,13 @@ log = logging.getLogger(__name__)
 CALL_TIMEOUT_S = 15.0
 CURSOR_KEY = "devlab_inbox_cursor"
 NOTICE_KEY = "devlab_notice:{chat_id}:{message_id}"
+CB_PREFIX = "dl"
+CB_ANSWER = "ans"
+CB_RELEASE = "rel"
+CB_STOP = "stop"
+CB_STOP_CONFIRM = "stopc"
+CB_CANCEL = "cnl"
+CB_RESUME = "res"
 DEDUP_KEY = "devlab:{seq}"
 NOTIFIED_KINDS = (protocol.MSG_QUESTION, protocol.MSG_DONE, protocol.MSG_FAILED)
 LEADS = {
@@ -34,6 +45,41 @@ BODY_FIELDS = {
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
     protocol.MSG_FAILED: protocol.PAYLOAD_TEXT,
 }
+
+
+def hub_address(config: Settings) -> Address:
+    return Address(node=config.devlab_hub.hub_node, service=protocol.SERVICE_NAME)
+
+
+def question_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return markup(
+        [
+            button(ai_lines.DEVLAB_BTN_ANSWER, pack(CB_PREFIX, CB_ANSWER, job_id)),
+            button(ai_lines.DEVLAB_BTN_RELEASE, pack(CB_PREFIX, CB_RELEASE, job_id)),
+        ],
+        [button(ai_lines.DEVLAB_BTN_STOP, pack(CB_PREFIX, CB_STOP, job_id))],
+    )
+
+
+def stop_confirm_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return markup(
+        [
+            button(ai_lines.DEVLAB_BTN_STOP_CONFIRM, pack(CB_PREFIX, CB_STOP_CONFIRM, job_id)),
+            button(ai_lines.DEVLAB_BTN_CANCEL, pack(CB_PREFIX, CB_CANCEL, job_id)),
+        ]
+    )
+
+
+def failed_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return markup([button(ai_lines.DEVLAB_BTN_RESUME, pack(CB_PREFIX, CB_RESUME, job_id))])
+
+
+def notice_keyboard(kind: str, job_id: str) -> InlineKeyboardMarkup | None:
+    if kind == protocol.MSG_QUESTION:
+        return question_keyboard(job_id)
+    if kind == protocol.MSG_FAILED:
+        return failed_keyboard(job_id)
+    return None
 
 
 def wants_notice(message: dict[str, Any]) -> bool:
@@ -130,11 +176,10 @@ class DevlabNotifier:
         return sent
 
     async def _call(self, node_link: ServiceLink, since: int) -> dict[str, Any]:
-        dst = Address(node=self._config.devlab_hub.hub_node, service=protocol.SERVICE_NAME)
         return await node_link.command(
             protocol.ACTION_OWNER_INBOX,
             {protocol.FIELD_SINCE: since},
-            dst=dst,
+            dst=hub_address(self._config),
             timeout=CALL_TIMEOUT_S,
         )
 
@@ -142,10 +187,12 @@ class DevlabNotifier:
         text = compose_text(message, self._config.devlab_notify.facts_max_chars)
         job_id = str(message[protocol.FIELD_JOB][protocol.FIELD_ID])
         seq = message[protocol.FIELD_SEQ]
+        keyboard = notice_keyboard(message[protocol.FIELD_KIND], job_id)
         for sub in admin_subs(self._book):
             message_id = await self._notifier.send_direct(
                 sub.chat_id,
                 text,
+                reply_markup=keyboard,
                 outbox_kind=OUTBOX_KIND_TASK,
                 dedup_key=DEDUP_KEY.format(seq=seq),
             )

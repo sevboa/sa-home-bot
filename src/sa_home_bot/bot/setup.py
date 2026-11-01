@@ -14,6 +14,7 @@ from sa_home_bot.bot.handlers import (
     away,
     basic,
     control,
+    devlab,
     draw,
     interactives,
     invites,
@@ -62,6 +63,7 @@ def build_dispatcher(
     dp.include_router(invites.router)
     dp.include_router(basic.router)
     dp.include_router(away.router)
+    dp.include_router(devlab.router)
     dp.include_router(tool_debug.router)
     dp.include_router(pending_actions.router)
     dp.include_router(interactives.router)

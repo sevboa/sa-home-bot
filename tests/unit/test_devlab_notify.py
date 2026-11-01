@@ -205,3 +205,28 @@ async def test_every_admin_gets_own_notice_and_guest_none(store):
     assert await store.get_state(f"devlab_notice:{OWNER}:1001") == "j1"
     assert await store.get_state("devlab_notice:33:1002") == "j1"
     assert await store.get_state(f"devlab_notice:{GUEST}:1003") is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "codes"),
+    [
+        (protocol.MSG_QUESTION, ["ans", "rel", "stop"]),
+        (protocol.MSG_FAILED, ["res"]),
+        (protocol.MSG_DONE, None),
+    ],
+)
+def test_notice_keyboard_by_kind(kind, codes):
+    keyboard = devlab_notify.notice_keyboard(kind, "j1")
+    if codes is None:
+        assert keyboard is None
+        return
+    data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert data == [f"dl:{code}:j1" for code in codes]
+
+
+async def test_question_sent_with_buttons(store):
+    await store.set_state(devlab_notify.CURSOR_KEY, "5")
+    link = FakeNodeLink(results=inbox([message(6)]))
+    notifier_obj, notifier = make(store, link)
+    await notifier_obj.tick()
+    assert notifier.markups[0] is not None

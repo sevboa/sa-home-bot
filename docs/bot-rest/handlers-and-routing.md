@@ -4,7 +4,7 @@
 
 1. `SilenceGate` на `dp.update` — самый первый, чужой чат не доходит ни до одного роутера. `ProfileMiddleware` — только для своих (после гейта).
 2. `invites` рано: ловит `/invite`, `/guests` и единственное сообщение, которым чужой стал своим (`JustAdmitted`).
-3. `basic`, `away` (служебные, работают и пока Альфред в городе; перехват ИИ-входов делается в хендлерах ai/draw/interactives через `away.intercept`), `tool_debug` (свой callback-префикс), `pending_actions` (`pa:`), `interactives` (`ia:`), `items` (`it:`).
+3. `basic`, `away`, `devlab` (служебные, работают и пока Альфред в городе; `devlab` стоит сразу после `away`, до `ai` и `ai.catchall_router`, и перехватывает только реплаи владельца на оповещение/подсказку devlab; перехват ИИ-входов делается в хендлерах ai/draw/interactives через `away.intercept`), `tool_debug` (свой callback-префикс), `pending_actions` (`pa:`), `interactives` (`ia:`), `items` (`it:`).
 4. `draw` — до `ai`, чтобы `/draw` ответом на картинку Альфреда не ушёл в диалог.
 5. `ai` (команда `/ai` + узкий фильтр реплаев на свои диалоги, резолвится по `ai_turns`, не по дереву реплаев Telegram).
 6. `wake`, `swarm_panel`, `torrents_panel` — ДО `status`: их callback'и (`st:wake`, `st:sw_*`, `st:t_*`) точечные, а `status.on_status_action` ловит весь префикс `st:`.

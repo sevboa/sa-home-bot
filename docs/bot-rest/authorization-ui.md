@@ -30,7 +30,7 @@
 - Гости (`g_*`, право `invite`, обработчик `handlers/invites.py::on_guest_screen`): `g_list:<offset>`, `g_codes:<offset>`, `g_card:<chat_id>`, `g_kick_ask:<chat_id>`, `g_kick:<chat_id>`, `g_code_off:<code>`, `g_stats:<chat_id>`, `g_perms:<chat_id>:<offset>`, `g_poff:<chat_id>:<offset>:<право>`, `g_padd:<chat_id>:<offset>`, `g_pon:<chat_id>:<offset>:<право>`, `g_gon:<chat_id>:<offset>:<группа>`.
 - Рой (`sw_*`, обработчик `swarm_panel.py::on_swarm_screen`): `sw_panel`, `sw_skills:<offset>`, `sw_skill:<app_id>`, `sw_nodes:<offset>`, `sw_node[:<node_id>]`, `sw_svcs:<node_id_or_->:<offset>`, `sw_svc:<node_id_or_->:<имя>`, `sw_update`. Права те же, что у `/node_<id>` (`status`) и `/svc_<node>_<svc>` (`nodes`).
 - Закачки (`t_*`, право `list@torrents`): `t_list:<offset>`, `t_card:<hash>`, `t_toggle:<hash>`, `t_speed:<mbps>:<offset>`, `t_app`.
-- Прочие префиксы: `tdbg`, `pa` (формы подтверждения, этап 45), `ia` (сценки), `it` (предметы), `tor` (выбор директории), `away`, `draw`.
+- Прочие префиксы: `tdbg`, `pa` (формы подтверждения, этап 45), `ia` (сценки), `it` (предметы), `tor` (выбор директории), `away`, `draw`, `dl` (кнопки оповещений агентов devlab, только владелец, этап 62.3).
 
 ## Гости: каталог прав (`bot/guest_rights.py`, `bot/guests_view.py`)
 

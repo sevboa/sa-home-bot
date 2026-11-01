@@ -234,6 +234,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     )
     away_task = asyncio.create_task(away_runner.run(), name="away")
     devlab_notify_task: asyncio.Task | None = None
+    devlab_notifier: DevlabNotifier | None = None
     if settings.devlab_notify.enabled:
         devlab_notifier = DevlabNotifier(
             get_node_link=_get_node_link,
@@ -269,6 +270,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             active_ai_chats=active_ai_chats,
             away=away,
             away_runner=away_runner,
+            devlab_notifier=devlab_notifier,
             handle_signals=False,
         ),
         name="polling",
