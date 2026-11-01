@@ -136,7 +136,7 @@ usage, таймаут, HTTP-ошибка).
 (префиксы для `run_command`), `forbidden_paths`, `secret_paths`, `diff_prefixes`, `allow_remote_models` (по умолчанию
 `false`; применит 60.5.6), `command_timeout_s`, `output_chars`. Неизвестный ключ в `[agent]` — `SpecError` (опечатка не
 должна молча снимать защиту). Команда тестов и её таймаут — из `[test]`. sa-home-bot: rules = CLAUDE.md, checks =
-`ruff check src tests` и `test_no_comments_in_code`, `diff_prefixes = ["src/"]`, `forbidden_paths` = `.devlab.toml`,
+`ruff check src tests` и `test_no_comments_in_code`, `diff_prefixes = ["src/", "tests/"]` (с v0.154.0: тесты тоже засчитываются, docs — нет), `forbidden_paths` = `.devlab.toml`,
 CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`, `instances/*`, `*.sqlite`, `data/`.
 
 ### Ограничения

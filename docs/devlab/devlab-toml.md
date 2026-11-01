@@ -84,5 +84,5 @@ diff_prefixes = []
 `.devlab.toml` sa-home-bot использует те же поля: `project`, `[test]` (`cmd`, `timeout_s`, `image`,
 `setup_files`, `setup`, `[test.env]` с `PYTHONPATH`), `[agent]` (`rules = ["CLAUDE.md"]`, `checks` —
 `ruff check src tests` и страж комментариев `test_no_comments_in_code.py`, `allowed_commands`,
-`forbidden_paths`, `secret_paths`, `diff_prefixes = ["src/"]`). В шаблонах `forbidden` и `secret`
+`forbidden_paths`, `secret_paths`, `diff_prefixes = ["src/", "tests/"]`). В шаблонах `forbidden` и `secret`
 из задачи называются так, как в парсере: `forbidden_paths` и `secret_paths`.

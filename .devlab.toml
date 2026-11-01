@@ -28,4 +28,4 @@ allowed_commands = [
 ]
 forbidden_paths = [".devlab.toml", "CLAUDE.md", "pyproject.toml", "deploy/"]
 secret_paths = [".env", "config.toml", "config.toml.*", "instances/*", "*.sqlite", "data/"]
-diff_prefixes = ["src/"]
+diff_prefixes = ["src/", "tests/"]
