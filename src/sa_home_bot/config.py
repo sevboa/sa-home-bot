@@ -268,6 +268,7 @@ class DevlabModelConfig(BaseModel):
     idle_unload_s: int = Field(default=600, ge=0)
     extra_args: list[str] = Field(default_factory=list)
     shared_key: bool = False
+    provider_quota: bool = False
 
     @model_validator(mode="before")
     @classmethod
