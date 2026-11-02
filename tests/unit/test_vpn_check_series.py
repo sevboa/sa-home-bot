@@ -10,7 +10,6 @@ from sa_home_bot.config import Settings, VpnCheckConfig, VpnSeriesConfig
 from sa_home_bot.node.vpn_probe_state import ProbeSlot
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn_check.service import VpnCheckService
-from sa_home_bot.vpn_series.raw_probe import RawVerdict
 
 PROBE_SERVER = "jeeves"
 _IP_ECHO = "https://api.ipify.org"
