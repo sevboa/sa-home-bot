@@ -127,6 +127,7 @@ class PeerLink:
         self.rtt_ms: float | None = None
         self.peer_links: dict[str, dict] = {}
         self.busy: bool = False
+        self.working: bool | None = None
         self._probes: deque[bool] = deque(maxlen=QUALITY_WINDOW)
 
     @property
@@ -233,6 +234,7 @@ class PeerLink:
                 self.note_probe((time.monotonic() - started) * 1000)
                 self._learn_links(info)
                 self.busy = info.busy
+                self.working = info.working
                 misses = 0
             except (ConnectionError, OSError, TimeoutError, ProtoError) as exc:
                 self.note_probe(None)
@@ -250,6 +252,7 @@ class PeerLink:
 
     def _mark_down(self) -> None:
         self.busy = False
+        self.working = None
         if self.down_since is None:
             self.down_since = time.monotonic()
 
@@ -334,6 +337,7 @@ class PeerLink:
                 self.learn_endpoints(info.endpoints)
             self._learn_links(info)
             self.busy = info.busy
+            self.working = info.working
         self.down_since = None
         self.left = False
         self._client = client
@@ -408,6 +412,13 @@ class NodeRouter:
     def busy_services(self) -> list[str]:
         return sorted(
             name for name, link in self.local_services.items() if link.alive and link.busy
+        )
+
+    def working_services(self) -> list[str]:
+        return sorted(
+            name
+            for name, link in self.local_services.items()
+            if link.alive and (link.busy if link.working is None else link.working)
         )
 
     async def route(self, request: Envelope) -> Envelope | None:

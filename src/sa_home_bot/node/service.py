@@ -705,7 +705,7 @@ class NodeService:
         return {"scheduled": action, "delay_s": POWER_DELAY_S}
 
     def _busy_services(self) -> list[str]:
-        return self._router.busy_services() if self._router is not None else []
+        return self._router.working_services() if self._router is not None else []
 
     def _schedule_restart_node(self, force: bool = False) -> dict[str, Any]:
         assert self._restart_node is not None
@@ -713,7 +713,7 @@ class NodeService:
         if force and waiting:
             self._restart_wait_task.cancel()
             waiting = False
-        busy = [] if force else self._busy_services()
+        busy = [] if force else self._busy_services_safe()
         if busy or waiting:
             if not waiting:
                 log.warning(
@@ -724,11 +724,15 @@ class NodeService:
                 self._restart_wait_task = asyncio.create_task(
                     self._restart_when_idle(), name="restart-node-wait"
                 )
-            busy = busy or self._busy_services()
+            busy = busy or self._busy_services_safe()
             return {
                 "deferred": busy,
                 "max_wait_s": RESTART_DEFER_MAX_S,
-                "message": f"рестарт отложен до освобождения: {', '.join(busy) or 'служб'}",
+                "message": (
+                    f"рестарт отложен до освобождения: {', '.join(busy)}"
+                    if busy
+                    else "ожидание рестарта уже идёт"
+                ),
             }
         return self._restart_now()
 
@@ -744,20 +748,30 @@ class NodeService:
         self._power_task = task
         return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}
 
+    def _busy_services_safe(self) -> list[str]:
+        try:
+            return self._busy_services()
+        except Exception:
+            log.exception("Не удалось узнать занятость служб")
+            return []
+
     async def _restart_when_idle(self) -> None:
-        waited = 0.0
-        while waited < RESTART_DEFER_MAX_S:
-            await asyncio.sleep(RESTART_DEFER_POLL_S)
-            waited += RESTART_DEFER_POLL_S
-            if not self._busy_services():
-                log.warning("Службы освободились — перезапускаю ноду")
-                break
-        else:
-            log.warning(
-                "Службы заняты дольше %.0f с (%s) — перезапускаю ноду принудительно",
-                RESTART_DEFER_MAX_S,
-                ", ".join(self._busy_services()),
-            )
+        try:
+            waited = 0.0
+            while waited < RESTART_DEFER_MAX_S:
+                await asyncio.sleep(RESTART_DEFER_POLL_S)
+                waited += RESTART_DEFER_POLL_S
+                if not self._busy_services():
+                    log.warning("Службы освободились — перезапускаю ноду")
+                    break
+            else:
+                log.warning(
+                    "Службы заняты дольше %.0f с (%s) — перезапускаю ноду принудительно",
+                    RESTART_DEFER_MAX_S,
+                    ", ".join(self._busy_services()),
+                )
+        except Exception:
+            log.exception("Ожидание рестарта сорвалось — перезапускаю ноду принудительно")
         self._restart_now()
 
     @staticmethod

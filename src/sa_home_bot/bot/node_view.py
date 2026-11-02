@@ -54,6 +54,14 @@ def node_from_segment(segment: str | None) -> str | None:
     return None if not segment or segment == OWN_NODE_SEGMENT else segment
 
 
+def restart_deferred_text(result: dict) -> str:
+    minutes = int(result.get("max_wait_s", 0)) // 60
+    return (
+        f"⏳ {result.get('message', 'рестарт отложен')}. Потолок ожидания {minutes} мин, "
+        "потом перезапуск принудительно. Сразу: nodectl restart_node --force."
+    )
+
+
 def node_unavailable_text(node_id: str | None) -> str:
     if node_id:
         return f"⚠️ Нода «{node_id}» недоступна (нет связи или она спит)."

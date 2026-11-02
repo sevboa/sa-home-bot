@@ -57,6 +57,9 @@ class BusyTracker:
             job_id for job_id, since in self._waiting.items() if now - since < self._owner_wait_s
         )
 
+    def working(self) -> bool:
+        return bool(self._running or self._queued > 0 or self.outbox_size() > 0)
+
     def busy(self) -> bool:
         return bool(
             self._running or self._queued > 0 or self.holding_for_owner() or self.outbox_size() > 0

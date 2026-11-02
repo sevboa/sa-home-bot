@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from sa_home_bot import wake_core
+from sa_home_bot.bot import node_view
 from sa_home_bot.bot.tools.core import (
     NO_SWARM_LINK,
     ActionRight,
@@ -87,8 +88,7 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
         who = wanted_node or "своя нода"
         if result.get("deferred") is not None:
             return (
-                f"{who}: {result.get('message', 'рестарт отложен')} (потолок ожидания "
-                f"{int(result.get('max_wait_s', 0)) // 60} мин, потом перезапустится сама). "
+                f"{who}: {node_view.restart_deferred_text(result)} "
                 "Повторять restart_node не нужно."
             )
         text = f"Принято: {who} перезапустится через {result.get('delay_s', '?')} с."

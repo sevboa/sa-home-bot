@@ -114,9 +114,10 @@ def test_old_hello_without_busy_means_not_busy():
 
 
 class StubLink:
-    def __init__(self, alive: bool, busy: bool) -> None:
+    def __init__(self, alive: bool, busy: bool, working: bool | None = None) -> None:
         self.alive = alive
         self.busy = busy
+        self.working = working
 
 
 def test_router_lists_only_alive_busy_local_services():
@@ -260,3 +261,73 @@ async def test_restart_node_force_ignores_busy_and_cancels_wait(monkeypatch):
     assert forced["scheduled"] == "restart_node"
     assert task.cancelled()
     assert calls == ["restart"]
+
+
+async def test_restart_node_parked_job_does_not_block(monkeypatch):
+    calls: list[str] = []
+    svc = _restart_service(monkeypatch, StubLink(True, True, working=False), calls)
+    result = await svc.run_command("restart_node", {})
+    assert result["scheduled"] == "restart_node"
+    await asyncio.sleep(0.02)
+    assert calls == ["restart"]
+
+
+async def test_restart_node_repeat_with_empty_list_says_waiting(monkeypatch):
+    calls: list[str] = []
+    link = StubLink(True, True, working=True)
+    svc = _restart_service(monkeypatch, link, calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    await svc.run_command("restart_node", {})
+    link.working = False
+    second = await svc.run_command("restart_node", {})
+    assert second["message"] == "ожидание рестарта уже идёт"
+    svc._restart_wait_task.cancel()
+
+
+async def test_restart_wait_error_forces_restart(monkeypatch):
+    calls: list[str] = []
+    link = StubLink(True, True, working=True)
+    svc = _restart_service(monkeypatch, link, calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    await svc.run_command("restart_node", {})
+
+    def boom():
+        raise RuntimeError("сбой")
+
+    monkeypatch.setattr(svc, "_busy_services", boom)
+    await asyncio.sleep(0.05)
+    assert calls == ["restart"]
+
+
+def test_router_working_services_ignores_parked_and_falls_back_to_busy():
+    router = NodeRouter(
+        "n",
+        local_services={
+            "devlab": StubLink(True, True, working=False),
+            "old": StubLink(True, True),
+            "llm": StubLink(True, False, working=True),
+            "gone": StubLink(False, True, working=True),
+        },
+    )
+    assert router.working_services() == ["llm", "old"]
+    assert router.busy_services() == ["devlab", "old"]
+
+
+def test_tracker_working_excludes_parked_for_owner():
+    tracker = BusyTracker()
+    tracker.started("a")
+    tracker.waiting_owner("a")
+    assert tracker.busy()
+    assert not tracker.working()
+    tracker.set_queued(1)
+    assert tracker.working()
+
+
+def test_service_info_working_roundtrip_and_old_payload():
+    info = ServiceInfo(node="n", service="s", version="1", busy=True, working=False)
+    payload = info.to_payload()
+    assert payload["working"] is False
+    assert ServiceInfo.from_payload(payload).working is False
+    old = ServiceInfo(node="n", service="s", version="1").to_payload()
+    assert "working" not in old
+    assert ServiceInfo.from_payload(old).working is None

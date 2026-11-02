@@ -4,6 +4,7 @@ import json
 from functools import partial
 
 from sa_home_bot.bot import tools
+from sa_home_bot.bot.tools import node_manage as node_manage_module
 from sa_home_bot.node import events
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
@@ -159,6 +160,31 @@ async def test_node_manage_restart_remote_node_targets_dst(store):
     directive = create_calls[0]["args"]["messages"][-1]["content"]
     assert "следующая нода" not in directive
     assert "переходить не нужно" in directive
+
+
+async def test_node_manage_restart_deferred_text_and_no_auto_await(store, monkeypatch):
+    called = []
+
+    async def fail(*args, **kwargs):
+        called.append(args)
+        return ""
+
+    monkeypatch.setattr(node_manage_module, "_auto_await_event", fail)
+    link = swarm_link(
+        command_result={
+            "deferred": ["devlab"],
+            "max_wait_s": 1800.0,
+            "message": "рестарт отложен до освобождения: devlab",
+        }
+    )
+    result = await tools.tool_node_manage(
+        _ctx(store, node_link=link, subscription=ADMIN),
+        {"action": "restart_node", "node": "winpc"},
+    )
+    assert "рестарт отложен до освобождения: devlab" in result
+    assert "30 мин" in result
+    assert "--force" in result
+    assert called == []
 
 
 async def test_node_manage_unknown_node_lists_known_ones(store):

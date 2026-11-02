@@ -29,6 +29,13 @@
 `CTRL_BREAK_EVENT`, см. `node/supervisor.py`); там, где `add_signal_handler` не поддержан
 (Windows), используется `signal.signal`.
 
+## Отложенный рестарт ноды (60.9.3)
+
+Перед остановом, который описан выше, `restart_node` может подождать: `NodeService` не стартует
+останов, пока службы выполняют настоящую работу (`NodeRouter.working_services()`), но не дольше
+`RESTART_DEFER_MAX_S` (30 мин); `force=true` рестартует сразу. Сам останов с потолками шагов не
+меняется. Подробности — [node-core/lifecycle.md](../node-core/lifecycle.md).
+
 ## SSH-сессии и tmux (`utils/ssh_sessions.py`)
 
 Нужны автовыключению по простою (`node/service.py::maybe_auto_poweroff_idle`, `_close_ssh_sessions`):

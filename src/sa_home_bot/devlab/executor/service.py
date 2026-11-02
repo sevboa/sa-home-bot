@@ -25,6 +25,7 @@ class ExecutorService:
                 service=protocol.EXECUTOR_SERVICE,
                 version=__version__,
                 busy=self._busy.busy(),
+                working=self._busy.working(),
             )
         )
 

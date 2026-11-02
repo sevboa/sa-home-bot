@@ -80,8 +80,10 @@ async def test_restart_node_deferred_reports_waiting(store):
     link = FakeNodeLink(result={"deferred": ["devlab"], "message": message})
     callback = FakeCallback("act:node:restart_node")
     await _dispatch(callback, store, link)
-    assert len(callback.message.answers) == 1
-    assert "рестарт отложен до освобождения: devlab" in callback.message.answers[0]
+    assert callback.message.answers[0] == SELF_RESTART_TEXT
+    assert len(callback.message.answers) == 2
+    assert "рестарт отложен до освобождения: devlab" in callback.message.answers[1]
+    assert "--force" in callback.message.answers[1]
 
 
 async def test_replayed_callback_after_restart_is_ignored(store):

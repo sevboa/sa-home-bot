@@ -57,19 +57,13 @@ async def _handle_self_shutdown(
     await store.set_state(SELF_RESTART_CB_KEY, callback.id)
 
     await callback.answer()
-    if action_id == ACTION_RESTART_NODE:
-        result: dict = {}
-        with contextlib.suppress(*SERVICE_CALL_ERRORS, TimeoutError):
-            result = await node_link.command(action_id, {})
-        deferred = result.get("deferred") is not None
-        await callback.message.answer(
-            f"⏳ {result.get('message')}." if deferred else SELF_RESTART_TEXT
-        )
-        return
     await callback.message.answer(SELF_STOP_TEXT if action_id == "stop" else SELF_RESTART_TEXT)
+    result: dict = {}
     with contextlib.suppress(*SERVICE_CALL_ERRORS, TimeoutError):
         args = {"name": value} if value else {}
-        await node_link.command(action_id, args)
+        result = await node_link.command(action_id, args)
+    if action_id == ACTION_RESTART_NODE and result.get("deferred") is not None:
+        await callback.message.answer(node_view.restart_deferred_text(result))
 
 
 async def _run_node_action(
