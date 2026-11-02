@@ -199,7 +199,7 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
     import sa_home_bot.node.vpn_probe_state as vpn_probe_state_module
     monkeypatch.setattr(vpn_probe_state_module, "reality_conf_path", fake_reality_conf_path)
 
-    async def fake_read_text(self):
+    def fake_read_text(self):
         return '{"outbounds": [{"settings": {"vnext": [{"address": "1.2.3.4", "port": 443}]}}]}'
 
     monkeypatch.setattr(Path, "read_text", fake_read_text)
