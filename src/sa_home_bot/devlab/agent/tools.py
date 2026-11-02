@@ -36,7 +36,8 @@ def _with_final_newline(data: bytes) -> bytes | None:
         data.decode()
     except UnicodeDecodeError:
         return None
-    return data + b"\n"
+    crlf = b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+    return data + (b"\r\n" if crlf else b"\n")
 
 
 class ToolError(Exception):
@@ -277,7 +278,10 @@ class ToolBox:
     async def _run_tests(self, args: dict[str, Any]) -> ToolOutcome:
         if not self._spec.test_argv:
             raise ToolError("команда тестов не задана")
-        paths = [safe_relative(p) for p in _argument(args, "paths", str, "").split()]
+        tokens = _argument(args, "paths", str, "").split()
+        if any(t.startswith("-") for t in tokens):
+            raise ToolError("paths — только пути тестов, без флагов pytest")
+        paths = [safe_relative(t) for t in tokens]
         argv = [*self._spec.test_argv, *paths]
         result = await self._sandbox.exec(argv, self._spec.test_timeout_s)
         text = result.summary(self._spec.output_chars, self._spec.test_timeout_s)

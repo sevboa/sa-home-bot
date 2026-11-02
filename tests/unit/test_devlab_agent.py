@@ -455,3 +455,24 @@ async def test_run_tests_paths_outside_root_rejected(tmp_path):
     box = toolbox(tmp_path, test_argv=ECHO_ARGV)
     with pytest.raises(ToolError):
         await box.call(TOOL_RUN_TESTS, {"paths": "../x.py"})
+
+
+async def test_write_file_keeps_crlf_style(tmp_path):
+    box = toolbox(tmp_path)
+    await box.call(TOOL_WRITE_FILE, {"path": "w.txt", "content": "a\r\nb"})
+    await box.call(TOOL_WRITE_FILE, {"path": "m.txt", "content": "a\r\nb\nc"})
+    assert (tmp_path / "w.txt").read_bytes() == b"a\r\nb\r\n"
+    assert (tmp_path / "m.txt").read_bytes() == b"a\r\nb\nc\n"
+
+
+async def test_run_tests_paths_reject_flags(tmp_path):
+    box = toolbox(tmp_path, test_argv=ECHO_ARGV)
+    with pytest.raises(ToolError, match="без флагов"):
+        await box.call(TOOL_RUN_TESTS, {"paths": "tests/a.py --co"})
+
+
+def test_guard_rejection_texts_ask_to_fix_and_retry():
+    from sa_home_bot.devlab.agent.loop import FINISH_REJECTED, STEP_REJECTED
+
+    assert "исправь и вызови" in FINISH_REJECTED
+    assert "исправь и вызови" in STEP_REJECTED
