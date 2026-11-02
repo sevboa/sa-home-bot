@@ -10,8 +10,16 @@ from aiohttp.test_utils import TestServer
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
+from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
-from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentStatus
+from sa_home_bot.devlab.agent.loop import (
+    REPEAT_HINT,
+    REPEAT_SKIPPED,
+    AgentLimits,
+    AgentLoop,
+    AgentStatus,
+    Crane,
+)
 from sa_home_bot.devlab.agent.model import (
     MODEL_TIMEOUT_S,
     GatewayChat,
@@ -183,7 +191,7 @@ async def test_old_tool_outputs_are_folded(tmp_path):
         output_chars=5000,
     )
     command = f"{sys.executable} -c \"print('x'*5000)\""
-    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=command) for i in range(4)]
+    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=f"{command} {i}") for i in range(4)]
     model = ScriptedChatModel(*runs, edit("e"), tool_reply(TOOL_FINISH, "f", summary="ok"))
     limits = AgentLimits(context_tokens=7000, reply_tokens=500, keep_recent=2)
     loop, _ = make_loop(tmp_path, model, spec=spec, limits=limits)
@@ -200,7 +208,7 @@ async def test_large_write_arguments_are_folded(tmp_path):
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",))
     model = ScriptedChatModel(
         big,
-        *[tool_reply(TOOL_RUN_TESTS, f"t{i}") for i in range(6)],
+        *[tool_reply(TOOL_RUN_TESTS, f"t{i}", paths=f"t{i}.py") for i in range(6)],
         tool_reply(TOOL_FINISH, "f", summary="ok"),
     )
     limits = AgentLimits(context_tokens=4000, reply_tokens=300, keep_recent=1)
@@ -233,7 +241,7 @@ async def test_long_tail_of_big_outputs_converges(tmp_path):
         output_chars=6000,
     )
     command = f"{sys.executable} -c \"print('x'*6000)\""
-    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=command) for i in range(12)]
+    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=f"{command} {i}") for i in range(12)]
     model = ScriptedChatModel(*runs, edit("e"), tool_reply(TOOL_FINISH, "f", summary="ok"))
     limits = AgentLimits(context_tokens=4000, reply_tokens=300, keep_recent=4)
     loop, _ = make_loop(tmp_path, model, spec=spec, limits=limits)
@@ -574,3 +582,73 @@ async def test_trace_skipped_is_zero_by_default(tmp_path):
     loop, _ = make_loop(tmp_path, model, trace=entries.append)
     await loop.run("правила", "задача")
     assert [e["skipped"] for e in entries if "step" in e] == [0, 0]
+
+
+def lint_call(call_id, command="echo x.py"):
+    return tool_reply(TOOL_RUN_COMMAND, call_id, command=command)
+
+
+def repeat_spec():
+    return AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), allowed_commands=("echo",))
+
+
+async def test_repeated_call_gets_hint_then_crane(tmp_path):
+    entries = []
+    model = ScriptedChatModel(lint_call("a"), lint_call("b"), lint_call("c"), lint_call("d"))
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec(), trace=entries.append)
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.ASKED
+    assert result.crane is Crane.REPEAT
+    assert result.steps == 3
+    assert result.reason == "модель повторяет run_command echo x.py"
+    assert result.dialog.call_id is None
+    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
+    assert REPEAT_HINT not in tool_results[0]
+    assert tool_results[1].endswith(REPEAT_HINT)
+    assert tool_results[2] == REPEAT_SKIPPED
+    assert entries[-1]["event"] == "end"
+    assert entries[-1]["crane"] == "repeat"
+
+
+async def test_repeat_after_file_change_is_not_a_crane(tmp_path):
+    model = ScriptedChatModel(
+        lint_call("a"),
+        lint_call("b"),
+        edit(),
+        lint_call("c"),
+        tool_reply(TOOL_FINISH, summary="ok"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.FINISHED
+
+
+async def test_different_arguments_are_not_a_repeat(tmp_path):
+    model = ScriptedChatModel(
+        lint_call("a", "echo 1"),
+        lint_call("b", "echo 2"),
+        lint_call("c", "echo 3"),
+        edit(),
+        tool_reply(TOOL_FINISH, summary="ok"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.FINISHED
+
+
+async def test_repeat_counter_resets_after_owner_answer(tmp_path):
+    model = ScriptedChatModel(
+        lint_call("a"),
+        lint_call("b"),
+        lint_call("c"),
+        lint_call("d"),
+        lint_call("e"),
+        lint_call("f"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
+    first = await loop.run("правила", "задача")
+    assert first.crane is Crane.REPEAT
+    answered = Dialog(messages=first.dialog.messages, question="q", answer="продолжай")
+    second = await loop.run("правила", "задача", resume=answered)
+    assert second.crane is Crane.REPEAT
+    assert second.steps == 3

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
 from dataclasses import dataclass
@@ -167,6 +168,14 @@ class ToolBox:
     @property
     def definitions(self) -> list[dict[str, Any]]:
         return TOOL_DEFINITIONS
+
+    async def tree_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+        for path in await self._sandbox.changed_paths():
+            data = await self._sandbox.read_bytes(path)
+            digest.update(path.encode() + b"\0")
+            digest.update(b"-" if data is None else hashlib.sha256(data).digest())
+        return digest.hexdigest()
 
     async def call(self, name: str, args: dict[str, Any]) -> ToolOutcome:
         handler = self._handlers.get(name)

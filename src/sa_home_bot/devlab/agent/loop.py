@@ -50,6 +50,10 @@ ASK_SKIPPED = "не выполнено: задан вопрос владельц
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
+REPEAT_HINT = "\n\nэтот вызов уже был, результат тот же, попробуй иначе"
+REPEAT_REASON = "модель повторяет {call}"
+REPEAT_SKIPPED = "не выполнено: стоп-кран на повторах"
+RECENT_CALLS_WINDOW = 6
 OVERFLOW_REASON = (
     "{pinned}, схемы инструментов {tools} ток.; бюджет диалога {budget} ток. "
     "при окне {window} ток.: "
@@ -64,6 +68,7 @@ class Crane(StrEnum):
     COST = "cost"
     TOKENS = "tokens"
     PAID_FREE = "paid_free"
+    REPEAT = "repeat"
 
 
 class AgentStatus(StrEnum):
@@ -82,6 +87,7 @@ class AgentLimits:
     max_cost_usd: float = 2.0
     max_tokens: int = 0
     max_idle_replies: int = 3
+    max_repeats: int = 3
     context_tokens: int = 16000
     reply_tokens: int = 2000
     keep_recent: int = 4
@@ -117,6 +123,13 @@ class Segment:
     asked: tuple[str, str | None] | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
     skipped: int = 0
+    recent_calls: list[tuple[str, str]] = field(default_factory=list)
+    repeat_reason: str | None = None
+
+
+def _call_label(name: str, args: dict[str, Any]) -> str:
+    target = args.get("path") or args.get("command") or ""
+    return f"{name} {target}".strip()
 
 
 class AgentLoop:
@@ -239,6 +252,7 @@ class AgentLoop:
             seg.steps += 1
             seg.calls = []
             seg.skipped = 0
+            seg.repeat_reason = None
             try:
                 reply = await self._model.complete(messages, self._tools.definitions)
             except PaidFreeModelError as exc:
@@ -264,6 +278,8 @@ class AgentLoop:
             self._emit_step(seg, reply, window, window < before)
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
+            if seg.repeat_reason is not None:
+                return self._crane_result(seg, messages, Crane.REPEAT, seg.repeat_reason)
             if seg.asked is not None:
                 question, call_id = seg.asked
                 return self._result(
@@ -277,6 +293,14 @@ class AgentLoop:
         for index, call in enumerate(calls):
             text, summary = await self._execute(call, seg)
             self._note_call(call, text, seg)
+            if seg.repeat_reason is not None:
+                seg.skipped = len(calls) - index - 1
+                seg.messages.append({"role": "tool", "tool_call_id": call.id, "content": text})
+                for skipped in calls[index + 1 :]:
+                    seg.messages.append(
+                        {"role": "tool", "tool_call_id": skipped.id, "content": REPEAT_SKIPPED}
+                    )
+                return None
             if seg.asked is not None:
                 seg.asked = (seg.asked[0], call.id)
                 seg.skipped = len(calls) - index - 1
@@ -320,6 +344,23 @@ class AgentLoop:
             return await self._step_done(args, seg), None
         if call.name == TOOL_ASK_OWNER:
             return self._ask(args, seg), None
+        repeats = await self._count_repeats(call, args, seg)
+        if repeats + 1 >= self._limits.max_repeats:
+            seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
+            return REPEAT_SKIPPED, None
+        text, summary = await self._run_tool(call, args, seg)
+        return text + REPEAT_HINT if repeats and summary is None else text, summary
+
+    async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:
+        key = f"{call.name} {json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+        entry = (key, await self._tools.tree_fingerprint())
+        repeats = seg.recent_calls.count(entry)
+        seg.recent_calls = [*seg.recent_calls, entry][-RECENT_CALLS_WINDOW:]
+        return repeats
+
+    async def _run_tool(
+        self, call: ToolCall, args: dict[str, Any], seg: Segment
+    ) -> tuple[str, str | None]:
         try:
             outcome = await self._tools.call(call.name, args)
         except ToolError as exc:

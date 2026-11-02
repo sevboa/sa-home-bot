@@ -32,7 +32,7 @@ from tests.unit.test_devlab_agent_worker import (
 env = executor_tests.env
 ASK = tool_reply(TOOL_ASK_OWNER, "q1", question="какой формат?")
 STEP = tool_reply(TOOL_STEP_DONE, "s1", title="заготовка")
-RUN_TESTS = [tool_reply(TOOL_RUN_TESTS, f"t{i}") for i in range(10)]
+RUN_TESTS = [tool_reply(TOOL_RUN_TESTS, f"t{i}", paths=f"t{i}.py") for i in range(10)]
 
 
 class Ticker:
