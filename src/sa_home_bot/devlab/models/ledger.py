@@ -29,6 +29,9 @@ class Ledger:
     def __init__(self, data_dir: Path) -> None:
         self._db = Database(data_dir / LEDGER_DB_NAME)
 
+    def today(self) -> str:
+        return today()
+
     async def open(self) -> None:
         await self._db.open()
         await self._db.conn.executescript(SCHEMA)

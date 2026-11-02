@@ -117,6 +117,14 @@ async def heartbeat(request: web.Request) -> web.Response:
     if principal.role == protocol.ROLE_EXECUTOR:
         await store.queue.note_progress(body.get(protocol.FIELD_PROGRESS))
         reply[protocol.FIELD_QUEUED] = await store.queue.queued_count()
+    elif principal.role == protocol.ROLE_GATEWAY:
+        used_today = body.get(protocol.FIELD_USED_TODAY)
+        if isinstance(used_today, dict):
+            day = used_today.get("day")
+            if isinstance(day, str):
+                shared = await store.shared_used(principal.name, day)
+                if shared:
+                    reply[protocol.FIELD_SHARED_USED] = {"day": day, "requests": shared}
     return web.json_response(reply)
 
 

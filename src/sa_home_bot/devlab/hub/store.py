@@ -179,6 +179,27 @@ class HubStore:
                 ),
             )
 
+    async def shared_used(self, gateway: str, day: str) -> dict[str, int]:
+        cur = await self._db.conn.execute(
+            "SELECT name, data FROM heartbeats WHERE role = ? AND name != ?",
+            (protocol.ROLE_GATEWAY, gateway),
+        )
+        result: dict[str, int] = {}
+        for row in await cur.fetchall():
+            data = json.loads(row["data"])
+            used_today = data.get(protocol.FIELD_USED_TODAY)
+            if not isinstance(used_today, dict):
+                continue
+            if used_today.get("day") != day:
+                continue
+            requests = used_today.get("requests")
+            if not isinstance(requests, dict):
+                continue
+            for model, count in requests.items():
+                if isinstance(count, int):
+                    result[model] = result.get(model, 0) + count
+        return result
+
     async def executor_alive(self) -> bool:
         border = (utc_now() - timedelta(seconds=HEARTBEAT_FRESH_S)).isoformat()
         cur = await self._db.conn.execute(

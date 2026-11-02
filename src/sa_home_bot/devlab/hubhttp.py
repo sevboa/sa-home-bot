@@ -27,12 +27,15 @@ class HubHttp:
     async def close(self) -> None:
         await self._session.close()
 
-    async def heartbeat(self, body: dict[str, Any]) -> None:
+    async def heartbeat(self, body: dict[str, Any]) -> dict[str, Any] | None:
         try:
             async with self._session.post(
                 self._url + protocol.HTTP_HEARTBEAT_PATH, json=body, headers=self._headers
             ) as resp:
                 if resp.status != 200:
                     log.warning("Heartbeat в хаб отвергнут: HTTP %d", resp.status)
+                    return None
+                return await resp.json()
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("Heartbeat в хаб не прошёл: %s", type(exc).__name__)
+            return None
