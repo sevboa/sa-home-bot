@@ -334,3 +334,31 @@ async def test_series_status_returns_last_result(monkeypatch):
     key = f"{PROBE_SERVER}/awg"
     assert key in status["results"]
     assert status["results"][key]["mode"] == "single"
+
+
+async def test_series_tunnel_down_when_series_raises(monkeypatch):
+    tunnel_calls: list[str] = []
+
+    async def fake_tunnel_up(self, slot):
+        tunnel_calls.append("up")
+        return None
+
+    async def fake_tunnel_down(self, slot):
+        tunnel_calls.append("down")
+
+    async def fake_egress_gate(self, slot):
+        return None
+
+    async def fake_run_single(slot, cfg, *, spawn=None):
+        raise RuntimeError("curl упал")
+
+    monkeypatch.setattr(VpnCheckService, "_tunnel_up", fake_tunnel_up)
+    monkeypatch.setattr(VpnCheckService, "_tunnel_down", fake_tunnel_down)
+    monkeypatch.setattr(VpnCheckService, "_egress_gate", fake_egress_gate)
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
+
+    service = _service(_FakeNodeLink())
+    await _run_with_timeout(service._series_run([_slot()], "single"))
+
+    assert tunnel_calls == ["up", "down"]
+    assert service._series_last == {}

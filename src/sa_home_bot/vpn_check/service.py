@@ -35,7 +35,8 @@ from sa_home_bot.vpn_check.protocol import (
     SERIES_MODE_SINGLE,
     SERVICE_NAME,
 )
-from sa_home_bot.vpn_series.raw_probe import RawTarget, raw_probe, reality_target
+from sa_home_bot.vpn_series.measure import SeriesResult
+from sa_home_bot.vpn_series.raw_probe import RawTarget, RawVerdict, raw_probe, reality_target
 from sa_home_bot.vpn_series.runner import run_burst, run_single
 
 log = logging.getLogger(__name__)
@@ -116,49 +117,36 @@ class VpnCheckService:
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == ACTION_SERIES_STATUS:
+            return {"results": self._series_last}
+        if action not in (ACTION_CHECK, ACTION_SERIES):
+            raise undeclared_action(action)
         if action == ACTION_CHECK:
             targets = args.get("targets")
             if not isinstance(targets, list) or not targets:
                 raise ProtoError(ERR_BAD_REQUEST, "targets должен быть непустым списком URL")
             targets = [str(t) for t in targets]
-            server = str(args.get("server", "")).strip()
-            if not server:
-                raise ProtoError(ERR_BAD_REQUEST, "нужен server — кого проверяем")
-            if server == self._node:
-                return {"accepted": True, "server": server, "skipped": "self-check исключён"}
-            slots = [s for s in self._slots if s.server == server]
-            if not slots:
-                return {
-                    "accepted": True,
-                    "server": server,
-                    "skipped": "нет локально настроенного тоннеля к этому серверу",
-                }
-            asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
-            return {"accepted": True, "server": server, "targets": targets}
-
-        if action == ACTION_SERIES:
-            server = str(args.get("server", "")).strip()
-            if not server:
-                raise ProtoError(ERR_BAD_REQUEST, "нужен server — кого проверяем")
+        else:
             mode = str(args.get("mode", SERIES_MODE_SINGLE)).strip()
             if mode not in (SERIES_MODE_SINGLE, SERIES_MODE_BURST):
                 raise ProtoError(ERR_BAD_REQUEST, f"неизвестный mode: {mode}")
-            if server == self._node:
-                return {"accepted": True, "server": server, "skipped": "self-check исключён"}
-            slots = [s for s in self._slots if s.server == server]
-            if not slots:
-                return {
-                    "accepted": True,
-                    "server": server,
-                    "skipped": "нет локально настроенного тоннеля к этому серверу",
-                }
-            asyncio.create_task(self._series_run(server, slots, mode), name="vpn-series-run")
+        server = str(args.get("server", "")).strip()
+        if not server:
+            raise ProtoError(ERR_BAD_REQUEST, "нужен server — кого проверяем")
+        if server == self._node:
+            return {"accepted": True, "server": server, "skipped": "self-check исключён"}
+        slots = [s for s in self._slots if s.server == server]
+        if not slots:
+            return {
+                "accepted": True,
+                "server": server,
+                "skipped": "нет локально настроенного тоннеля к этому серверу",
+            }
+        if action == ACTION_SERIES:
+            asyncio.create_task(self._series_run(slots, mode), name="vpn-series-run")
             return {"accepted": True, "server": server, "mode": mode}
-
-        if action == ACTION_SERIES_STATUS:
-            return {"results": self._series_last}
-
-        raise undeclared_action(action)
+        asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
+        return {"accepted": True, "server": server, "targets": targets}
 
     async def _run_and_report(
         self, server: str, slots: list[ProbeSlot], targets: list[str]
@@ -210,95 +198,68 @@ class VpnCheckService:
             finally:
                 await self._tunnel_down(slot)
 
-    async def _series_slot(self, slot: ProbeSlot, mode: str) -> dict:
-        lock = self._slot_lock(slot)
-        async with lock:
-            target: RawTarget | None = None
-            if slot.transport == "reality":
-                try:
-                    conf_text = vpn_probe_state.reality_conf_path(slot).read_text()
-                    target = reality_target(conf_text)
-                except OSError:
-                    target = None
+    def _reality_raw_target(self, slot: ProbeSlot) -> RawTarget | None:
+        if slot.transport != "reality":
+            return None
+        try:
+            return reality_target(vpn_probe_state.reality_conf_path(slot).read_text())
+        except OSError:
+            return None
 
-            tunnel_up = False
+    async def _series_slot(self, slot: ProbeSlot, mode: str) -> dict[str, Any]:
+        async with self._slot_lock(slot):
+            attempted = False
 
             async def do_handshake() -> str | None:
-                nonlocal tunnel_up
+                nonlocal attempted
+                attempted = True
                 err = await self._tunnel_up(slot)
-                if err is not None:
-                    return err
-                tunnel_up = True
-                return await self._egress_gate(slot)
+                return err if err is not None else await self._egress_gate(slot)
 
-            raw_result = await raw_probe(slot, target, do_handshake)
-            if raw_result.verdict.value != "ok":
-                if tunnel_up:
+            try:
+                raw_result = await raw_probe(slot, self._reality_raw_target(slot), do_handshake)
+                series: list[SeriesResult] = []
+                if raw_result.verdict == RawVerdict.OK:
+                    series = (
+                        [await run_single(slot, self._series_cfg)]
+                        if mode == SERIES_MODE_SINGLE
+                        else await run_burst(slot, self._series_cfg)
+                    )
+            finally:
+                if attempted:
                     await self._tunnel_down(slot)
-                return {
-                    "server": slot.server,
-                    "transport": slot.transport,
-                    "mode": mode,
-                    "raw": raw_result.model_dump(mode="json"),
-                    "series": [],
-                    "at": utc_now().isoformat(),
-                }
+        return {
+            "server": slot.server,
+            "transport": slot.transport,
+            "mode": mode,
+            "raw": raw_result.model_dump(mode="json"),
+            "series": [r.model_dump(mode="json") for r in series],
+            "at": utc_now().isoformat(),
+        }
 
-            if mode == SERIES_MODE_SINGLE:
-                series_result = await run_single(slot, self._series_cfg)
-                series_list = [series_result.model_dump(mode="json")]
-            else:
-                series_results = await run_burst(slot, self._series_cfg)
-                series_list = [r.model_dump(mode="json") for r in series_results]
-
-            await self._tunnel_down(slot)
-            return {
-                "server": slot.server,
-                "transport": slot.transport,
-                "mode": mode,
-                "raw": raw_result.model_dump(mode="json"),
-                "series": series_list,
-                "at": utc_now().isoformat(),
-            }
-
-    async def _series_run(self, server: str, slots: list[ProbeSlot], mode: str) -> None:
+    async def _series_run(self, slots: list[ProbeSlot], mode: str) -> None:
         for slot in slots:
             try:
                 result = await self._series_slot(slot, mode)
-                key = f"{slot.server}/{slot.transport}"
-                self._series_last[key] = result
-                log.info(
-                    "vpn_series: %s %s mode=%s raw=%s series=%s",
-                    slot.server,
-                    slot.transport,
-                    mode,
-                    result["raw"]["verdict"],
-                    [s["verdict"] for s in result["series"]],
-                )
-            except Exception as exc:
-                log.exception("vpn_series: %s %s — ошибка: %s", slot.server, slot.transport, exc)
+            except Exception:
+                log.exception("vpn_series: %s %s — ошибка серии", slot.server, slot.transport)
+                continue
+            self._series_last[f"{slot.server}/{slot.transport}"] = result
+            log.info(
+                "vpn_series: %s %s mode=%s raw=%s series=%s",
+                slot.server,
+                slot.transport,
+                mode,
+                result["raw"]["verdict"],
+                [s["verdict"] for s in result["series"]],
+            )
 
     async def series_loop(self) -> None:
         while True:
-            try:
-                await asyncio.sleep(self._series_cfg.interval_s)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                log.exception("vpn_series: ошибка в цикле ожидания: %s", exc)
-                continue
-
-            servers = sorted({slot.server for slot in self._slots})
-            for server in servers:
-                if server == self._node:
-                    continue
-                slots = [s for s in self._slots if s.server == server]
-                if not slots:
-                    continue
-                try:
-                    await self._series_run(server, slots, SERIES_MODE_SINGLE)
-                except Exception as exc:
-                    log.exception("vpn_series: %s — ошибка в цикле: %s", server, exc)
+            await asyncio.sleep(self._series_cfg.interval_s)
+            await self._series_run(
+                [s for s in self._slots if s.server != self._node], SERIES_MODE_SINGLE
+            )
 
     async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
         if slot.transport == "awg":
