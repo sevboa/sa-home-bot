@@ -4,14 +4,25 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from sa_home_bot.devlab.agent.context import estimate_tokens, fold_old_results, pinned_report
+from sa_home_bot.devlab.agent.context import (
+    estimate_tokens,
+    fold_old_results,
+    pinned_report,
+    shrink_arguments,
+)
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
-from sa_home_bot.devlab.agent.model import ChatModel, ModelError, PaidFreeModelError, ToolCall
+from sa_home_bot.devlab.agent.model import (
+    ChatModel,
+    ModelError,
+    ModelReply,
+    PaidFreeModelError,
+    ToolCall,
+)
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_FINISH,
@@ -19,6 +30,7 @@ from sa_home_bot.devlab.agent.tools import (
     ToolBox,
     ToolError,
 )
+from sa_home_bot.devlab.agent.trace import TraceSink
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +45,7 @@ STEP_REJECTED = (
     f"шаг не принят: исправь и вызови {TOOL_STEP_DONE} снова; полный вывод стража ниже:\n"
 )
 STEP_ACCEPTED = "шаг принят"
+TRACE_TEXT_CHARS = 300
 ASK_SKIPPED = "не выполнено: задан вопрос владельцу"
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
@@ -102,6 +115,7 @@ class Segment:
     tokens_in: int = 0
     tokens_out: int = 0
     asked: tuple[str, str | None] | None = None
+    calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -115,6 +129,7 @@ class AgentLoop:
         on_step: StepListener | None = None,
         spend: SpendMeter | None = None,
         tokens: TokenMeter | None = None,
+        trace: TraceSink | None = None,
         clock: Callable[[], float] = time.monotonic,
         overflow_hint: str = "",
     ) -> None:
@@ -126,10 +141,35 @@ class AgentLoop:
         self._on_step = on_step
         self._spend = spend
         self._tokens = tokens
+        self._trace = trace
         self._clock = clock
         self._overflow_hint = overflow_hint
 
+    def _emit(self, **entry: Any) -> None:
+        if self._trace is not None:
+            self._trace({"t": int(time.time()), **entry})
+
+    def _emit_step(self, seg: Segment, reply: ModelReply, window: int, folded: bool) -> None:
+        self._emit(
+            step=seg.steps,
+            tokens_in=reply.tokens_in,
+            tokens_out=reply.tokens_out,
+            cost_usd=reply.cost_usd,
+            window=window,
+            folded=folded,
+            text=reply.content[:TRACE_TEXT_CHARS] if not reply.tool_calls else "",
+            calls=seg.calls,
+        )
+
     def _result(self, status: AgentStatus, seg: Segment, **fields: Any) -> AgentResult:
+        crane = fields.get("crane")
+        self._emit(
+            event="end",
+            status=status.value,
+            reason=str(fields.get("reason", ""))[:TRACE_TEXT_CHARS],
+            crane=crane.value if crane else None,
+            steps=seg.steps,
+        )
         return AgentResult(
             status,
             steps=seg.steps,
@@ -173,13 +213,16 @@ class AgentLoop:
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
         seg = Segment(messages, self._clock())
+        self._emit(event="start", resumed=resume is not None)
         tools_tokens = estimate_tokens(self._tools.definitions)
         budget = limits.context_tokens - limits.reply_tokens - tools_tokens
         while True:
             crane = self._crane(seg)
             if crane is not None:
                 return self._crane_result(seg, messages, *crane)
-            if fold_old_results(messages, budget, limits.keep_recent) > budget:
+            before = estimate_tokens(messages) if self._trace is not None else 0
+            window = fold_old_results(messages, budget, limits.keep_recent)
+            if window > budget:
                 return self._result(
                     AgentStatus.CONTEXT_OVERFLOW,
                     seg,
@@ -192,6 +235,7 @@ class AgentLoop:
                     + self._overflow_hint,
                 )
             seg.steps += 1
+            seg.calls = []
             try:
                 reply = await self._model.complete(messages, self._tools.definitions)
             except PaidFreeModelError as exc:
@@ -202,6 +246,7 @@ class AgentLoop:
             seg.tokens_out += reply.tokens_out
             messages.append(reply.as_message())
             if not reply.tool_calls:
+                self._emit_step(seg, reply, window, window < before)
                 seg.idle += 1
                 if seg.idle > limits.max_idle_replies:
                     return self._result(
@@ -213,6 +258,7 @@ class AgentLoop:
                 continue
             seg.idle = 0
             finished = await self._handle_calls(reply.tool_calls, seg)
+            self._emit_step(seg, reply, window, window < before)
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
             if seg.asked is not None:
@@ -227,6 +273,7 @@ class AgentLoop:
     async def _handle_calls(self, calls: tuple[ToolCall, ...], seg: Segment) -> str | None:
         for index, call in enumerate(calls):
             text, summary = await self._execute(call, seg)
+            self._note_call(call, text, seg)
             if seg.asked is not None:
                 seg.asked = (seg.asked[0], call.id)
                 for skipped in calls[index + 1 :]:
@@ -238,6 +285,23 @@ class AgentLoop:
             if summary is not None:
                 return summary
         return None
+
+    def _note_call(self, call: ToolCall, text: str, seg: Segment) -> None:
+        if self._trace is None:
+            return
+        try:
+            args = json.loads(shrink_arguments(call.arguments))
+        except ValueError:
+            args = {}
+        seg.calls.append(
+            {
+                "name": call.name,
+                "args": args,
+                "result": text[:TRACE_TEXT_CHARS],
+                "result_chars": len(text),
+                "rejected": text.startswith((FINISH_REJECTED, STEP_REJECTED)),
+            }
+        )
 
     async def _execute(self, call: ToolCall, seg: Segment) -> tuple[str, str | None]:
         try:

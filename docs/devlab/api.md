@@ -61,7 +61,7 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_projects` | — | список проектов |
 | `devlab_submit` | `project`, `model`, `task`, `base_branch` (`base/...`), `priority` | ставит задание; `warnings`, если модели нет в каталоге (задание всё равно ждёт её) |
 | `devlab_test` | `project`, `ref`, `cmd`, `args`, `wait` | ставит задание `test`; `wait` секунд (0..1800) ждёт результата |
-| `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ) |
+| `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ); для `agent` — `file=steps.jsonl`, журнал шагов |
 | `devlab_list` | `statuses` | свои задания без текста task.md |
 | `devlab_status` | `id` | своё задание целиком; у `test` поле `result` (как у `devlab_test`, `null` до завершения) |
 | `devlab_inbox` | `since`, `limit` | сообщения к клиенту с курсором `cursor` |
@@ -107,5 +107,10 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
 - `devlab_test_log`: только свой `test`; отдаёт `{id, file, ref, bytes, truncated, text}`, `text` —
   последние `LOG_TAIL_MAX_BYTES` (64 КиБ) файла `output.log` (`file=junit.xml` для junit). Нет файла —
   ошибка со статусом задания.
+- `devlab_test_log` для `agent` (60.9.6): только `file=steps.jsonl` (журнал шагов агента, формат в
+  [agent.md](agent.md)); ответ `{id, file, bytes, truncated, text}` без `ref`. Журнал выгружает работник
+  агента при `question`/`done`/`failed`/`stopped`; до первой выгрузки — ошибка «нет файла».
+  `PUT /api/log` от своего исполнителя: для `agent` принимается только `steps.jsonl` (до `STEPS_MAX_BYTES`),
+  для `test` — `output.log` и `junit.xml`.
 
 `nodectl devlab connect` берёт адрес из `connect.hub_url`: на ноде хаба (alfred) tailscale-IP, на других нодах имя `hub_node` (2026-11-01).

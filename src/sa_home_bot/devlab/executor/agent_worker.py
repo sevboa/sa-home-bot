@@ -24,6 +24,7 @@ from sa_home_bot.devlab.agent.sandbox import LocalSandbox, ManagedSandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.spend import JobSpend, MeteredChat, SpendState
 from sa_home_bot.devlab.agent.tools import ToolBox
+from sa_home_bot.devlab.agent.trace import StepTrace
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, SandboxRequest
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
@@ -46,6 +47,7 @@ T = TypeVar("T")
 AGENT_STATE_FILE = "agent-state.json"
 OUTBOX_FILE = "agent-outbox.json"
 DIALOG_FILE = "dialog.json"
+STEPS_FILE = protocol.LOG_FILE_STEPS
 AGENT_DIR = "agent"
 MIRROR_DIR = "mirror.git"
 WORK_DIR = "work"
@@ -322,6 +324,7 @@ class AgentWorker(WorkerLoops):
             log.warning("wip задания %s не закрыта: %s", job_id, self.scrub(str(exc)))
         finally:
             await run.repo.aclose()
+        await self._upload_steps(job_id, root)
         await self._forget(job_id)
         payload = {protocol.PAYLOAD_TEXT: text} if kind == protocol.MSG_FAILED else {}
         await self.send(job_id, kind, payload)
@@ -434,6 +437,7 @@ class AgentWorker(WorkerLoops):
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
             tokens=spend.total_tokens,
+            trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
         )
         system = build_system(rules)
@@ -447,6 +451,17 @@ class AgentWorker(WorkerLoops):
             job.params.get(protocol.PARAM_REMARKS, ""),
         )
         return await loop.run(system, task)
+
+    def _steps_trace(self, root: Path) -> StepTrace:
+        return StepTrace(root / STEPS_FILE, scrub=self.scrub)
+
+    async def _upload_steps(self, job_id: str, root: Path) -> None:
+        try:
+            data = self._steps_trace(root).tail(protocol.STEPS_MAX_BYTES)
+            if data:
+                await self._hub.upload_log(job_id, protocol.LOG_FILE_STEPS, data)
+        except (HubRequestError, OSError) as exc:
+            log.warning("Журнал шагов задания %s не выгружен: %s", job_id, self.scrub(str(exc)))
 
     def _answered_dialog(self, run: JobRun) -> Dialog | None:
         path = run.root / DIALOG_FILE
@@ -503,6 +518,7 @@ class AgentWorker(WorkerLoops):
         assert run.repo is not None
         spend = self._spend_of(job)
         usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
+        await self._upload_steps(job.id, run.root)
         if result.status is AgentStatus.ASKED:
             assert result.dialog is not None
             if result.crane in SPEND_CRANES:
@@ -539,6 +555,7 @@ class AgentWorker(WorkerLoops):
         )
 
     async def _fail_or_stop(self, run: JobRun, kind: str, text: str) -> None:
+        await self._upload_steps(run.job.id, run.root)
         await self._abandon(run, text)
         payload = {protocol.PAYLOAD_TEXT: text} if kind == protocol.MSG_FAILED else {}
         payload.update(self._spend_of(run.job).take_report())

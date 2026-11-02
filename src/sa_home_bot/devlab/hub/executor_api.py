@@ -57,21 +57,28 @@ async def upload_log(request: web.Request) -> web.Response:
     job_id = request.headers.get(protocol.HEADER_JOB, "")
     name = joblogs.check_name(request.query.get(protocol.FIELD_NAME, ""))
     job = await store.queue.get_job(job_id)
-    if job.kind != protocol.JOB_KIND_TEST or job.executor != request[PRINCIPAL_KEY].name:
-        raise HubError(f"задание {job_id!r}: логи принимаются только от своего исполнителя test")
+    allowed = (
+        protocol.AGENT_LOG_FILES if job.kind == protocol.JOB_KIND_AGENT else protocol.TEST_LOG_FILES
+    )
+    if job.executor != request[PRINCIPAL_KEY].name or name not in allowed:
+        raise HubError(
+            f"задание {job_id!r}: свой исполнитель принимает для {job.kind} только "
+            + ", ".join(allowed)
+        )
     if job.status == protocol.STATUS_QUEUED:
         raise HubError(f"задание {job_id}: ещё не взято")
-    if request.content_length is not None and request.content_length > protocol.LOG_MAX_BYTES:
-        raise web.HTTPRequestEntityTooLarge(
-            max_size=protocol.LOG_MAX_BYTES, actual_size=request.content_length
-        )
+    limit = (
+        protocol.STEPS_MAX_BYTES if job.kind == protocol.JOB_KIND_AGENT else protocol.LOG_MAX_BYTES
+    )
+    if request.content_length is not None and request.content_length > limit:
+        raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=request.content_length)
     try:
         size = await joblogs.save(
-            store.logs_root, job_id, name, request.content.iter_chunked(LOG_CHUNK_BYTES)
+            store.logs_root, job_id, name, request.content.iter_chunked(LOG_CHUNK_BYTES), limit
         )
     except joblogs.LogTooLarge as exc:
         raise web.HTTPRequestEntityTooLarge(
-            max_size=protocol.LOG_MAX_BYTES, actual_size=protocol.LOG_MAX_BYTES + 1, text=str(exc)
+            max_size=limit, actual_size=limit + 1, text=str(exc)
         ) from exc
     return web.json_response({protocol.FIELD_NAME: name, "bytes": size})
 

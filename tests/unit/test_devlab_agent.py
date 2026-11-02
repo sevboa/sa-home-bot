@@ -40,7 +40,7 @@ RED_TEST = (sys.executable, "-c", "print('boom'); import sys; sys.exit(1)")
 DEFAULT_FILES = {"src/app.py": "VALUE = 1\n"}
 
 
-def make_loop(tmp_path, model, spec=None, limits=None, files=None, on_change=None):
+def make_loop(tmp_path, model, spec=None, limits=None, files=None, on_change=None, trace=None):
     for name, text in (files or DEFAULT_FILES).items():
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +48,12 @@ def make_loop(tmp_path, model, spec=None, limits=None, files=None, on_change=Non
     spec = spec or AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",))
     sandbox = LocalSandbox(tmp_path)
     loop = AgentLoop(
-        model, ToolBox(sandbox, spec), FinishGuard(sandbox, spec), limits, on_change=on_change
+        model,
+        ToolBox(sandbox, spec),
+        FinishGuard(sandbox, spec),
+        limits,
+        on_change=on_change,
+        trace=trace,
     )
     return loop, sandbox
 
@@ -501,3 +506,45 @@ def test_guard_rejection_texts_ask_to_fix_and_retry():
 
     assert "исправь и вызови" in FINISH_REJECTED
     assert "исправь и вызови" in STEP_REJECTED
+
+
+async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
+    entries = []
+    long_content = "SECRET" * 200
+    model = ScriptedChatModel(
+        tool_reply(TOOL_WRITE_FILE, "w1", path="src/new.py", content=long_content),
+        edit("c2", old="NO SUCH TEXT"),
+        edit("c3"),
+        tool_reply(TOOL_FINISH, "f1", summary="готово"),
+    )
+    loop, _ = make_loop(tmp_path, model, trace=entries.append)
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.FINISHED
+    steps = [entry for entry in entries if "step" in entry]
+    assert [entry["step"] for entry in steps] == [1, 2, 3, 4]
+    assert entries[0]["event"] == "start"
+    assert entries[-1]["event"] == "end"
+    assert entries[-1]["status"] == "finished"
+    first = steps[0]["calls"][0]
+    assert first["name"] == TOOL_WRITE_FILE
+    assert first["args"]["path"] == "src/new.py"
+    assert len(first["args"]["content"]) < len(long_content)
+    assert steps[0]["tokens_in"] == 100
+    assert steps[1]["calls"][0]["result"].startswith("ошибка")
+    assert steps[-1]["calls"][0]["name"] == TOOL_FINISH
+    assert steps[-1]["calls"][0]["rejected"] is False
+
+
+async def test_trace_marks_rejected_finish_and_crane(tmp_path):
+    entries = []
+    spec = AgentSpec(test_argv=RED_TEST, diff_prefixes=("src/",))
+    model = ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, "f1", summary="x"))
+    loop, _ = make_loop(
+        tmp_path, model, spec=spec, limits=AgentLimits(max_steps=2), trace=entries.append
+    )
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.ASKED
+    rejected = [c for e in entries for c in e.get("calls", []) if c["rejected"]]
+    assert [c["name"] for c in rejected] == [TOOL_FINISH]
+    assert entries[-1]["event"] == "end"
+    assert entries[-1]["crane"] == "steps"

@@ -350,7 +350,7 @@ async def test_log_upload_is_stored_and_replaced(client, store, executor):
     directory = store.logs_root / job.id
     assert (directory / protocol.LOG_FILE_OUTPUT).read_bytes() == b"third"
     assert (directory / protocol.LOG_FILE_JUNIT).read_bytes() == b"second"
-    assert sorted(p.name for p in directory.iterdir()) == sorted(protocol.LOG_FILES)
+    assert sorted(p.name for p in directory.iterdir()) == sorted(protocol.TEST_LOG_FILES)
 
 
 async def test_log_upload_of_other_executors_job_is_refused(client, store, executor):
@@ -435,3 +435,31 @@ async def test_heartbeat_progress_reaches_queue(client, store, executor):
         "SELECT counter FROM job_progress WHERE job_id = ?", (job.id,)
     )
     assert (await cur.fetchone())["counter"] == 4
+
+
+async def running_agent(client, store, executor):
+    job = await store.queue.submit("me", PROJECT, MODEL, "task")
+    await call(
+        client,
+        protocol.HTTP_CLAIM_PATH,
+        executor,
+        {protocol.FIELD_MODELS: [MODEL], protocol.FIELD_KINDS: [protocol.JOB_KIND_AGENT]},
+    )
+    return job
+
+
+async def test_agent_job_accepts_only_steps_journal(client, store, executor):
+    job = await running_agent(client, store, executor)
+    assert await upload(client, executor, job.id, b"{}\n", protocol.LOG_FILE_STEPS) == 200
+    assert await upload(client, executor, job.id, b"x") == 400
+    assert (store.logs_root / job.id / protocol.LOG_FILE_STEPS).read_bytes() == b"{}\n"
+
+
+async def test_agent_steps_journal_is_limited_and_test_job_refuses_it(
+    client, store, executor, monkeypatch
+):
+    job = await running_agent(client, store, executor)
+    monkeypatch.setattr(protocol, "STEPS_MAX_BYTES", 4)
+    assert await upload(client, executor, job.id, b"12345", protocol.LOG_FILE_STEPS) == 413
+    test_job = await running_test(client, store, executor)
+    assert await upload(client, executor, test_job.id, b"x", protocol.LOG_FILE_STEPS) == 400

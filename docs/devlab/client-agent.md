@@ -28,6 +28,9 @@
 6. Приёмка: `nodectl devlab fetch <id>`, ревью диффа по правилам проекта,
    `devlab_test ref=agent/<id> wait=0` (новое test-задание, свой `job.id`) + `nodectl devlab wait <job.id>` + `devlab_status id=<job.id>`, перенос в `dev/<id>` в отдельном worktree (коммиты поимённо), отчёт,
    `nodectl devlab drop agent/<id> base/<имя>`.
+   Что модель делала по шагам (особенно при `failed`, `stopped`, стоп-кране): `devlab_test_log id=<id>
+   file=steps.jsonl` — хвост журнала, строка JSON на шаг: вызовы инструментов с короткими аргументами,
+   первые 300 симв. итога, токены, отклонения `finish`, стоп-краны (60.9.6).
 7. Слияний в основную ветку и выката без явной команды владельца нет.
 
 ## Команды `nodectl devlab` (код `devlab/snapshot.py`, `branch_command`)

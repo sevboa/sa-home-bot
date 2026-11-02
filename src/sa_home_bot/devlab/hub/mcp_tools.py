@@ -160,20 +160,25 @@ async def test(
 
 async def test_log(ctx: Context, id: str, file: str = protocol.LOG_FILE_OUTPUT) -> Any:
     job = await ctx.store.queue.get_job(id, ctx.client)
-    if job.kind != protocol.JOB_KIND_TEST:
-        raise HubError(f"задание {id} не test")
+    allowed = (
+        protocol.AGENT_LOG_FILES if job.kind == protocol.JOB_KIND_AGENT else protocol.TEST_LOG_FILES
+    )
+    if file not in allowed:
+        raise HubError(f"у задания {id} ({job.kind}) файлы лога: {', '.join(allowed)}")
     tail = joblogs.read_tail(ctx.store.logs_root, id, file, protocol.LOG_TAIL_MAX_BYTES)
     if tail is None:
         raise HubError(f"у задания {id} (статус {job.status}) нет файла {file}")
     text, size = tail
-    return {
+    view = {
         "id": id,
         "file": file,
-        protocol.FIELD_REF: job.params[protocol.FIELD_REF],
         "bytes": size,
         "truncated": size > protocol.LOG_TAIL_MAX_BYTES,
         "text": text,
     }
+    if job.kind == protocol.JOB_KIND_TEST:
+        view[protocol.FIELD_REF] = job.params[protocol.FIELD_REF]
+    return view
 
 
 async def list_jobs(ctx: Context, statuses: list[str] | None = None) -> Any:
@@ -309,10 +314,15 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         protocol.TOOL_TEST_LOG,
         "Хвост полного лога (или junit.xml) своего задания test: последние 64 КиБ, размер файла"
-        " и ref задания.",
+        " и ref задания. Для задания agent: file=steps.jsonl, журнал шагов агента (по строке на"
+        " шаг: вызовы инструментов, итоги, токены, стоп-краны).",
         (
             ID,
-            Param("file", "string", "output.log (по умолчанию) или junit.xml."),
+            Param(
+                "file",
+                "string",
+                "output.log (по умолчанию) или junit.xml; для agent — steps.jsonl.",
+            ),
         ),
         test_log,
     ),

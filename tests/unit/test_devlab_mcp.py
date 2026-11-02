@@ -486,3 +486,21 @@ async def test_devlab_test_log_rejects_agent_job(client, store, alice):
     _, submitted = await submit(client, alice)
     is_error, _ = await call(client, alice, protocol.TOOL_TEST_LOG, id=submitted["job"]["id"])
     assert is_error
+
+
+async def test_devlab_test_log_serves_agent_steps_journal(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    directory = store.logs_root / job_id
+    directory.mkdir(parents=True)
+    (directory / protocol.LOG_FILE_STEPS).write_text('{"step": 1}\n')
+    _, data = await call(
+        client, alice, protocol.TOOL_TEST_LOG, id=job_id, file=protocol.LOG_FILE_STEPS
+    )
+    assert data["text"] == '{"step": 1}\n'
+    assert protocol.FIELD_REF not in data
+    is_error, _ = await call(
+        client, alice, protocol.TOOL_TEST_LOG, id=job_id, file=protocol.LOG_FILE_JUNIT
+    )
+    assert is_error

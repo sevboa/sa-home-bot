@@ -86,7 +86,8 @@ description: Отдать задачу агенту-разработчику н�
    `nodectl devlab wait <job.id>` фоном, затем `devlab_status id=<job.id>` за `result`; подробности
    `devlab_test_log id=<job.id>`. Подробнее: скил `devlab-test`.
 4. Есть замечания или падения: `devlab_resume id=<id> text=<конкретные замечания по файлам и
-   строкам>` (при необходимости другая модель), затем снова с «Каждое возвращение». Сам код
+   строкам>` (при необходимости другая модель; при `failed` и непонятной причине смотри журнал шагов:
+   `devlab_test_log id=<id> file=steps.jsonl`), затем снова с «Каждое возвращение». Сам код
    агента не правь, пока не исчерпаны попытки или владелец не сказал иначе.
 5. Всё хорошо: отдельный worktree и ветка `dev/<id>`:
    `git worktree add .claude/worktrees/dev-<id> -b dev/<id> refs/devlab/agent/<id>`.

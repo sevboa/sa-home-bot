@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import asdict
 from typing import Any
 
@@ -10,6 +11,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
+from sa_home_bot.devlab.agent.trace import StepTrace
 from sa_home_bot.devlab.executor import agent_worker as agent_worker_module
 from sa_home_bot.devlab.executor.agent_worker import (
     AGENT_DIR,
@@ -309,3 +311,63 @@ async def test_huge_rules_file_fails_before_model_with_its_name(env):
 def test_rules_hint_empty_and_filled():
     assert rules_hint([]) == ""
     assert "RULES.md: 5 симв." in rules_hint([("RULES.md", "abcde")])
+
+
+def uploaded_steps(env, job_id) -> list[dict]:
+    path = env.store.logs_root / job_id / protocol.LOG_FILE_STEPS
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+async def test_steps_journal_is_uploaded_after_done(env):
+    job_id = await submit(env)
+    worker = make_worker(env, ScriptedChatModel(WRITE_DONE, FINISH))
+
+    assert await worker.claim_once()
+
+    entries = uploaded_steps(env, job_id)
+    assert [e["step"] for e in entries if "step" in e] == [1, 2]
+    assert entries[-1]["status"] == "finished"
+    assert not (env.tmp_path / "exec" / AGENT_DIR / job_id).exists()
+    tail = await env.mcp.call(protocol.TOOL_TEST_LOG, id=job_id, file=protocol.LOG_FILE_STEPS)
+    assert '"write_file"' in tail["text"]
+
+
+async def test_steps_journal_is_uploaded_after_failed(env):
+    job_id = await submit(env)
+    worker = make_worker(env, ScriptedChatModel(WRITE_DONE, ModelError("шлюз лёг")))
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_FAILED
+    entries = uploaded_steps(env, job_id)
+    assert entries[-1]["status"] == "model_failed"
+    assert entries[1]["calls"][0]["name"] == "write_file"
+
+
+async def test_steps_journal_upload_failure_does_not_change_outcome(env, monkeypatch):
+    job_id = await submit(env)
+    worker = make_worker(env, ScriptedChatModel(WRITE_DONE, FINISH))
+
+    async def broken(self, job, name, data):
+        raise HubRequestError("лог: ClientConnectorError")
+
+    monkeypatch.setattr(ExecutorHub, "upload_log", broken)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+
+
+def test_step_trace_keeps_tail_within_limit(tmp_path):
+    trace = StepTrace(
+        tmp_path / "steps.jsonl", max_bytes=2000, scrub=lambda text: text.replace("x", "*")
+    )
+    for number in range(200):
+        trace.record({"step": number, "text": "xxxxxxxxxx"})
+    data = trace.tail(10_000)
+    assert data is not None and len(data) <= 2000
+    lines = data.decode().splitlines()
+    assert json.loads(lines[-1])["step"] == 199
+    assert "x" not in data.decode()
+    assert all(json.loads(line) for line in lines)
+    assert len(trace.tail(100) or b"") <= 100
