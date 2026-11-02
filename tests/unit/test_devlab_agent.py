@@ -652,3 +652,47 @@ async def test_repeat_counter_resets_after_owner_answer(tmp_path):
     second = await loop.run("правила", "задача", resume=answered)
     assert second.crane is Crane.REPEAT
     assert second.steps == 3
+
+
+async def test_third_repeat_skips_siblings_without_dangling_call_ids(tmp_path):
+    ls = ToolCall("s1", TOOL_READ_FILE, json.dumps({"path": "src/app.py"}))
+    rep = ToolCall("s2", TOOL_RUN_COMMAND, json.dumps({"command": "echo x.py"}))
+    single = lint_call("a")
+    batch = ModelReply(
+        "", (ls, rep, ToolCall("s3", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})))
+    )
+    model = ScriptedChatModel(single, lint_call("b"), batch)
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
+    result = await loop.run("правила", "задача")
+    assert result.crane is Crane.REPEAT
+    messages = result.dialog.messages
+    asked = {
+        c["id"] for m in messages if m["role"] == "assistant" for c in m.get("tool_calls") or ()
+    }
+    answered = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert sorted(answered) == sorted(asked)
+    assert {m["tool_call_id"]: m["content"] for m in messages if m["role"] == "tool"}["s3"] == (
+        REPEAT_SKIPPED
+    )
+
+
+class CountingSandbox(LocalSandbox):
+    digests_calls = 0
+
+    async def changed_digests(self):
+        self.digests_calls += 1
+        return await super().changed_digests()
+
+
+async def test_tree_is_snapshotted_once_across_read_only_calls(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("VALUE = 1\n")
+    sandbox = CountingSandbox(tmp_path)
+    spec = repeat_spec()
+    reads = [
+        tool_reply(TOOL_READ_FILE, f"r{i}", path="src/app.py", start_line=i + 1) for i in range(4)
+    ]
+    model = ScriptedChatModel(*reads, edit(), lint_call("l"), ModelError("конец"))
+    loop = AgentLoop(model, ToolBox(sandbox, spec), FinishGuard(sandbox, spec))
+    await loop.run("правила", "задача")
+    assert sandbox.digests_calls == 2

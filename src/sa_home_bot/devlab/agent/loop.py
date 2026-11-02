@@ -24,6 +24,7 @@ from sa_home_bot.devlab.agent.model import (
     ToolCall,
 )
 from sa_home_bot.devlab.agent.tools import (
+    READ_ONLY_TOOLS,
     TOOL_ASK_OWNER,
     TOOL_FINISH,
     TOOL_STEP_DONE,
@@ -125,6 +126,7 @@ class Segment:
     skipped: int = 0
     recent_calls: list[tuple[str, str]] = field(default_factory=list)
     repeat_reason: str | None = None
+    tree_fingerprint: str | None = None
 
 
 def _call_label(name: str, args: dict[str, Any]) -> str:
@@ -349,11 +351,17 @@ class AgentLoop:
             seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
             return REPEAT_SKIPPED, None
         text, summary = await self._run_tool(call, args, seg)
-        return text + REPEAT_HINT if repeats and summary is None else text, summary
+        if call.name not in READ_ONLY_TOOLS:
+            seg.tree_fingerprint = None
+        if repeats:
+            text += REPEAT_HINT
+        return text, summary
 
     async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:
         key = f"{call.name} {json.dumps(args, sort_keys=True, ensure_ascii=False)}"
-        entry = (key, await self._tools.tree_fingerprint())
+        if seg.tree_fingerprint is None:
+            seg.tree_fingerprint = await self._tools.tree_fingerprint()
+        entry = (key, seg.tree_fingerprint)
         repeats = seg.recent_calls.count(entry)
         seg.recent_calls = [*seg.recent_calls, entry][-RECENT_CALLS_WINDOW:]
         return repeats

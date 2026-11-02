@@ -98,6 +98,9 @@ class PodmanSandbox:
     async def changed_paths(self) -> list[str]:
         return await self._local.changed_paths()
 
+    async def changed_digests(self) -> dict[str, str]:
+        return await self._local.changed_digests()
+
     async def start(self) -> None:
         async with self._lock:
             await self._provision()

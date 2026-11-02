@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ TOOL_RUN_TESTS = "run_tests"
 TOOL_FINISH = "finish"
 TOOL_ASK_OWNER = "ask_owner"
 TOOL_STEP_DONE = "step_done"
+READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP})
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
 
 LIST_MAX_ENTRIES = 200
@@ -170,12 +172,8 @@ class ToolBox:
         return TOOL_DEFINITIONS
 
     async def tree_fingerprint(self) -> str:
-        digest = hashlib.sha256()
-        for path in await self._sandbox.changed_paths():
-            data = await self._sandbox.read_bytes(path)
-            digest.update(path.encode() + b"\0")
-            digest.update(b"-" if data is None else hashlib.sha256(data).digest())
-        return digest.hexdigest()
+        changed = await self._sandbox.changed_digests()
+        return hashlib.sha256(json.dumps(changed, sort_keys=True).encode()).hexdigest()
 
     async def call(self, name: str, args: dict[str, Any]) -> ToolOutcome:
         handler = self._handlers.get(name)

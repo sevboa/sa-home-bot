@@ -391,3 +391,24 @@ def test_step_trace_oversized_entry_is_shortened_not_dropped(tmp_path):
     assert entry["step"] == 1
     assert entry["calls_dropped"] == 2
     assert "calls" not in entry
+
+
+async def test_repeat_crane_does_not_extend_budget_and_resumes_cleanly(env):
+    job_id = await submit(env)
+    read = tool_reply("read_file", "r1", path="out.txt")
+    model = ScriptedChatModel(read, read, read, WRITE_DONE, FINISH)
+    worker = make_worker(env, model)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_WAITING_OWNER
+    question = await env.store.queue.last_message(job_id, protocol.MSG_QUESTION)
+    assert "модель повторяет read_file out.txt" in question.payload[protocol.PAYLOAD_TEXT]
+    state = load_model(AgentState, env.tmp_path / "exec" / AGENT_STATE_FILE)
+    assert state.spend[job_id].extensions == 0
+
+    await env.mcp.call(protocol.TOOL_ANSWER, id=job_id, text="продолжай")
+    await worker.poll_once()
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE

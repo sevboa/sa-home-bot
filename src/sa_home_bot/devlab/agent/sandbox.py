@@ -47,6 +47,8 @@ class Sandbox(Protocol):
 
     async def changed_paths(self) -> list[str]: ...
 
+    async def changed_digests(self) -> dict[str, str]: ...
+
 
 class ManagedSandbox(Sandbox, Protocol):
     async def start(self) -> None: ...
@@ -127,7 +129,11 @@ class LocalSandbox:
             return ExecResult(NOT_FOUND_EXIT_CODE, f"{type(exc).__name__}: {exc}")
         return ExecResult(result.returncode, result.stdout_text)
 
-    async def changed_paths(self) -> list[str]:
+    async def changed_digests(self) -> dict[str, str]:
         current = self._snapshot()
-        changed = {rel for rel, digest in current.items() if self._baseline.get(rel) != digest}
-        return sorted(changed | (self._baseline.keys() - current.keys()))
+        changed = {rel: d for rel, d in current.items() if self._baseline.get(rel) != d}
+        removed = {rel: "" for rel in self._baseline.keys() - current.keys()}
+        return {**changed, **removed}
+
+    async def changed_paths(self) -> list[str]:
+        return sorted(await self.changed_digests())
