@@ -29,3 +29,39 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 ## mtg_probe (vpn_series)
 
 `src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
+
+## Серийная проверка: действие series (63.1.4, 2026-11-03)
+
+Действие `series` живёт **внутри** службы `vpn_check` (не отдельная служба). Причина: тот же netns пробника, иначе `vpn_check` и серия гасят друг другу туннель. Существующее поведение `check` (формат, тексты, отчёт `report_check`, события) **не меняется** — только добавляется действие и замок на слот.
+
+### Замок слота
+`self._slot_locks: dict[str, asyncio.Lock]` (ключ — `slot.netns`). Метод `_check_slot` целиком выполняется под этим замком (единственная правка существующего пути — обернуть тело в `async with`). `_series_slot` тоже берёт тот же замок. Это гарантирует, что `check` и `series` по одному слоту не пересекаются.
+
+### Лёгкий режим по умолчанию
+- Серия 30 с, файл 20 МБ (`url = "https://speed.cloudflare.com/__down?bytes=20000000"`, `duration_s = 30.0`).
+- По расписанию — одиночная серия раз в 3 ч (`interval_s = 10800.0`).
+- Залп (`burst`) — только по команде.
+- Расписание выключено по умолчанию (`enabled = false`), включается только в конфиге zakhar:
+  ```toml
+  [vpn_series]
+  enabled = true
+  ```
+
+### Действия
+- `series` — параметры `server`, `mode` = `single`|`burst`. Проверки `server` как у `check` (self-check и «нет слота» — `accepted` + `skipped`), неизвестный `mode` → `ProtoError(ERR_BAD_REQUEST, ...)`. Запускает фоновую задачу `_series_run(server, slots, mode)`, сразу возвращает `{"accepted": true, "server": ..., "mode": ...}`.
+- `series_status` — без параметров, возвращает `{"results": self._series_last}` (последний результат по ключу `"<server>/<transport>"`).
+
+### Процесс `_series_slot`
+Под замком слота:
+1. Для reality цель TCP — `reality_target(reality_conf_path(slot).read_text())`, ошибка чтения → `target=None`.
+2. `raw_probe` с `do_handshake`, который поднимает туннель (`_tunnel_up`) и делает `_egress_gate`, **БЕЗ гашения**.
+3. Если вердикт `ok` — `run_single` или `run_burst`; иначе серия не запускается.
+4. `finally` — `_tunnel_down`.
+
+Результат: `{"server","transport","mode","raw": RawProbeResult.model_dump(mode="json"), "series": [SeriesResult.model_dump(mode="json"), ...], "at": utc_now().isoformat()}`.
+
+### Расписание
+Метод `async def series_loop(self)` — бесконечно: `asyncio.sleep(interval_s)`, затем `_series_run` по каждому серверу слотов в режиме `single` (исключения логировать, цикл не падает). Запуск в `vpn_check/app.py`: `asyncio.create_task(service.series_loop())` только при `settings.vpn_series.enabled`, отмена задачи в `finally`.
+
+### Отчёт в vpn
+Отправка результата в `vpn` — задача 63.1.5.
