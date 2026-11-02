@@ -78,5 +78,13 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 Состояние — таблица `vpn_series_states` (ключ node, server, transport; `last_report` — JSON отчёта
 целиком, для строки `/vpn` в 63.1.6). `vpn_check_states` не трогается. События:
 `vpn_series_failed {node, server, transport, verdict, consecutive}` и
-`vpn_series_recovered {node, server, transport}`; рендер для админов — 63.1.6. В снапшот бэкапа
+`vpn_series_recovered {node, server, transport}`; `at_bytes` — где встала первая сломанная серия
+(`stalled_at_bytes`, иначе `bytes_total`).
+
+### Показ (63.1.6, 2026-11-03)
+Алерт админам — `bot/node_events.py::render_vpn_series`, отдельно от `render_vpn_check` (его тексты не
+менялись). `check_status` у vpn теперь отдаёт ещё `series` — строки `vpn_series_states`; экран
+«проверка доступности» `/vpn` рисует блок «🇷🇺 Из РФ» только если строки есть: 🔴 — в алерте
+(гистерезис), 🟠 — последний замер плохой, но порог ещё не пройден, 🟢 — работает. Без данных серий
+экран байт в байт прежний. В снапшот бэкапа
 таблица не входит (оперативные данные, как `vpn_check_states`).

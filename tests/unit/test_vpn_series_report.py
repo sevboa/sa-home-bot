@@ -60,6 +60,7 @@ async def test_two_failures_emit_failed_once_then_recovered(env):
                 "server": "jeeves",
                 "transport": "reality",
                 "verdict": "freeze",
+                "at_bytes": None,
                 "consecutive": 2,
             },
         )
@@ -86,6 +87,11 @@ async def test_state_keeps_last_report_per_transport(env):
         ("reality", "tcp_blocked"),
     ]
     assert json.loads(rows[1]["last_report"])["raw"]["verdict"] == "tcp_blocked"
+    status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
+    assert [(r["transport"], r["status"], r["last_verdict"]) for r in status["series"]] == [
+        ("awg", "ok", "ok"),
+        ("reality", "ok", "tcp_blocked"),
+    ]
 
 
 @pytest.mark.parametrize("args", [{}, {"node": "zakhar"}, {"node": "zakhar", "results": []}])

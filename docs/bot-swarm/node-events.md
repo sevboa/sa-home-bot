@@ -16,6 +16,7 @@
 | `vpn_quota_warning`, `vpn_quota_exceeded`, `vpn_access_restored`, `vpn_extra_resolved` | гостю |
 | `vpn_extra_requested`, `vpn_node_quota_warning`, `vpn_peer_issued`, `vpn_server_restored` | админам (Этап 33, 57.7) |
 | `vpn_check_failed`, `vpn_check_recovered` | админам; пробник (`chat_id=0`) гостям не шлётся |
+| `vpn_series_failed`, `vpn_series_recovered` | админам (63.1.6): «⚠️ Из РФ (zakhar) не работает VLESS (Reality) → jeeves: заморозка после 16 КБ»; текст вердикта и КБ — `bot/vpn_check_view.py::series_problem`, общий с блоком «🇷🇺 Из РФ» в статусе проверок `/vpn` |
 
 Остальные события ноды (`service_started`, `service_failed` и т.п.) сюда не заведены.
 

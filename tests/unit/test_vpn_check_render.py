@@ -36,3 +36,33 @@ def test_recovered_and_legacy_single_target():
     legacy = {**BASE, "target": "https://1.1.1.1", "error": "x"}
     assert "<code>1.1.1.1</code>" in render_vpn_check(FAILED, legacy)
     assert render_vpn_check(FAILED, {"node": "jeeves"}) is None
+
+
+def test_series_failed_says_what_and_where():
+    from sa_home_bot.bot.node_events import render_vpn_series
+
+    text = render_vpn_series(
+        vpn_protocol.EVENT_VPN_SERIES_FAILED,
+        {
+            "node": "zakhar",
+            "server": "jeeves",
+            "transport": "reality",
+            "verdict": "freeze",
+            "at_bytes": 16384,
+            "consecutive": 2,
+        },
+    )
+    assert text == (
+        "⚠️ Из РФ (<code>zakhar</code>) не работает VLESS (Reality) → <code>jeeves</code>: "
+        "заморозка после 16 КБ (2 замера подряд)"
+    )
+
+
+def test_series_recovered_and_incomplete():
+    from sa_home_bot.bot.node_events import render_vpn_series
+
+    data = {"node": "zakhar", "server": "jeeves", "transport": "awg"}
+    assert render_vpn_series(vpn_protocol.EVENT_VPN_SERIES_RECOVERED, data) == (
+        "✅ Из РФ (<code>zakhar</code>) снова работает AmneziaVPN → <code>jeeves</code>"
+    )
+    assert render_vpn_series(vpn_protocol.EVENT_VPN_SERIES_FAILED, {"node": "zakhar"}) is None

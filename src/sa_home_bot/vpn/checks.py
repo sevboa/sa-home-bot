@@ -19,6 +19,7 @@ from sa_home_bot.domain.vpn_check import (
     rollup_status,
 )
 from sa_home_bot.domain.vpn_series import (
+    failure_at_bytes,
     reconcile_vpn_series,
     series_verdict,
 )
@@ -144,10 +145,9 @@ class ChecksMixin:
             probe = raw.get("raw")
             if not server or not transport or not isinstance(probe, dict):
                 continue
-            series = raw.get("series") if isinstance(raw.get("series"), list) else []
+            series = [item for item in raw.get("series") or [] if isinstance(item, dict)]
             verdict = series_verdict(
-                str(probe.get("verdict", "")),
-                [str(item.get("verdict", "")) for item in series if isinstance(item, dict)],
+                str(probe.get("verdict", "")), [str(item.get("verdict", "")) for item in series]
             )
             await self._apply_series_result(node, server, transport, verdict, raw, now)
         return {"accepted": True}
@@ -212,7 +212,12 @@ class ChecksMixin:
         if state.transitioned_to == CHECK_ALERTING:
             await self._emit(
                 EVENT_VPN_SERIES_FAILED,
-                {**base, "verdict": verdict, "consecutive": self._cfg.series_fail_threshold},
+                {
+                    **base,
+                    "verdict": verdict,
+                    "at_bytes": failure_at_bytes(report.get("series") or []),
+                    "consecutive": self._cfg.series_fail_threshold,
+                },
             )
         elif state.transitioned_to == CHECK_OK:
             await self._emit(EVENT_VPN_SERIES_RECOVERED, base)
@@ -329,7 +334,18 @@ class ChecksMixin:
             }
             for r in rows
         ]
-        return {"states": states, "rollup": await self._check_rollup()}
+        return {
+            "states": states,
+            "rollup": await self._check_rollup(),
+            "series": await self._series_rows(),
+        }
+
+    async def _series_rows(self) -> list[dict[str, Any]]:
+        cur = await self._db.conn.execute(
+            "SELECT node, server, transport, status, last_verdict, alerting_since, last_seen_at "
+            "FROM vpn_series_states ORDER BY server, transport, node"
+        )
+        return [dict(r) for r in await cur.fetchall()]
 
     async def _telegram_egress(self, args: dict[str, Any]) -> dict[str, Any]:
         observer = str(args.get("observer") or "").strip()

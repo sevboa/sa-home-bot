@@ -12,6 +12,13 @@ STATUS_ICON = {
     vpn_check.PARTIAL: "🟠",
     vpn_check.ALERTING: "🔴",
 }
+SERIES_VERDICT_TEXT = {
+    "tcp_blocked": "TCP до сервера не проходит",
+    "proto_blocked": "рукопожатие VPN режется",
+    "freeze": "заморозка",
+    "cut": "обрыв",
+    "error": "ошибка замера",
+}
 LEGEND = "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни одному наблюдателю."
 
 
@@ -73,6 +80,32 @@ def short_error(error: object) -> str:
     return first if len(first) <= 40 else first[:37] + "…"
 
 
+def series_problem(verdict: str, at_bytes: object = None) -> str:
+    text = SERIES_VERDICT_TEXT.get(verdict, verdict)
+    if verdict in ("freeze", "cut") and isinstance(at_bytes, int | float):
+        text += f" после {max(1, round(at_bytes / 1024))} КБ"
+    return text
+
+
+def _series_lines(series: list[dict]) -> list[str]:
+    lines = ["", "🇷🇺 <b>Из РФ</b> (серийная проверка)"]
+    for row in series:
+        label = vpn_devices.TECHNICAL_TRANSPORT_NAME.get(row["transport"], row["transport"])
+        head = (
+            f"<code>{html.escape(row['node'])}</code> → <b>{html.escape(row['server'])}</b>"
+            f" · {html.escape(label)}"
+        )
+        if row["status"] == vpn_check.ALERTING:
+            problem = html.escape(series_problem(row.get("last_verdict") or ""))
+            lines.append(f"  🔴 {head} — не работает: {problem}")
+        elif row.get("last_verdict") not in (None, "ok"):
+            problem = html.escape(series_problem(row["last_verdict"]))
+            lines.append(f"  🟠 {head} — последний замер: {problem}")
+        else:
+            lines.append(f"  🟢 {head}")
+    return lines
+
+
 def _observer_line(node: str, rows: list[dict]) -> str:
     rows = sorted(rows, key=lambda r: r["target"])
     icon = "🔴" if any(r["status"] == vpn_check.ALERTING for r in rows) else "🟢"
@@ -88,7 +121,11 @@ def _observer_line(node: str, rows: list[dict]) -> str:
 
 
 def status_text(
-    states: list[dict], *, rollup: list[dict] | None = None, pending: bool = False
+    states: list[dict],
+    *,
+    rollup: list[dict] | None = None,
+    series: list[dict] | None = None,
+    pending: bool = False,
 ) -> str:
     lines = ["🛰 <b>VPN — проверка доступности</b>"]
     if not states:
@@ -114,6 +151,8 @@ def status_text(
             for row in rows:
                 by_node.setdefault(row["node"], []).append(row)
             lines.extend(_observer_line(node, by_node[node]) for node in sorted(by_node))
+    if series:
+        lines.extend(_series_lines(series))
     if pending:
         lines.append("")
         lines.append("⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат.")

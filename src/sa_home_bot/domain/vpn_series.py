@@ -11,6 +11,16 @@ VERDICT_OK = "ok"
 BROKEN_SERIES_VERDICTS = ("freeze", "cut", "error")
 
 
+def failure_at_bytes(series: list[dict]) -> int | None:
+    for item in series:
+        if isinstance(item, dict) and item.get("verdict") in BROKEN_SERIES_VERDICTS:
+            value = item.get("stalled_at_bytes")
+            if value is None:
+                value = item.get("bytes_total")
+            return int(value) if isinstance(value, int | float) else None
+    return None
+
+
 def series_verdict(raw_verdict: str, series_verdicts: list[str]) -> str:
     if raw_verdict != VERDICT_OK:
         return raw_verdict

@@ -46,3 +46,17 @@ def test_two_failures_alert_then_one_ok_recovers():
 def test_slow_counts_as_working():
     step = _step(series_verdict("ok", ["slow"]), KnownCheckState(OK, 1, None))
     assert (step.status, step.consecutive_count) == (OK, 0)
+
+
+def test_failure_at_bytes_takes_first_broken_item():
+    from sa_home_bot.domain.vpn_series import failure_at_bytes
+
+    series = [
+        {"verdict": "ok", "bytes_total": 9},
+        "мусор",
+        {"verdict": "freeze", "stalled_at_bytes": 16384, "bytes_total": 16384},
+        {"verdict": "cut", "bytes_total": 2048},
+    ]
+    assert failure_at_bytes(series) == 16384
+    assert failure_at_bytes([{"verdict": "cut", "bytes_total": 2048}]) == 2048
+    assert failure_at_bytes([{"verdict": "ok"}]) is None
