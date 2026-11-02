@@ -78,7 +78,9 @@ class Provider:
         if self.quota_status != 200:
             return web.json_response({"error": "unauthorized"}, status=self.quota_status)
         if self.quota_body is None:
-            body = {"data": {"free_model_daily_requests": {"used": 100, "limit": 500, "remaining": 400}}}
+            body = {
+                "data": {"free_model_daily_requests": {"used": 100, "limit": 500, "remaining": 400}}
+            }
             return web.json_response(body)
         return web.json_response(self.quota_body)
 
