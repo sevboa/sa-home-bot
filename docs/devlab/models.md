@@ -79,7 +79,7 @@ remote = true
 
 ## Heartbeat
 Раз в `HEARTBEAT_INTERVAL_S` (четверть `HEARTBEAT_FRESH_S` хаба) `POST /api/heartbeat`:
-- `models`: на модель `name`, `kind`, `free`, `price_in`, `price_out`, `context`, `remote`;
+- `models`: на модель `name`, `kind`, `free`, `price_in`, `price_out`, `context` (исполнитель агента берёт из него окно диалога, см. `agent.md`), `remote`;
   для `llamacpp` ещё `loaded` (поднята ли модель сейчас); `threads` клиенту не нужны и не отдаются;
 - `limits`: `{<имя>: {"rpd_left": <остаток или null>}}`;
 - `url`: адрес шлюза (`http://<bind_host или tailscale>:<port>`), по нему исполнитель ходит в шлюз; в клиентский `devlab_models` он не попадает.

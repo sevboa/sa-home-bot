@@ -239,7 +239,7 @@
 Таблица `[devlab]`: `socket`, `hub_url`, `hub_token`, `work_dir`, `poll_interval_s`, `heartbeat_interval_s`,
 `owner_wait_s`, `freeze_max_s`, `neighbor_socket`, `test_image`, `test_cpuset`, `test_cpus`, `test_memory`, `build_timeout_s`, `agent_cpuset`, `agent_cpus`,
 `agent_memory`, `agent_max_steps`, `agent_max_wall_s`, `agent_max_red_runs`, `agent_max_cost_usd`,
-`agent_max_tokens`, `agent_context_tokens`, `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
+`agent_max_tokens`, `agent_context_tokens` (потолок окна локальной модели и окно по умолчанию, если в каталоге нет `context`), `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
 
 ## Тесты
 `tests/unit/test_devlab_executor.py` (настоящий хаб `build_hub_app`, bare-репо, `FakeTestRunner`) и

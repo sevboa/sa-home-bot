@@ -6,8 +6,10 @@ from typing import Any
 import pytest
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
+from sa_home_bot.devlab.executor import agent_worker as agent_worker_module
 from sa_home_bot.devlab.executor.agent_worker import (
     AGENT_DIR,
     AGENT_STATE_FILE,
@@ -16,6 +18,7 @@ from sa_home_bot.devlab.executor.agent_worker import (
     AgentWorker,
 )
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
+from sa_home_bot.devlab.executor.routing import CatalogEntry
 from sa_home_bot.utils.files import load_model
 from tests.unit import test_devlab_executor as executor_tests
 from tests.unit.support.fakes import ScriptedChatModel, StaticCatalog, local_entry, tool_reply
@@ -212,3 +215,46 @@ async def test_model_failure_marks_job_failed_and_keeps_partial(env):
     assert "шлюз лёг" in failed.payload[protocol.PAYLOAD_TEXT]
     assert await hub_branch(env, wip_of(job_id)) is None
     assert await hub_branch(env, agent_of(job_id))
+
+
+class LimitsProbe(AgentLoop):
+    seen: list[AgentLimits] = []
+
+    def __init__(self, model, tools, guard, limits, **kwargs) -> None:
+        LimitsProbe.seen.append(limits)
+        super().__init__(model, tools, guard, limits, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, context=65536)], 65536),
+        ([local_entry(MODEL, context=32768)], 16000),
+        ([local_entry(MODEL, context=8192)], 8192),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True)], 16000),
+        (
+            [
+                CatalogEntry(MODEL, "a", "http://a", remote=True, context=65536),
+                CatalogEntry(MODEL, "b", "http://b", remote=True, context=32768),
+            ],
+            32768,
+        ),
+    ],
+)
+async def test_agent_window_comes_from_catalog(env, monkeypatch, entries, expected):
+    monkeypatch.setattr(agent_worker_module, "AgentLoop", LimitsProbe)
+    LimitsProbe.seen = []
+    spec = SPEC.replace(b"[agent]\n", b"[agent]\nallow_remote_models = true\n")
+    monkeypatch.setitem(BASE_FILES, ".devlab.toml", spec)
+    job_id = await submit(env)
+    worker = make_worker(
+        env,
+        ScriptedChatModel(WRITE_DONE, FINISH),
+        catalog=StaticCatalog(*entries),
+        limits=AgentLimits(context_tokens=16000),
+    )
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert LimitsProbe.seen[0].context_tokens == expected

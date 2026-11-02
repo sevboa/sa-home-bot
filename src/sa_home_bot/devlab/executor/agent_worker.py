@@ -32,7 +32,7 @@ from sa_home_bot.devlab.executor.mirror import (
     check_project_name,
     remote_url,
 )
-from sa_home_bot.devlab.executor.routing import Catalog
+from sa_home_bot.devlab.executor.routing import Catalog, CatalogEntry
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, ProjectSpec, parse_spec
 from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
 from sa_home_bot.devlab.hub.queue import Job, Message
@@ -65,6 +65,18 @@ FAILURE_PREFIX = {
     AgentStatus.CONTEXT_OVERFLOW: "контекст",
     AgentStatus.STUCK: "агент застрял",
 }
+
+
+def window_tokens(entries: list[CatalogEntry], local_cap: int) -> int:
+    windows = [
+        local_cap
+        if not entry.context
+        else entry.context
+        if entry.remote
+        else min(entry.context, local_cap)
+        for entry in entries
+    ]
+    return min(windows, default=local_cap)
 
 
 class ModelUnavailable(Exception):
@@ -393,11 +405,12 @@ class AgentWorker(WorkerLoops):
         run.sandbox = sandbox
         await (sandbox.resume() if held else sandbox.start())
         spend = self._spend_of(job)
+        entries = await self._catalog.entries(job.model)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
             FinishGuard(sandbox, spec),
-            self._limits_for(spend),
+            self._limits_for(spend, entries),
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
@@ -422,11 +435,12 @@ class AgentWorker(WorkerLoops):
         dialog = load_model(Dialog, path)
         return dialog if dialog.answer is not None else None
 
-    def _limits_for(self, spend: JobSpend) -> AgentLimits:
+    def _limits_for(self, spend: JobSpend, entries: list[CatalogEntry]) -> AgentLimits:
         limits = self._settings.limits
         factor = 1 + spend.extensions
         return replace(
             limits,
+            context_tokens=window_tokens(entries, limits.context_tokens),
             max_cost_usd=limits.max_cost_usd * factor,
             max_tokens=limits.max_tokens * factor,
         )

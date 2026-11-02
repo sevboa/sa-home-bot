@@ -30,6 +30,7 @@ class CatalogEntry:
     price_in: float = 0.0
     price_out: float = 0.0
     remote: bool = True
+    context: int = 0
 
     @classmethod
     def from_hub(cls, data: dict[str, Any]) -> CatalogEntry:
@@ -41,6 +42,7 @@ class CatalogEntry:
             price_in=float(data.get(protocol.MODEL_PRICE_IN) or 0),
             price_out=float(data.get(protocol.MODEL_PRICE_OUT) or 0),
             remote=bool(data.get(protocol.MODEL_REMOTE, True)),
+            context=int(data.get(protocol.MODEL_CONTEXT) or 0),
         )
 
     def price(self, tokens_in: int, tokens_out: int) -> float:

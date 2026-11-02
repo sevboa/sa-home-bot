@@ -291,3 +291,11 @@ def test_replies_counter_grows_per_record():
     spend.record(ModelReply("a", tokens_in=1, tokens_out=1))
     spend.record(ModelReply("b", tokens_in=0, tokens_out=0))
     assert spend.replies() == 2
+
+
+def test_catalog_entry_reads_context_from_hub():
+    entry = CatalogEntry.from_hub({protocol.MODEL_NAME: "m", protocol.MODEL_CONTEXT: 65536})
+    bare = CatalogEntry.from_hub({protocol.MODEL_NAME: "m"})
+
+    assert entry.context == 65536
+    assert bare.context == 0
