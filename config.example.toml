@@ -541,6 +541,7 @@ transports = ["awg"]
 # flow = "xtls-rprx-vision"
 # api_addr = "127.0.0.1:10085"
 # inbound_tag = "reality-in"
+# spare_fingerprints = []      # напр. ["firefox", "edge"] — запасные профили в подписке
 
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.

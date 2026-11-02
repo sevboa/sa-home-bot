@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import functools
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Sequence
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
@@ -226,6 +228,20 @@ def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
 
 def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
     return sorted(entries, key=lambda e: (e.name, e.node))
+
+
+def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[SubEntry]:
+    if not fingerprints:
+        return entries
+    result = list(entries)
+    for fp in fingerprints:
+        for e in entries:
+            if e.params.fingerprint == fp:
+                continue
+            new_params = dataclasses.replace(e.params, fingerprint=fp)
+            new_name = f"{e.name} · {fp}"
+            result.append(dataclasses.replace(e, params=new_params, name=new_name))
+    return result
 
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:

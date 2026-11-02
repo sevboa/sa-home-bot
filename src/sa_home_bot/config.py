@@ -420,10 +420,24 @@ class RealityTransportConfig(BaseModel):
     flow: str = DEFAULT_FLOW
     api_addr: str = "127.0.0.1:10085"
     inbound_tag: str = "reality-in"
+    spare_fingerprints: list[str] = Field(default_factory=list)
 
     @property
     def effective_dest(self) -> str:
         return self.dest or f"{self.sni}:443"
+
+    @field_validator("spare_fingerprints", mode="before")
+    @classmethod
+    def _validate_spare_fingerprints(cls, v: list[str]) -> list[str]:
+        allowed = {"chrome", "firefox", "edge", "safari", "ios", "android"}
+        seen: set[str] = set()
+        for fp in v:
+            if fp not in allowed:
+                raise ValueError(f"fingerprint {fp!r} не в допустимом списке: {sorted(allowed)}")
+            if fp in seen:
+                raise ValueError(f"дубликат fingerprint: {fp!r}")
+            seen.add(fp)
+        return v
 
 
 class VpnConfig(BaseModel):
