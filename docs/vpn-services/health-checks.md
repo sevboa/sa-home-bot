@@ -19,3 +19,7 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 ## HEAD вместо GET
 Проверке нужен только код ответа; GET заставляет curl принять тело целиком. С добавлением google/youtube/instagram/discord (2026-09-20) каждый слот тянул ~1.5 МБ за цикл; замер youtube через туннель: 1247 мс / 870 КБ на GET против 657 мс / 0 КБ на HEAD; ×8 слотов ×12 циклов/час — порядка 100 ГБ в месяц трафика по VPN-серверам, прямо в лимит `node_limit_gb`. 405/501 — «метод не поддержан»: цель жива, повторяем GET. `http_code` внутренний, в отчёт не уходит.
 Права: «a password is required»/локализованное «sudo:» → подсказка `nodectl fix` (`looks_like_sudo_denied` / `looks_like_sudo_message` из `utils/requirements.py`: вторая не зависит от локали ноды).
+
+## mtg_probe (vpn_series)
+
+`src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
