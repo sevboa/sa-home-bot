@@ -209,6 +209,19 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
     monkeypatch.setattr(VpnCheckService, "_egress_gate", fake_egress_gate)
     monkeypatch.setattr("sa_home_bot.vpn_series.raw_probe.tcp_connect", fake_tcp_connect)
 
+    # Also mock run_single to avoid sudo error if TCP check fails
+    async def fake_run_single(slot, cfg, *, spawn=None):
+        from sa_home_bot.vpn_series.measure import SeriesResult
+        return SeriesResult(
+            bytes_total=1000000,
+            duration_s=1.0,
+            stalled_at_bytes=None,
+            max_idle_s=0.1,
+            kbps=8000.0,
+            verdict="ok",
+        )
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
+
     service = _service(_FakeNodeLink(), slots=[_reality_slot()])
     await _run_with_timeout(service.run_command("series", {"server": PROBE_SERVER, "mode": "single"}))
 
