@@ -27,6 +27,7 @@ class RealityParams:
     short_id: str
     sni: str
     flow: str = DEFAULT_FLOW
+    fingerprint: str = CLIENT_FINGERPRINT
 
     @classmethod
     def from_config(cls, cfg: Any) -> RealityParams:
@@ -37,6 +38,7 @@ class RealityParams:
             short_id=cfg.short_id,
             sni=cfg.sni,
             flow=cfg.flow,
+            fingerprint=getattr(cfg, "fingerprint", CLIENT_FINGERPRINT),
         )
 
 
@@ -70,7 +72,7 @@ def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool)
         "tls": {
             "enabled": True,
             "server_name": params.sni,
-            "utls": {"enabled": True, "fingerprint": CLIENT_FINGERPRINT},
+            "utls": {"enabled": True, "fingerprint": params.fingerprint},
             "reality": {
                 "enabled": True,
                 "public_key": params.server_public_key,
@@ -167,7 +169,7 @@ def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str
             ("flow", params.flow),
             ("security", "reality"),
             ("sni", params.sni),
-            ("fp", CLIENT_FINGERPRINT),
+            ("fp", params.fingerprint),
             ("pbk", params.server_public_key),
             ("sid", params.short_id),
             ("type", "tcp"),
@@ -207,6 +209,7 @@ def parse_vless_url(url: str) -> tuple[RealityParams, str]:
         short_id=_param("sid"),
         sni=_param("sni"),
         flow=_param("flow", default=DEFAULT_FLOW),
+        fingerprint=_param("fp", default=CLIENT_FINGERPRINT),
     )
     return params, client_uuid
 

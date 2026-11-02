@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 from sa_home_bot.reality.client_config import (
-    CLIENT_FINGERPRINT,
     RealityParams,
     parse_vless_url,
 )
@@ -49,7 +48,7 @@ def render_probe_client_config(params: RealityParams, client_uuid: str, *, socks
                         "serverName": params.sni,
                         "publicKey": params.server_public_key,
                         "shortId": params.short_id,
-                        "fingerprint": CLIENT_FINGERPRINT,
+                        "fingerprint": params.fingerprint,
                     },
                 },
             }

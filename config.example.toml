@@ -536,6 +536,8 @@ transports = ["awg"]
 # server_public_key = ""
 # short_id = ""
 # sni = "www.google.com"
+# dest = ""            # пусто = "<sni>:443"
+# fingerprint = "chrome"
 # flow = "xtls-rprx-vision"
 # api_addr = "127.0.0.1:10085"
 # inbound_tag = "reality-in"

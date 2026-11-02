@@ -19,7 +19,7 @@ from sa_home_bot.node.instances import (
     guests_package_path,
 )
 from sa_home_bot.node.kind import NodeKind
-from sa_home_bot.reality.client_config import DEFAULT_FLOW
+from sa_home_bot.reality.client_config import CLIENT_FINGERPRINT, DEFAULT_FLOW
 
 log = logging.getLogger(__name__)
 
@@ -415,9 +415,15 @@ class RealityTransportConfig(BaseModel):
     server_public_key: str = ""
     short_id: str = ""
     sni: str = "www.google.com"
+    dest: str = ""
+    fingerprint: str = CLIENT_FINGERPRINT
     flow: str = DEFAULT_FLOW
     api_addr: str = "127.0.0.1:10085"
     inbound_tag: str = "reality-in"
+
+    @property
+    def effective_dest(self) -> str:
+        return self.dest or f"{self.sni}:443"
 
 
 class VpnConfig(BaseModel):

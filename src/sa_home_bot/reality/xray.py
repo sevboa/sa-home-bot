@@ -119,3 +119,7 @@ class RealXrayBackend:
         return _parse_stats(
             await self._run("statsquery", f"--server={self._api}", "-pattern=user>>>")
         )
+
+
+def reality_server_settings(sni: str, dest: str) -> dict[str, object]:
+    return {"dest": dest or f"{sni}:443", "serverNames": [sni]}

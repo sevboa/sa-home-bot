@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
+    CLIENT_FINGERPRINT,
     DEFAULT_FLOW,
     RealityParams,
     render_singbox_multi,
@@ -87,6 +88,7 @@ class SubEntry:
                 "short_id": p.short_id,
                 "sni": p.sni,
                 "flow": p.flow,
+                "fingerprint": p.fingerprint,
             },
         }
 
@@ -104,6 +106,7 @@ class SubEntry:
                 short_id=str(p["short_id"]),
                 sni=str(p["sni"]),
                 flow=str(p.get("flow") or DEFAULT_FLOW),
+                fingerprint=str(p.get("fingerprint") or CLIENT_FINGERPRINT),
             ),
         )
 
