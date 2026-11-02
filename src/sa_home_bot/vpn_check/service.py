@@ -35,7 +35,7 @@ from sa_home_bot.vpn_check.protocol import (
     SERIES_MODE_SINGLE,
     SERVICE_NAME,
 )
-from sa_home_bot.vpn_series.raw_probe import RawProbeResult, RawTarget, raw_probe, reality_target
+from sa_home_bot.vpn_series.raw_probe import RawTarget, raw_probe, reality_target
 from sa_home_bot.vpn_series.runner import run_burst, run_single
 
 log = logging.getLogger(__name__)
