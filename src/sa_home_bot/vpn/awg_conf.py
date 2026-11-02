@@ -7,11 +7,21 @@ AWG_KEYS = (
     "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5",
 )  # fmt: skip
 ISSUED_OBFUSCATION_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4")
+AWG2_EXTRA_KEYS = ("S3", "S4", "I1", "I2", "I3", "I4", "I5")
+
+
+def issued_keys(cfg: Any) -> tuple[str, ...]:
+    if not getattr(cfg, "awg2", False):
+        return ISSUED_OBFUSCATION_KEYS
+    extra = tuple(
+        key for key in AWG2_EXTRA_KEYS if key in ("S3", "S4") or getattr(cfg, key.lower(), "")
+    )
+    return ISSUED_OBFUSCATION_KEYS + extra
 
 
 def render(cfg: Any, private_key: str, address: str, server_public_key: str) -> str:
     obfuscation = "".join(
-        f"{key} = {getattr(cfg, key.lower())}\n" for key in ISSUED_OBFUSCATION_KEYS
+        f"{key} = {getattr(cfg, key.lower())}\n" for key in issued_keys(cfg)
     )
     return (
         "[Interface]\n"
