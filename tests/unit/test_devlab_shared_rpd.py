@@ -14,7 +14,7 @@ from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.devlab.models.backends import build_backend
 from sa_home_bot.devlab.models.gateway import Gateway
 from sa_home_bot.devlab.models.hubclient import HubClient
-from sa_home_bot.devlab.models.ledger import Ledger
+from sa_home_bot.devlab.models.ledger import Ledger, today
 from sa_home_bot.devlab.models.limits import RateWindow
 from tests.unit.support.fakes import FakeNodes
 
@@ -163,7 +163,7 @@ async def test_heartbeat_body_includes_used_today(setup):
     body = await gateway.heartbeat_body()
     assert protocol.FIELD_USED_TODAY in body
     used = body[protocol.FIELD_USED_TODAY]
-    assert used["day"] == gateway.ledger.today()
+    assert used["day"] == today()
     assert used["requests"] == {MODEL: 0}
 
 
@@ -178,7 +178,7 @@ async def test_heartbeat_body_used_today_after_request(setup, provider):
 async def test_shared_key_false_ignores_shared(setup, provider, hub_state):
     gateway, client = await setup(rpd=10, shared_key=False)
     hub_state.heartbeat_replies.append({
-        protocol.FIELD_SHARED_USED: {"day": gateway.ledger.today(), "requests": {MODEL: 5}}
+        protocol.FIELD_SHARED_USED: {"day": today(), "requests": {MODEL: 5}}
     })
     await gateway.hub.heartbeat(await gateway.heartbeat_body())
     assert await gateway.used_today(MODEL) == 0
@@ -189,7 +189,7 @@ async def test_shared_key_false_ignores_shared(setup, provider, hub_state):
 async def test_shared_key_true_adds_shared(setup, provider, hub_state):
     gateway, client = await setup(rpd=10, shared_key=True)
     hub_state.heartbeat_replies.append({
-        protocol.FIELD_SHARED_USED: {"day": gateway.ledger.today(), "requests": {MODEL: 4}}
+        protocol.FIELD_SHARED_USED: {"day": today(), "requests": {MODEL: 4}}
     })
     reply = await gateway.hub.heartbeat(await gateway.heartbeat_body())
     gateway.note_shared(reply)
@@ -227,7 +227,7 @@ async def test_shared_key_wrong_day_in_reply_ignored(setup, provider, hub_state)
 async def test_shared_key_empty_reply_keeps_old(setup, provider, hub_state):
     gateway, client = await setup(rpd=10, shared_key=True)
     hub_state.heartbeat_replies.append({
-        protocol.FIELD_SHARED_USED: {"day": gateway.ledger.today(), "requests": {MODEL: 3}}
+        protocol.FIELD_SHARED_USED: {"day": today(), "requests": {MODEL: 3}}
     })
     reply = await gateway.hub.heartbeat(await gateway.heartbeat_body())
     gateway.note_shared(reply)
@@ -317,7 +317,7 @@ async def test_hub_heartbeat_returns_shared_used(tmp_path):
 async def test_rpd_left_in_heartbeat_includes_shared(setup, provider, hub_state):
     gateway, client = await setup(rpd=10, shared_key=True)
     hub_state.heartbeat_replies.append({
-        protocol.FIELD_SHARED_USED: {"day": gateway.ledger.today(), "requests": {MODEL: 4}}
+        protocol.FIELD_SHARED_USED: {"day": today(), "requests": {MODEL: 4}}
     })
     reply = await gateway.hub.heartbeat(await gateway.heartbeat_body())
     gateway.note_shared(reply)
@@ -363,7 +363,7 @@ async def test_note_shared_valid_reply_stored(setup):
 async def test_heartbeat_body_used_today_only_own(setup, provider, hub_state):
     gateway, client = await setup(rpd=10, shared_key=True)
     hub_state.heartbeat_replies.append({
-        protocol.FIELD_SHARED_USED: {"day": gateway.ledger.today(), "requests": {MODEL: 4}}
+        protocol.FIELD_SHARED_USED: {"day": today(), "requests": {MODEL: 4}}
     })
     await gateway.hub.heartbeat(await gateway.heartbeat_body())
     await client.post(protocol.HTTP_CHAT_PATH, json=CHAT, headers=AUTH)
@@ -414,7 +414,7 @@ async def test_shared_key_multiple_models(tmp_path, provider, hub_state, clock):
     hub_state.heartbeat_replies.append(
         {
             protocol.FIELD_SHARED_USED: {
-                "day": gateway.ledger.today(),
+                "day": today(),
                 "requests": {MODEL: 3, MODEL2: 2},
             }
         }

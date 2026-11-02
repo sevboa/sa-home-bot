@@ -11,7 +11,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.http import BEARER_PREFIX, Handler
 from sa_home_bot.devlab.models.backends import ModelBackend, ModelUnavailableError
 from sa_home_bot.devlab.models.hubclient import HubClient, HubUnavailableError
-from sa_home_bot.devlab.models.ledger import Ledger
+from sa_home_bot.devlab.models.ledger import Ledger, today
 from sa_home_bot.devlab.models.limits import RateWindow
 from sa_home_bot.devlab.usage import usage_cost
 
@@ -111,7 +111,7 @@ class Gateway:
         }
         if used_today:
             body[protocol.FIELD_USED_TODAY] = {
-                "day": self.ledger.today(),
+                "day": today(),
                 "requests": used_today,
             }
         return body
@@ -136,7 +136,7 @@ class Gateway:
         if not self._shared:
             return own
         day, requests = self._shared
-        if day != self.ledger.today():
+        if day != today():
             return own
         return own + requests.get(name, 0)
 
