@@ -11,7 +11,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.http import BEARER_PREFIX, Handler
 from sa_home_bot.devlab.models.backends import ModelBackend, ModelUnavailableError
 from sa_home_bot.devlab.models.hubclient import HubClient, HubUnavailableError
-from sa_home_bot.devlab.models.ledger import Ledger
+from sa_home_bot.devlab.models.ledger import Ledger, today
 from sa_home_bot.devlab.models.limits import RateWindow
 from sa_home_bot.devlab.usage import usage_cost
 
@@ -70,6 +70,7 @@ class Gateway:
         self.ledger = ledger
         self.hub = hub
         self.windows = windows
+        self._shared: tuple[str, dict[str, int]] | None = None
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth])
@@ -81,6 +82,7 @@ class Gateway:
     async def heartbeat_body(self) -> dict[str, Any]:
         models = []
         limits: dict[str, Any] = {}
+        used_today: dict[str, Any] = {}
         for name, backend in self.backends.items():
             spec = backend.spec
             entry: dict[str, Any] = {
@@ -98,13 +100,45 @@ class Gateway:
             models.append(entry)
             left = None
             if spec.rpd:
-                left = max(0, spec.rpd - await self.ledger.requests_today(name))
+                used = await self.used_today(name)
+                left = max(0, spec.rpd - used)
+                used_today[name] = await self.ledger.requests_today(name)
             limits[name] = {protocol.LIMIT_RPD_LEFT: left}
-        return {
+        body: dict[str, Any] = {
             protocol.FIELD_MODELS: models,
             protocol.FIELD_LIMITS: limits,
             protocol.FIELD_URL: self.url,
         }
+        if used_today:
+            body[protocol.FIELD_USED_TODAY] = {
+                "day": today(),
+                "requests": used_today,
+            }
+        return body
+
+    def note_shared(self, reply: dict[str, Any] | None) -> None:
+        if not reply:
+            return
+        shared = reply.get(protocol.FIELD_SHARED_USED)
+        if not isinstance(shared, dict):
+            return
+        day = shared.get("day")
+        requests = shared.get("requests")
+        if not isinstance(day, str) or not isinstance(requests, dict):
+            return
+        self._shared = (day, requests)
+
+    async def used_today(self, name: str) -> int:
+        own = await self.ledger.requests_today(name)
+        backend = self.backends.get(name)
+        if not backend or not backend.spec.shared_key:
+            return own
+        if not self._shared:
+            return own
+        day, requests = self._shared
+        if day != today():
+            return own
+        return own + requests.get(name, 0)
 
     @web.middleware
     async def _auth(self, request: web.Request, handler: Handler) -> web.StreamResponse:
@@ -147,7 +181,7 @@ class Gateway:
             return error_response(404, f"модель {name!r} на шлюзе не настроена")
         job = request.headers.get(protocol.HEADER_JOB, "")
         spec = backend.spec
-        if spec.rpd and await self.ledger.requests_today(backend.name) >= spec.rpd:
+        if spec.rpd and await self.used_today(backend.name) >= spec.rpd:
             return error_response(
                 429, f"суточный лимит модели {backend.name!r} ({spec.rpd} запросов) исчерпан"
             )

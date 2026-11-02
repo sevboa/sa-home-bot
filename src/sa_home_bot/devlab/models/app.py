@@ -26,7 +26,8 @@ async def heartbeat_loop(
 ) -> None:
     while True:
         try:
-            await hub.heartbeat(await gateway.heartbeat_body())
+            reply = await hub.heartbeat(await gateway.heartbeat_body())
+            gateway.note_shared(reply)
         except Exception:
             log.exception("Heartbeat шлюза не удался")
         await asyncio.sleep(interval_s)

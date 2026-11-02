@@ -267,6 +267,7 @@ class DevlabModelConfig(BaseModel):
     cpus_night: str = Field(default="", pattern=OPTIONAL_CPUSET_PATTERN)
     idle_unload_s: int = Field(default=600, ge=0)
     extra_args: list[str] = Field(default_factory=list)
+    shared_key: bool = False
 
     @model_validator(mode="before")
     @classmethod
