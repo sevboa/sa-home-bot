@@ -407,3 +407,51 @@ async def test_gateway_chat_200_with_error_body_is_model_error():
 
 def test_model_timeout_is_at_least_half_hour():
     assert MODEL_TIMEOUT_S >= 1800
+
+
+ECHO_ARGV = (sys.executable, "-c", "import sys; print('ARGS', sys.argv[1:])")
+
+
+def toolbox(tmp_path, **spec):
+    return ToolBox(LocalSandbox(tmp_path), AgentSpec(**spec))
+
+
+async def test_write_file_appends_final_newline(tmp_path):
+    box = toolbox(tmp_path)
+    outcome = await box.call(TOOL_WRITE_FILE, {"path": "a.txt", "content": "x"})
+    assert (tmp_path / "a.txt").read_bytes() == b"x\n"
+    assert "перевод строки" in outcome.text
+    outcome = await box.call(TOOL_WRITE_FILE, {"path": "b.txt", "content": "x\n"})
+    assert (tmp_path / "b.txt").read_bytes() == b"x\n"
+    assert "перевод строки" not in outcome.text
+
+
+async def test_write_file_leaves_empty_and_binary_alone(tmp_path):
+    box = toolbox(tmp_path)
+    await box.call(TOOL_WRITE_FILE, {"path": "e.txt", "content": ""})
+    await box.call(TOOL_WRITE_FILE, {"path": "n.bin", "content": "a\0b"})
+    assert (tmp_path / "e.txt").read_bytes() == b""
+    assert (tmp_path / "n.bin").read_bytes() == b"a\0b"
+
+
+async def test_edit_file_appends_final_newline(tmp_path):
+    (tmp_path / "a.txt").write_bytes(b"one")
+    outcome = await toolbox(tmp_path).call(
+        TOOL_EDIT_FILE, {"path": "a.txt", "old": "one", "new": "two"}
+    )
+    assert (tmp_path / "a.txt").read_bytes() == b"two\n"
+    assert "перевод строки" in outcome.text
+
+
+async def test_run_tests_paths_narrow_the_run(tmp_path):
+    box = toolbox(tmp_path, test_argv=ECHO_ARGV)
+    assert "ARGS []" in (await box.call(TOOL_RUN_TESTS, {})).text
+    narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py  tests/b.py"})
+    assert "ARGS ['tests/unit/a.py', 'tests/b.py']" in narrow.text
+    assert narrow.green is True
+
+
+async def test_run_tests_paths_outside_root_rejected(tmp_path):
+    box = toolbox(tmp_path, test_argv=ECHO_ARGV)
+    with pytest.raises(ToolError):
+        await box.call(TOOL_RUN_TESTS, {"paths": "../x.py"})

@@ -26,6 +26,17 @@ READ_MAX_LINES = 200
 GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
+NEWLINE_ADDED = "; в конец файла дописан перевод строки"
+
+
+def _with_final_newline(data: bytes) -> bytes | None:
+    if not data or data.endswith(b"\n") or b"\0" in data:
+        return None
+    try:
+        data.decode()
+    except UnicodeDecodeError:
+        return None
+    return data + b"\n"
 
 
 class ToolError(Exception):
@@ -104,7 +115,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "Запускает разрешённую команду без оболочки.",
         command=_text("Команда одной строкой"),
     ),
-    _schema(TOOL_RUN_TESTS, "Запускает тесты проекта."),
+    _schema(
+        TOOL_RUN_TESTS,
+        "Запускает тесты проекта. С paths гоняет только указанные тесты (узкий прогон); "
+        "без paths полный набор.",
+        paths=_text("Пути тестов через пробел", optional=True),
+    ),
     _schema(
         TOOL_STEP_DONE,
         "Фиксирует законченный шаг. Принимается только при зелёных тестах и стражах проекта.",
@@ -230,14 +246,18 @@ class ToolBox:
             raise ToolError(
                 f"фрагмент old найден {found} раз в {path}: нужно ровно один, добавь контекста"
             )
-        await self._sandbox.write_bytes(path, text.replace(old, new, 1).encode())
-        return f"правка {path}: заменён один фрагмент"
+        data = text.replace(old, new, 1).encode()
+        fixed = _with_final_newline(data)
+        await self._sandbox.write_bytes(path, fixed or data)
+        return f"правка {path}: заменён один фрагмент" + (NEWLINE_ADDED if fixed else "")
 
     async def _write_file(self, args: dict[str, Any]) -> str:
         path = self._check_writable(_argument(args, "path", str))
         content = _argument(args, "content", str)
-        await self._sandbox.write_bytes(path, content.encode())
-        return f"записан {path}: {len(content)} симв."
+        data = content.encode()
+        fixed = _with_final_newline(data)
+        await self._sandbox.write_bytes(path, fixed or data)
+        return f"записан {path}: {len(content)} симв." + (NEWLINE_ADDED if fixed else "")
 
     async def _run_command(self, args: dict[str, Any]) -> str:
         try:
@@ -257,6 +277,8 @@ class ToolBox:
     async def _run_tests(self, args: dict[str, Any]) -> ToolOutcome:
         if not self._spec.test_argv:
             raise ToolError("команда тестов не задана")
-        result = await self._sandbox.exec(self._spec.test_argv, self._spec.test_timeout_s)
+        paths = [safe_relative(p) for p in _argument(args, "paths", str, "").split()]
+        argv = [*self._spec.test_argv, *paths]
+        result = await self._sandbox.exec(argv, self._spec.test_timeout_s)
         text = result.summary(self._spec.output_chars, self._spec.test_timeout_s)
         return ToolOutcome(text, green=result.ok)
