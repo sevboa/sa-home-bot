@@ -71,6 +71,7 @@ class Gateway:
         self.hub = hub
         self.windows = windows
         self._shared: tuple[str, dict[str, int]] | None = None
+        self._provider: dict[str, tuple[int, int]] = {}
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth])
