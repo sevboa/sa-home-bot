@@ -189,7 +189,12 @@ class VpnCheckService:
                         else (await self._check_one(slot, target))
                     )
                     results.append(
-                        {"server": slot.server, "transport": slot.transport, "target": target, **one}
+                        {
+                            "server": slot.server,
+                            "transport": slot.transport,
+                            "target": target,
+                            **one,
+                        }
                     )
                 failed = [r for r in results if not r["ok"]]
                 if failed:
