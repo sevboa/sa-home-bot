@@ -105,6 +105,10 @@ class Gateway:
                 left = max(0, spec.rpd - used)
                 used_today[name] = await self.ledger.requests_today(name)
             limits[name] = {protocol.LIMIT_RPD_LEFT: left}
+            if name in self._provider:
+                remaining, limit = self._provider[name]
+                limits[name][protocol.LIMIT_PROVIDER_LEFT] = remaining
+                limits[name][protocol.LIMIT_PROVIDER_LIMIT] = limit
         body: dict[str, Any] = {
             protocol.FIELD_MODELS: models,
             protocol.FIELD_LIMITS: limits,
@@ -116,6 +120,14 @@ class Gateway:
                 "requests": used_today,
             }
         return body
+
+    async def refresh_provider_quota(self) -> None:
+        for name, backend in self.backends.items():
+            if not backend.spec.provider_quota:
+                continue
+            quota = await backend.provider_quota()
+            if quota is not None:
+                self._provider[name] = quota
 
     def note_shared(self, reply: dict[str, Any] | None) -> None:
         if not reply:
