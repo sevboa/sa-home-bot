@@ -18,6 +18,7 @@ from sa_home_bot.devlab.executor.agent_worker import (
     AgentState,
     AgentWorker,
     ParkedEntry,
+    rules_hint,
 )
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.routing import CatalogEntry
@@ -303,3 +304,8 @@ async def test_huge_rules_file_fails_before_model_with_its_name(env):
     failed = await env.store.queue.last_message(job_id, protocol.MSG_FAILED)
     assert "RULES.md" in failed.payload[protocol.PAYLOAD_TEXT]
     assert not model.seen
+
+
+def test_rules_hint_empty_and_filled():
+    assert rules_hint([]) == ""
+    assert "RULES.md: 5 симв." in rules_hint([("RULES.md", "abcde")])

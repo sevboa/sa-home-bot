@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import time
 
+from sa_home_bot.devlab.agent import context
 from sa_home_bot.devlab.agent.context import (
     DROPPED_STEPS_PATTERN,
     FOLDED_REPLY_PREFIX,
@@ -10,10 +12,10 @@ from sa_home_bot.devlab.agent.context import (
     estimate_tokens,
     fold_old_results,
     pinned_report,
+    shrink_arguments,
     task_text,
 )
 from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
-from sa_home_bot.devlab.executor.agent_worker import rules_hint
 
 BUDGET = 13000
 
@@ -138,9 +140,67 @@ def test_thousand_steps_fold_fast():
     assert_valid(messages)
 
 
-def test_rules_hint_empty_and_filled():
-    assert rules_hint([]) == ""
-    assert "RULES.md: 5 симв." in rules_hint([("RULES.md", "abcde")])
+def test_shrink_arguments_keeps_short_fields_and_stays_valid_json():
+    raw = json.dumps({"path": "src/a.py", "content": "z" * 5000, "old": "o" * 400, "n": 3})
+    parsed = json.loads(shrink_arguments(raw))
+    assert parsed["path"] == "src/a.py" and parsed["n"] == 3
+    assert parsed["content"].startswith("z" * 200 + "…")
+    assert "[обрезано 5000 симв.]" in parsed["content"]
+    assert "[обрезано 400 симв.]" in parsed["old"]
+    again = shrink_arguments(json.dumps(parsed))
+    assert json.loads(again) == parsed
+
+
+def test_shrink_arguments_of_broken_json_is_valid_json():
+    parsed = json.loads(shrink_arguments("{" + "q" * 5000))
+    assert parsed["симв."] == 5001
+    assert parsed["обрезано"].endswith("…")
+
+
+def test_last_unit_trim_stops_as_soon_as_it_fits():
+    messages = dialog(0)
+    unit = pair(1, 100)
+    unit[0]["tool_calls"][0]["function"]["arguments"] = json.dumps(
+        {"path": "p", "content": "y" * 9000}
+    )
+    unit[0]["content"] = "р" * 2500
+    messages += unit
+    fold_old_results(messages, 3000, 1)
+    arguments = json.loads(messages[-2]["tool_calls"][0]["function"]["arguments"])
+    assert "обрезано" in arguments["content"]
+    assert messages[-2]["content"] == "р" * 2500
+
+
+def test_only_owner_answers_before_last_unit_trims_last():
+    messages = dialog(0)
+    for _ in range(5):
+        messages.append({"role": "user", "content": ANSWER_PREFIX + "а" * 800})
+    messages += pair(1, 100)
+    messages[-2]["tool_calls"][0]["function"]["arguments"] = json.dumps({"content": "y" * 20000})
+    assert fold_old_results(messages, 2500, 1) <= 2500
+    assert_valid(messages)
+    assert sum(1 for m in messages if str(m["content"]).startswith(ANSWER_PREFIX)) == 5
+    assert (
+        "обрезано" in json.loads(messages[-2]["tool_calls"][0]["function"]["arguments"])["content"]
+    )
+
+
+def test_window_total_matches_honest_estimate(monkeypatch):
+    seen = []
+
+    class Spy(context._Window):
+        def __init__(self, *args):
+            super().__init__(*args)
+            seen.append(self)
+
+    monkeypatch.setattr(context, "_Window", Spy)
+    for budget in (9000, 5000, 2500, 1200):
+        messages = dialog(40, output=4000, reply="р" * 900)
+        tokens = fold_old_results(messages, budget, 3)
+        window = seen[-1]
+        assert tokens == estimate_tokens(messages)
+        assert window.total == sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+        assert window.tokens() == tokens
 
 
 def test_folding_is_idempotent_and_noop_when_fits():

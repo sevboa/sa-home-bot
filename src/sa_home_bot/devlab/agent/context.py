@@ -9,7 +9,9 @@ from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
 CHARS_PER_TOKEN = 3
 FOLDED_OUTPUT_PREFIX = "[вывод свёрнут"
 FOLDED_OUTPUT = FOLDED_OUTPUT_PREFIX + ": {size} симв.]"
-FOLDED_ARGUMENTS = '{{"свёрнуто": {size}}}'
+ARGUMENT_KEEP_CHARS = 200
+ARGUMENT_LONG_CHARS = 300
+CUT_ARGUMENT = "{head}… [обрезано {size} симв.]"
 FOLD_ARGUMENTS_MIN_CHARS = 400
 PINNED_MESSAGES = 2
 RECENT_OUTPUT_CHARS = 2000
@@ -74,13 +76,36 @@ def _fold_tool_outputs(window: _Window, boundary: int) -> bool:
     return False
 
 
+def _cut_value(value: str) -> str:
+    return CUT_ARGUMENT.format(head=value[:ARGUMENT_KEEP_CHARS], size=len(value))
+
+
+def shrink_arguments(arguments: str) -> str:
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        return json.dumps(
+            {"обрезано": arguments[:ARGUMENT_KEEP_CHARS] + "…", "симв.": len(arguments)},
+            ensure_ascii=False,
+        )
+    shrunk = {
+        key: _cut_value(value)
+        if isinstance(value, str) and len(value) > ARGUMENT_LONG_CHARS
+        else value
+        for key, value in parsed.items()
+    }
+    return json.dumps(shrunk, ensure_ascii=False)
+
+
 def _fold_arguments(window: _Window, boundary: int) -> bool:
     for index in range(PINNED_MESSAGES, boundary):
         touched = False
         for call in window.messages[index].get("tool_calls") or ():
             function = call["function"]
             if len(function["arguments"]) >= FOLD_ARGUMENTS_MIN_CHARS:
-                function["arguments"] = FOLDED_ARGUMENTS.format(size=len(function["arguments"]))
+                function["arguments"] = shrink_arguments(function["arguments"])
                 touched = True
         if touched:
             window.touch(index)
@@ -193,11 +218,16 @@ def _trim_last_unit(window: _Window) -> bool:
         for call in message.get("tool_calls") or ():
             function = call["function"]
             if len(function["arguments"]) > RECENT_OUTPUT_CHARS:
-                function["arguments"] = FOLDED_ARGUMENTS.format(size=len(function["arguments"]))
+                function["arguments"] = shrink_arguments(function["arguments"])
+                window.touch(index)
+                if window.fits():
+                    return True
         if message["role"] != "tool" and _truncatable(message.get("content")):
             message["content"] = _truncate(message["content"])
-        window.touch(index)
-    return window.fits()
+            window.touch(index)
+            if window.fits():
+                return True
+    return False
 
 
 def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_recent: int) -> int:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import pytest
@@ -202,7 +203,9 @@ async def test_large_write_arguments_are_folded(tmp_path):
     result = await loop.run("s", "t")
     assert result.status is AgentStatus.FINISHED
     folded = model.seen[-1][2]["tool_calls"][0]["function"]["arguments"]
-    assert "свёрнуто" in folded
+    parsed = json.loads(folded)
+    assert parsed["path"] == "src/gen.py"
+    assert "обрезано" in parsed["content"]
 
 
 async def test_context_overflow_when_nothing_to_fold(tmp_path):
