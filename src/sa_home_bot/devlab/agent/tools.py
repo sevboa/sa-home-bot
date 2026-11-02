@@ -153,6 +153,23 @@ def _argument(args: dict[str, Any], key: str, kind: type, default: Any = None) -
     return value
 
 
+XDIST_VALUE_FLAGS = frozenset({"-n", "--numprocesses"})
+XDIST_INLINE = re.compile(r"^(-n.+|--numprocesses=.+)$")
+
+
+def without_xdist(argv: list[str]) -> list[str]:
+    kept: list[str] = []
+    skip_value = False
+    for arg in argv:
+        if skip_value:
+            skip_value = False
+        elif arg in XDIST_VALUE_FLAGS:
+            skip_value = True
+        elif not XDIST_INLINE.match(arg):
+            kept.append(arg)
+    return kept
+
+
 class ToolBox:
     def __init__(self, sandbox: Sandbox, spec: AgentSpec) -> None:
         self._sandbox = sandbox
@@ -291,19 +308,7 @@ class ToolBox:
         paths = [safe_relative(t) for t in tokens]
         argv = [*self._spec.test_argv, *paths]
         if paths:
-            filtered = []
-            skip_next = False
-            for arg in argv:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if arg == "-n":
-                    skip_next = True
-                    continue
-                if arg.startswith("-n=") or arg == "-nauto":
-                    continue
-                filtered.append(arg)
-            argv = filtered
+            argv = without_xdist(argv)
             timeout_s = self._spec.narrow_test_timeout_s
         else:
             timeout_s = self._spec.test_timeout_s

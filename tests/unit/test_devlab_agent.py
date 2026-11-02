@@ -489,17 +489,26 @@ async def test_run_tests_paths_narrow_the_run(tmp_path):
     assert narrow.green is True
 
 
-async def test_run_tests_narrow_uses_narrow_timeout_and_strips_xdist(tmp_path):
+@pytest.mark.parametrize(
+    "xdist",
+    [
+        ("-n", "auto"),
+        ("-n=auto",),
+        ("-nauto",),
+        ("-n4",),
+        ("--numprocesses", "4"),
+        ("--numprocesses=4",),
+    ],
+)
+async def test_run_tests_narrow_strips_xdist(tmp_path, xdist):
     box = toolbox(
         tmp_path,
-        test_argv=("echo", "pytest", "-q", "-n", "auto"),
+        test_argv=("echo", "pytest", "-q", *xdist, "-x"),
         test_timeout_s=3600.0,
         narrow_test_timeout_s=120.0,
     )
     narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py"})
-    assert "pytest -q tests/unit/a.py" in narrow.text
-    assert "-n" not in narrow.text
-    assert "auto" not in narrow.text
+    assert "pytest -q -x tests/unit/a.py" in narrow.text
 
 
 async def test_run_tests_full_uses_test_timeout_and_keeps_argv(tmp_path):
@@ -511,30 +520,6 @@ async def test_run_tests_full_uses_test_timeout_and_keeps_argv(tmp_path):
     )
     full = await box.call(TOOL_RUN_TESTS, {})
     assert "pytest -q -n auto" in full.text
-
-
-async def test_run_tests_narrow_strips_n_equals_auto(tmp_path):
-    box = toolbox(
-        tmp_path,
-        test_argv=("echo", "pytest", "-q", "-n=auto"),
-        test_timeout_s=3600.0,
-        narrow_test_timeout_s=120.0,
-    )
-    narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py"})
-    assert "pytest -q tests/unit/a.py" in narrow.text
-    assert "-n=auto" not in narrow.text
-
-
-async def test_run_tests_narrow_strips_nauto(tmp_path):
-    box = toolbox(
-        tmp_path,
-        test_argv=("echo", "pytest", "-q", "-nauto"),
-        test_timeout_s=3600.0,
-        narrow_test_timeout_s=120.0,
-    )
-    narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py"})
-    assert "pytest -q tests/unit/a.py" in narrow.text
-    assert "-nauto" not in narrow.text
 
 
 async def test_run_tests_paths_outside_root_rejected(tmp_path):

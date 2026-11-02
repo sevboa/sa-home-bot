@@ -5,12 +5,12 @@ from dataclasses import dataclass
 
 from sa_home_bot.devlab.executor.spec import (
     DEFAULT_COMMAND_TIMEOUT_S,
+    DEFAULT_NARROW_TEST_TIMEOUT_S,
     DEFAULT_OUTPUT_CHARS,
     ProjectSpec,
 )
 
 DEFAULT_TEST_TIMEOUT_S = 3600.0
-DEFAULT_NARROW_TEST_TIMEOUT_S = 300.0
 
 
 @dataclass(frozen=True)

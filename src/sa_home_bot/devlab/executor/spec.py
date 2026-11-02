@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 SPEC_FILE = ".devlab.toml"
 DEFAULT_TIMEOUT_S = 1800.0
 DEFAULT_COMMAND_TIMEOUT_S = 300.0
+DEFAULT_NARROW_TEST_TIMEOUT_S = 300.0
 DEFAULT_OUTPUT_CHARS = 6000
 
 
@@ -39,7 +40,7 @@ class AgentSection(BaseModel):
     diff_prefixes: list[str] = Field(default_factory=list)
     allow_remote_models: bool = False
     command_timeout_s: float = Field(default=DEFAULT_COMMAND_TIMEOUT_S, gt=0)
-    narrow_test_timeout_s: float = Field(default=300.0, gt=0)
+    narrow_test_timeout_s: float = Field(default=DEFAULT_NARROW_TEST_TIMEOUT_S, gt=0)
     output_chars: int = Field(default=DEFAULT_OUTPUT_CHARS, gt=0)
 
 
