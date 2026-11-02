@@ -54,7 +54,9 @@ async def run_models(settings: Settings) -> None:
         )
     host = cfg.bind_host or await tailscale_address()
     control = SliceControl()
-    backends = {name: build_backend(name, spec, cfg, control) for name, spec in cfg.entries.items()}
+    backends = {
+        name: build_backend(name, spec, cfg, control) for name, spec in cfg.entries.items()
+    }
     local = any(spec.kind == protocol.MODEL_KIND_LLAMACPP for spec in cfg.entries.values())
     gate = NeighborGate(
         freeze=control.freeze,
@@ -62,7 +64,9 @@ async def run_models(settings: Settings) -> None:
         freeze_max_s=cfg.freeze_max_s,
         on_night=control.set_night,
     )
-    neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket) if local else None
+    neighbor = (
+        start_following(gate, cfg.neighbor_socket or settings.llm.socket) if local else None
+    )
     windows = {name: RateWindow(spec.rpm) for name, spec in cfg.entries.items()}
     ledger = Ledger(cfg.data_dir)
     await ledger.open()
@@ -83,9 +87,9 @@ async def run_models(settings: Settings) -> None:
     finally:
         beat.cancel()
         quota.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await beat
-            await quota
+        for task in (beat, quota):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if neighbor is not None:
             await stop_following(neighbor, gate)
         log.info("Останов службы devlab_models...")

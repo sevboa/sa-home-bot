@@ -93,7 +93,9 @@ class OpenAiBackend(HttpBackend):
         headers = {"Authorization": BEARER + self.spec.api_key}
         timeout = aiohttp.ClientTimeout(total=10)
         try:
-            async with self._session.get(url, headers=headers, timeout=timeout) as resp:
+            async with self._session.get(
+                url, headers=headers, timeout=timeout, proxy=self.spec.proxy or None
+            ) as resp:
                 if resp.status != 200:
                     log.warning("provider_quota: HTTP %s для %s", resp.status, self.name)
                     return None
