@@ -504,6 +504,15 @@ class VpnCheckConfig(BaseModel):
     check_timeout_s: float = Field(default=8.0, gt=0)
 
 
+class VpnSeriesConfig(BaseModel):
+    url: str = "https://speed.cloudflare.com/__down?bytes=200000000"
+    duration_s: float = Field(default=150.0, gt=0)
+    burst_connections: int = Field(default=6, ge=1)
+    freeze_idle_s: float = Field(default=10.0, gt=0)
+    min_kbps: float = Field(default=64.0, ge=0)
+    tick_s: float = Field(default=1.0, gt=0)
+
+
 class WeatherConfig(BaseModel):
     city: str = ""
 
@@ -664,6 +673,7 @@ class Settings(BaseSettings):
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)
+    vpn_series: VpnSeriesConfig = Field(default_factory=VpnSeriesConfig)
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)

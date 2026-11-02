@@ -22,3 +22,6 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 
 ## Серийная проверка: ядро замера (Этап 63.1.1, 2026-11-03)
 `vpn_series/measure.py::classify` — чистая функция над рядом samples `(t, bytes)` скачивания через туннель слота; `vpn_check` не затронут. Результат `SeriesResult`: `bytes_total`, `duration_s`, `stalled_at_bytes`, `max_idle_s`, `kbps`, `verdict`. Вердикты: `cut` — curl exit 18/56 при 10–30 КБ полученных (обрыв TCP после 15–20 КБ, признак ТСПУ); `error` — нет ни байта или иной ненулевой exit (0 и 28 терпимы: 28 — таймаут `--max-time` при заморозке); `freeze` — после первых байт поток стоял ≥ `freeze_idle_s`; `slow` — скорость ниже `min_kbps` (кбит/с); иначе `ok`. Простой считается от последнего прироста байт, до первого байта не учитывается.
+
+## Серийная проверка: раннер (Этап 63.1.2, 2026-11-03)
+`vpn_series/runner.py` — сборка `curl` argv (netns exec, socks5 для reality), стриминг stdout с тиками `tick_s` и дедлайном `duration_s + 5`, агрегация в `classify`. `run_single` — одиночный прогон; `run_burst` — `burst_connections` параллельных прогонов через `asyncio.gather`. Конфиг `[vpn_series]`: `url` (файл 200 МБ), `duration_s`, `burst_connections`, `freeze_idle_s`, `min_kbps`, `tick_s`. Дефолты подбираны под 2–3 минуты замера и 6 параллельных соединений.
