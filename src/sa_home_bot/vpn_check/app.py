@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from sa_home_bot.bot.service_link import ServiceLink
@@ -24,10 +25,18 @@ async def run_vpn_check(settings: Settings) -> None:
     await server.start()
     log.info("Служба vpn_check запущена: сокет %s", settings.vpn_check.socket)
 
+    series_task: asyncio.Task | None = None
+    if settings.vpn_series.enabled:
+        series_task = asyncio.create_task(service.series_loop(), name="vpn-series-loop")
+
     try:
         await lifespan.wait()
     finally:
         log.info("Останов службы vpn_check...")
+        if series_task is not None:
+            series_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await series_task
         await server.stop()
         await node_link.stop()
         log.info("Служба vpn_check остановлена чисто")
