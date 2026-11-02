@@ -116,6 +116,7 @@ class Segment:
     tokens_out: int = 0
     asked: tuple[str, str | None] | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
+    skipped: int = 0
 
 
 class AgentLoop:
@@ -159,6 +160,7 @@ class AgentLoop:
             folded=folded,
             text=reply.content[:TRACE_TEXT_CHARS] if not reply.tool_calls else "",
             calls=seg.calls,
+            skipped=seg.skipped,
         )
 
     def _result(self, status: AgentStatus, seg: Segment, **fields: Any) -> AgentResult:
@@ -236,6 +238,7 @@ class AgentLoop:
                 )
             seg.steps += 1
             seg.calls = []
+            seg.skipped = 0
             try:
                 reply = await self._model.complete(messages, self._tools.definitions)
             except PaidFreeModelError as exc:
@@ -276,6 +279,7 @@ class AgentLoop:
             self._note_call(call, text, seg)
             if seg.asked is not None:
                 seg.asked = (seg.asked[0], call.id)
+                seg.skipped = len(calls) - index - 1
                 for skipped in calls[index + 1 :]:
                     seg.messages.append(
                         {"role": "tool", "tool_call_id": skipped.id, "content": ASK_SKIPPED}

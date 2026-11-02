@@ -368,6 +368,26 @@ def test_step_trace_keeps_tail_within_limit(tmp_path):
     assert data is not None and len(data) <= 2000
     lines = data.decode().splitlines()
     assert json.loads(lines[-1])["step"] == 199
-    assert "x" not in data.decode()
+    assert "xxx" not in data.decode()
     assert all(json.loads(line) for line in lines)
     assert len(trace.tail(100) or b"") <= 100
+
+
+def test_step_trace_scrubs_values_before_serialization(tmp_path):
+    secret = 'pa"ss\\word'
+    trace = StepTrace(tmp_path / "steps.jsonl", scrub=lambda text: text.replace(secret, "***"))
+    trace.record({"calls": [{"args": {"command": f"echo {secret}"}}], "n": 1})
+    text = (tmp_path / "steps.jsonl").read_text()
+    assert "pa" not in text.replace("***", "")
+    assert json.loads(text)["calls"][0]["args"]["command"] == "echo ***"
+
+
+def test_step_trace_oversized_entry_is_shortened_not_dropped(tmp_path):
+    trace = StepTrace(tmp_path / "steps.jsonl", max_bytes=1000)
+    trace.record({"step": 1, "text": "я" * 3000, "calls": [{"name": "a"}, {"name": "b"}]})
+    path = tmp_path / "steps.jsonl"
+    assert 0 < path.stat().st_size <= 500
+    entry = json.loads(path.read_text())
+    assert entry["step"] == 1
+    assert entry["calls_dropped"] == 2
+    assert "calls" not in entry

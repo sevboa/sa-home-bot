@@ -548,3 +548,29 @@ async def test_trace_marks_rejected_finish_and_crane(tmp_path):
     assert [c["name"] for c in rejected] == [TOOL_FINISH]
     assert entries[-1]["event"] == "end"
     assert entries[-1]["crane"] == "steps"
+
+
+async def test_trace_counts_calls_skipped_after_ask_owner(tmp_path):
+    entries = []
+    reply = ModelReply(
+        "",
+        (
+            ToolCall("a1", "ask_owner", json.dumps({"question": "как?"})),
+            ToolCall("a2", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})),
+            ToolCall("a3", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})),
+        ),
+    )
+    loop, _ = make_loop(tmp_path, ScriptedChatModel(reply), trace=entries.append)
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.ASKED
+    step = next(entry for entry in entries if "step" in entry)
+    assert step["skipped"] == 2
+    assert len(step["calls"]) == 1
+
+
+async def test_trace_skipped_is_zero_by_default(tmp_path):
+    entries = []
+    model = ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, summary="ok"))
+    loop, _ = make_loop(tmp_path, model, trace=entries.append)
+    await loop.run("правила", "задача")
+    assert [e["skipped"] for e in entries if "step" in e] == [0, 0]
