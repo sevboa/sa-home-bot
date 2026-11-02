@@ -109,6 +109,7 @@ async def test_series_unknown_mode_returns_error(monkeypatch):
 
 async def test_series_self_check_skipped(monkeypatch):
     import socket
+
     monkeypatch.setattr(socket, "gethostname", lambda: "wooster")
     service = _service(_FakeNodeLink())
     result = await service.run_command("series", {"server": "wooster", "mode": "single"})
@@ -142,6 +143,7 @@ async def test_series_single_tunnel_up_down_once(monkeypatch):
     async def fake_run_single(slot, cfg, *, spawn=None):
         series_results.append("single")
         from sa_home_bot.vpn_series.measure import SeriesResult
+
         return SeriesResult(
             bytes_total=1000000,
             duration_s=1.0,
@@ -192,6 +194,7 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
         return Path("/fake/path.json")
 
     import sa_home_bot.node.vpn_probe_state as vpn_probe_state_module
+
     monkeypatch.setattr(vpn_probe_state_module, "reality_conf_path", fake_reality_conf_path)
 
     def fake_read_text(self):
@@ -206,6 +209,7 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
 
     async def fake_run_single(slot, cfg, *, spawn=None):
         from sa_home_bot.vpn_series.measure import SeriesResult
+
         return SeriesResult(
             bytes_total=1000000,
             duration_s=1.0,
@@ -214,6 +218,7 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
             kbps=8000.0,
             verdict="ok",
         )
+
     monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
 
     service = _service(_FakeNodeLink(), slots=[_reality_slot()])
@@ -257,6 +262,7 @@ async def test_series_lock_prevents_concurrent_check_and_series(monkeypatch):
     async def fake_run_single(slot, cfg, *, spawn=None):
         await asyncio.sleep(0.01)
         from sa_home_bot.vpn_series.measure import SeriesResult
+
         return SeriesResult(
             bytes_total=1000000,
             duration_s=1.0,
@@ -275,7 +281,9 @@ async def test_series_lock_prevents_concurrent_check_and_series(monkeypatch):
     service = _service(_FakeNodeLink())
 
     async def do_check():
-        return await service.run_command("check", {"server": PROBE_SERVER, "targets": ["https://1.1.1.1"]})
+        return await service.run_command(
+            "check", {"server": PROBE_SERVER, "targets": ["https://1.1.1.1"]}
+        )
 
     async def do_series():
         return await service.run_command("series", {"server": PROBE_SERVER, "mode": "single"})
@@ -299,6 +307,7 @@ async def test_series_status_returns_last_result(monkeypatch):
 
     async def fake_run_single(slot, cfg, *, spawn=None):
         from sa_home_bot.vpn_series.measure import SeriesResult
+
         return SeriesResult(
             bytes_total=1000000,
             duration_s=1.0,
