@@ -55,6 +55,9 @@ class ModelBackend(abc.ABC):
     async def close(self) -> None:
         return None
 
+    async def provider_quota(self) -> tuple[int, int] | None:
+        return None
+
 
 class HttpBackend(ModelBackend):
     def __init__(self, name: str, spec: DevlabModelConfig) -> None:
