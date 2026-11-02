@@ -34,6 +34,7 @@ JOBS_DIR = "jobs"
 PYTEST_WORD = "pytest"
 JUNIT_FLAG = f"--junitxml={JUNIT_FILE}"
 FAILED_TEXT_CHARS = 1000
+ORPHAN_FAILED_TEXT = "исполнитель перезапущен во время прогона"
 
 
 class ExecutorState(BaseModel):
@@ -41,6 +42,7 @@ class ExecutorState(BaseModel):
     current: str | None = None
     project: str | None = None
     ref: str | None = None
+    pending_failed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,33 +185,41 @@ class TestWorker(WorkerLoops):
         save_model(self._state, self._state_path)
 
     async def recover(self) -> None:
+        await self._settle_orphan()
+
+    async def _settle_orphan(self) -> bool:
         orphan = self._state.current
         if orphan is None:
-            return
-        outcome = await self._requeue_orphan(orphan)
+            return True
+        pending = self._state.pending_failed
+        if pending is not None:
+            outcome, final = await self._send_orphan(orphan, [(protocol.MSG_FAILED, pending)])
+        else:
+            outcome, final = await self._send_orphan(
+                orphan,
+                [(protocol.MSG_REQUEUE, ""), (protocol.MSG_FAILED, ORPHAN_FAILED_TEXT)],
+            )
+        if not final:
+            return False
         if outcome == protocol.MSG_FAILED:
             await self._drop_orphan_branch()
-        self._save(current=None, project=None, ref=None)
+        self._save(current=None, project=None, ref=None, pending_failed=None)
+        return True
 
-    async def _requeue_orphan(self, orphan: str) -> str | None:
-        try:
-            return await self._hub.post(orphan, protocol.MSG_REQUEUE, {})
-        except HubRequestError as exc:
-            if not exc.permanent:
+    async def _send_orphan(
+        self, orphan: str, attempts: list[tuple[str, str]]
+    ) -> tuple[str | None, bool]:
+        for kind, text in attempts:
+            payload = {protocol.PAYLOAD_TEXT: text} if text else {}
+            try:
+                return await self._hub.post(orphan, kind, payload), True
+            except HubRequestError as exc:
                 log.warning(
-                    "Осиротевшее задание %s не возвращено: %s", orphan, self.scrub(str(exc))
+                    "Осиротевшее задание %s: %s не принят: %s", orphan, kind, self.scrub(str(exc))
                 )
-                return None
-            log.warning("Хаб не принял возврат %s: %s", orphan, self.scrub(str(exc)))
-        try:
-            return await self._hub.post(
-                orphan,
-                protocol.MSG_FAILED,
-                {protocol.PAYLOAD_TEXT: "исполнитель перезапущен во время прогона"},
-            )
-        except HubRequestError as exc:
-            log.warning("Осиротевшее задание %s не закрыто: %s", orphan, self.scrub(str(exc)))
-            return None
+                if not exc.permanent:
+                    return None, False
+        return None, True
 
     async def _drop_orphan_branch(self) -> None:
         project, ref = self._state.project, self._state.ref
@@ -232,6 +242,8 @@ class TestWorker(WorkerLoops):
             self._save(cursor=cursor)
 
     async def claim_once(self) -> bool:
+        if self._state.current is not None and not await self._settle_orphan():
+            return False
         job = await self._hub.claim([protocol.JOB_KIND_TEST])
         if job is None:
             return False
@@ -257,6 +269,8 @@ class TestWorker(WorkerLoops):
                 self._delivered = await self._post_quietly(
                     job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
                 )
+                if not self._delivered:
+                    self._save(pending_failed=text)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
             if self._delivered:
@@ -270,7 +284,7 @@ class TestWorker(WorkerLoops):
             self._current = None
             self._busy.finished(job.id)
             if self._delivered:
-                self._save(current=None, project=None, ref=None)
+                self._save(current=None, project=None, ref=None, pending_failed=None)
 
     async def _drop_branch(self, mirror: ProjectMirror | None, ref: str) -> None:
         if mirror is None or not ref.startswith(protocol.TEST_BRANCH_PREFIX):

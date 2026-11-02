@@ -646,3 +646,19 @@ async def test_requeue_rejected_when_not_running(queue):
     queued = await submit_test(queue)
     with pytest.raises(HubError):
         await queue.post_from_executor(queued.id, S.MSG_REQUEUE)
+
+
+async def test_requeue_rejected_for_foreign_executor(queue):
+    job = await claimed_test(queue)
+    with pytest.raises(HubError):
+        await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor="чужой")
+    assert (await queue.get_job(job.id)).status == S.STATUS_RUNNING
+
+
+async def test_resume_resets_requeue_attempts(queue):
+    job = await claimed_test(queue)
+    await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor=EXECUTOR)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(job.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "x"})
+    await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME, {})
+    assert S.PARAM_ATTEMPTS not in (await queue.get_job(job.id)).params

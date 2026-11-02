@@ -376,10 +376,11 @@ async def test_recover_falls_back_to_failed_for_old_hub(env, monkeypatch):
     assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
 
 
-async def test_recover_keeps_branch_on_network_error(env, monkeypatch):
+async def test_recover_network_error_keeps_current_and_retries(env, monkeypatch):
     ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/12"
-    job_id, _ = await orphan_job(env, "exec", ref)
+    job_id, state_path = await orphan_job(env, "exec", ref)
     restarted = env.worker(FakeTestRunner())
+    original = restarted._hub.post
 
     async def broken_post(job, kind, payload):
         raise HubRequestError("сеть")
@@ -387,6 +388,26 @@ async def test_recover_keeps_branch_on_network_error(env, monkeypatch):
     monkeypatch.setattr(restarted._hub, "post", broken_post)
     await restarted.recover()
     assert await env.status(job_id) == protocol.STATUS_RUNNING
+    assert json.loads(state_path.read_text())["current"] == job_id
+    assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+    monkeypatch.setattr(restarted._hub, "post", original)
+    await restarted.recover()
+    assert await env.status(job_id) == protocol.STATUS_QUEUED
+    assert json.loads(state_path.read_text())["current"] is None
+
+
+async def test_both_messages_refused_clears_current_and_keeps_branch(env, monkeypatch):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/14"
+    job_id, state_path = await orphan_job(env, "exec", ref)
+    restarted = env.worker(FakeTestRunner())
+
+    async def refusing_post(job, kind, payload):
+        raise HubRequestError("отказ", 400)
+
+    monkeypatch.setattr(restarted._hub, "post", refusing_post)
+    await restarted.recover()
+    assert json.loads(state_path.read_text())["current"] is None
     assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
 
 
@@ -471,3 +492,34 @@ async def test_heartbeat_takes_hub_queue_into_busy(env):
     await env.store.queue.submit(CLIENT, PROJECT, "model", "task")
     await worker.beat()
     assert worker._busy.busy()
+
+
+async def test_undelivered_failed_blocks_next_claim_until_delivered(env, monkeypatch):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/13"
+    await env.push(ref, {"a.txt": b"x"})
+    first = await env.submit(ref)
+    worker = env.worker(FakeTestRunner())
+    original = worker._hub.post
+    broken = {"on": True}
+
+    async def flaky_post(job, kind, payload):
+        if broken["on"] and kind == protocol.MSG_FAILED:
+            raise HubRequestError("сеть")
+        return await original(job, kind, payload)
+
+    monkeypatch.setattr(worker._hub, "post", flaky_post)
+    assert await worker.claim_once()
+    state_path = env.tmp_path / "exec" / STATE_FILE
+    saved = json.loads(state_path.read_text())
+    assert saved["current"] == first and saved["pending_failed"]
+
+    second = await env.submit(ref)
+    assert not await worker.claim_once()
+    assert await env.status(second) == protocol.STATUS_QUEUED
+    assert await env.status(first) == protocol.STATUS_RUNNING
+
+    broken["on"] = False
+    assert await worker.claim_once()
+    assert await env.status(first) == protocol.STATUS_FAILED
+    saved = json.loads(state_path.read_text())
+    assert saved["pending_failed"] is None and saved["current"] is None

@@ -454,7 +454,11 @@ class HubQueue:
                 await self._set_status(conn, job, protocol.STATUS_QUEUED)
                 text = payload.get(protocol.PAYLOAD_TEXT)
                 remarks = text.strip() if isinstance(text, str) else ""
-                params = {k: v for k, v in job.params.items() if k != protocol.PARAM_REMARKS}
+                params = {
+                    k: v
+                    for k, v in job.params.items()
+                    if k not in (protocol.PARAM_REMARKS, protocol.PARAM_ATTEMPTS)
+                }
                 if remarks:
                     params[protocol.PARAM_REMARKS] = remarks
                 await conn.execute(
