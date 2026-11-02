@@ -212,6 +212,28 @@ async def test_context_overflow_when_nothing_to_fold(tmp_path):
     result = await loop.run("s", "я" * 20000)
     assert result.status is AgentStatus.CONTEXT_OVERFLOW
     assert result.steps == 0
+    assert "системное сообщение 1 симв." in result.reason
+    assert "задание 20000 симв." in result.reason
+    assert "[agent] rules" in result.reason
+
+
+async def test_long_tail_of_big_outputs_converges(tmp_path):
+    spec = AgentSpec(
+        test_argv=GREEN_TEST,
+        diff_prefixes=("src/",),
+        allowed_commands=(sys.executable,),
+        output_chars=6000,
+    )
+    command = f"{sys.executable} -c \"print('x'*6000)\""
+    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=command) for i in range(12)]
+    model = ScriptedChatModel(*runs, edit("e"), tool_reply(TOOL_FINISH, "f", summary="ok"))
+    limits = AgentLimits(context_tokens=4000, reply_tokens=300, keep_recent=4)
+    loop, _ = make_loop(tmp_path, model, spec=spec, limits=limits)
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.FINISHED
+    last = model.seen[-1]
+    ids = {c["id"] for m in last if m["role"] == "assistant" for c in m.get("tool_calls") or ()}
+    assert all(m["tool_call_id"] in ids for m in last if m["role"] == "tool")
 
 
 async def test_forbidden_paths_and_command_whitelist(tmp_path):

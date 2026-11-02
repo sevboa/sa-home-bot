@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from sa_home_bot.devlab.agent.context import estimate_tokens, fold_old_results
+from sa_home_bot.devlab.agent.context import estimate_tokens, fold_old_results, pinned_report
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.model import ChatModel, ModelError, PaidFreeModelError, ToolCall
@@ -36,6 +36,10 @@ STEP_ACCEPTED = "шаг принят"
 ASK_SKIPPED = "не выполнено: задан вопрос владельцу"
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
+)
+OVERFLOW_REASON = (
+    "{pinned}; бюджет диалога {budget} ток. при окне {window} ток.: "
+    "сократи [agent] rules или task.md"
 )
 
 
@@ -111,7 +115,9 @@ class AgentLoop:
         spend: SpendMeter | None = None,
         tokens: TokenMeter | None = None,
         clock: Callable[[], float] = time.monotonic,
+        overflow_hint: str = "",
     ) -> None:
+        self._overflow_hint = overflow_hint
         self._model = model
         self._tools = tools
         self._guard = guard
@@ -177,7 +183,12 @@ class AgentLoop:
                 return self._result(
                     AgentStatus.CONTEXT_OVERFLOW,
                     seg,
-                    reason=f"окно {limits.context_tokens} ток. не вмещает даже свёрнутый диалог",
+                    reason=OVERFLOW_REASON.format(
+                        pinned=pinned_report(messages),
+                        budget=budget,
+                        window=limits.context_tokens,
+                    )
+                    + self._overflow_hint,
                 )
             seg.steps += 1
             try:

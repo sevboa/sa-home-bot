@@ -281,3 +281,25 @@ async def test_held_jobs_include_resumed_job(env):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(state.model_dump_json())
     assert make_worker(env, ScriptedChatModel()).held_jobs == [job.id, "p-1"]
+
+
+async def test_huge_rules_file_fails_before_model_with_its_name(env):
+    files = {**BASE_FILES, "RULES.md": ("правило\n" * 20000).encode()}
+    await env.push(BASE, files)
+    data = await env.mcp.call(
+        protocol.TOOL_SUBMIT,
+        project=PROJECT,
+        model=MODEL,
+        task="# сделай out.txt",
+        base_branch=BASE,
+    )
+    job_id = data["job"]["id"]
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(env, model)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_FAILED
+    failed = await env.store.queue.last_message(job_id, protocol.MSG_FAILED)
+    assert "RULES.md" in failed.payload[protocol.PAYLOAD_TEXT]
+    assert not model.seen

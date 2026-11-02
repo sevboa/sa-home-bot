@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, Field
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent.context import estimate_tokens
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus, Crane
@@ -68,6 +69,15 @@ FAILURE_PREFIX = {
 
 
 CATALOG_WINDOW_SHARE = 0.9
+
+
+def rules_hint(rules: list[tuple[str, str]]) -> str:
+    if not rules:
+        return ""
+    sizes = ", ".join(
+        f"{name}: {len(text)} симв. (~{estimate_tokens(text)} ток.)" for name, text in rules
+    )
+    return f"; файлы правил: {sizes}"
 
 
 def window_tokens(entries: list[CatalogEntry], local_cap: int) -> int:
@@ -414,6 +424,7 @@ class AgentWorker(WorkerLoops):
         await (sandbox.resume() if held else sandbox.start())
         spend = self._spend_of(job)
         entries = await self._catalog.entries(job.model)
+        rules = await self._rules(run, project, repo.base)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
@@ -423,8 +434,9 @@ class AgentWorker(WorkerLoops):
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
             tokens=spend.total_tokens,
+            overflow_hint=rules_hint(rules),
         )
-        system = build_system(await self._rules(run, project, repo.base))
+        system = build_system(rules)
         dialog = self._answered_dialog(run)
         if dialog is not None:
             return await loop.run(system, job.task, resume=dialog)
@@ -481,7 +493,9 @@ class AgentWorker(WorkerLoops):
         for name in project.agent.rules:
             data = await run.mirror.read_file(base, name)
             if data is not None:
-                rules.append((name, data.decode("utf-8", errors="replace")))
+                text = data.decode("utf-8", errors="replace")
+                log.info("Файл правил %s: %d симв.", name, len(text))
+                rules.append((name, text))
         return rules
 
     async def _conclude(self, run: JobRun, result: AgentResult) -> None:
