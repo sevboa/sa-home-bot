@@ -20,6 +20,9 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 Проверке нужен только код ответа; GET заставляет curl принять тело целиком. С добавлением google/youtube/instagram/discord (2026-09-20) каждый слот тянул ~1.5 МБ за цикл; замер youtube через туннель: 1247 мс / 870 КБ на GET против 657 мс / 0 КБ на HEAD; ×8 слотов ×12 циклов/час — порядка 100 ГБ в месяц трафика по VPN-серверам, прямо в лимит `node_limit_gb`. 405/501 — «метод не поддержан»: цель жива, повторяем GET. `http_code` внутренний, в отчёт не уходит.
 Права: «a password is required»/локализованное «sudo:» → подсказка `nodectl fix` (`looks_like_sudo_denied` / `looks_like_sudo_message` из `utils/requirements.py`: вторая не зависит от локали ноды).
 
+## Серийная проверка: ядро замера (Этап 63.1.1, 2026-11-03)
+`vpn_series/measure.py::classify` — чистая функция над рядом samples `(t, bytes)` скачивания через туннель слота; `vpn_check` не затронут. Результат `SeriesResult`: `bytes_total`, `duration_s`, `stalled_at_bytes`, `max_idle_s`, `kbps`, `verdict`. Вердикты: `cut` — curl exit 18/56 при 10–30 КБ полученных (обрыв TCP после 15–20 КБ, признак ТСПУ); `error` — нет ни байта или иной ненулевой exit (0 и 28 терпимы: 28 — таймаут `--max-time` при заморозке); `freeze` — после первых байт поток стоял ≥ `freeze_idle_s`; `slow` — скорость ниже `min_kbps` (кбит/с); иначе `ok`. Простой считается от последнего прироста байт, до первого байта не учитывается.
+
 ## mtg_probe (vpn_series)
 
 `src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
