@@ -13,13 +13,10 @@ AWG2_EXTRA_KEYS = ("S3", "S4", "I1", "I2", "I3", "I4", "I5")
 def issued_keys(cfg: Any) -> tuple[str, ...]:
     if not getattr(cfg, "awg2", False):
         return ISSUED_OBFUSCATION_KEYS
-    keys = list(ISSUED_OBFUSCATION_KEYS)
-    keys.extend(["S3", "S4"])
-    for i in range(1, 6):
-        val = getattr(cfg, f"i{i}", "")
-        if val:
-            keys.append(f"I{i}")
-    return tuple(keys)
+    extra = tuple(
+        key for key in AWG2_EXTRA_KEYS if key in ("S3", "S4") or getattr(cfg, key.lower(), "")
+    )
+    return ISSUED_OBFUSCATION_KEYS + extra
 
 
 def render(cfg: Any, private_key: str, address: str, server_public_key: str) -> str:
