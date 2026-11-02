@@ -556,12 +556,14 @@ class VpnCheckConfig(BaseModel):
 
 
 class VpnSeriesConfig(BaseModel):
-    url: str = "https://speed.cloudflare.com/__down?bytes=200000000"
-    duration_s: float = Field(default=150.0, gt=0)
+    url: str = "https://speed.cloudflare.com/__down?bytes=20000000"
+    duration_s: float = Field(default=30.0, gt=0)
     burst_connections: int = Field(default=6, ge=1)
     freeze_idle_s: float = Field(default=10.0, gt=0)
     min_kbps: float = Field(default=64.0, ge=0)
     tick_s: float = Field(default=1.0, gt=0)
+    enabled: bool = False
+    interval_s: float = Field(default=10800.0, gt=0)
 
 
 class WeatherConfig(BaseModel):
