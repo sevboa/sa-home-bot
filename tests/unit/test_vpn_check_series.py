@@ -9,12 +9,6 @@ import pytest
 from sa_home_bot.config import Settings, VpnCheckConfig, VpnSeriesConfig
 from sa_home_bot.node.vpn_probe_state import ProbeSlot
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
-from sa_home_bot.vpn_check.protocol import (
-    ACTION_SERIES,
-    ACTION_SERIES_STATUS,
-    SERIES_MODE_BURST,
-    SERIES_MODE_SINGLE,
-)
 from sa_home_bot.vpn_check.service import VpnCheckService
 from sa_home_bot.vpn_series.raw_probe import RawVerdict
 
