@@ -21,6 +21,15 @@ ROUTE_RETRY_S = 5.0
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
 
+def parse_context(raw: Any) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return 0
+    try:
+        return max(int(raw), 0)
+    except (ValueError, OverflowError):
+        return 0
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     name: str
@@ -42,7 +51,7 @@ class CatalogEntry:
             price_in=float(data.get(protocol.MODEL_PRICE_IN) or 0),
             price_out=float(data.get(protocol.MODEL_PRICE_OUT) or 0),
             remote=bool(data.get(protocol.MODEL_REMOTE, True)),
-            context=int(data.get(protocol.MODEL_CONTEXT) or 0),
+            context=parse_context(data.get(protocol.MODEL_CONTEXT)),
         )
 
     def price(self, tokens_in: int, tokens_out: int) -> float:

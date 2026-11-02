@@ -228,17 +228,18 @@ class LimitsProbe(AgentLoop):
 @pytest.mark.parametrize(
     ("entries", "expected"),
     [
-        ([CatalogEntry(MODEL, "or", "http://o", remote=True, context=65536)], 65536),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, context=65536)], 58982),
         ([local_entry(MODEL, context=32768)], 16000),
-        ([local_entry(MODEL, context=8192)], 8192),
+        ([local_entry(MODEL, context=8192)], 7372),
         ([CatalogEntry(MODEL, "or", "http://o", remote=True)], 16000),
         (
             [
                 CatalogEntry(MODEL, "a", "http://a", remote=True, context=65536),
                 CatalogEntry(MODEL, "b", "http://b", remote=True, context=32768),
             ],
-            32768,
+            29491,
         ),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, context=-5)], 16000),
     ],
 )
 async def test_agent_window_comes_from_catalog(env, monkeypatch, entries, expected):

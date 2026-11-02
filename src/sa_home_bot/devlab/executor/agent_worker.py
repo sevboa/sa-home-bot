@@ -67,13 +67,16 @@ FAILURE_PREFIX = {
 }
 
 
+CATALOG_WINDOW_SHARE = 0.9
+
+
 def window_tokens(entries: list[CatalogEntry], local_cap: int) -> int:
     windows = [
         local_cap
-        if not entry.context
-        else entry.context
+        if entry.context <= 0
+        else int(entry.context * CATALOG_WINDOW_SHARE)
         if entry.remote
-        else min(entry.context, local_cap)
+        else min(int(entry.context * CATALOG_WINDOW_SHARE), local_cap)
         for entry in entries
     ]
     return min(windows, default=local_cap)

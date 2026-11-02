@@ -299,3 +299,10 @@ def test_catalog_entry_reads_context_from_hub():
 
     assert entry.context == 65536
     assert bare.context == 0
+
+
+@pytest.mark.parametrize("raw", ["abc", [1], {"a": 1}, -5, True, None, "-7", float("inf")])
+def test_catalog_entry_ignores_garbage_context(raw):
+    entry = CatalogEntry.from_hub({protocol.MODEL_NAME: "m", protocol.MODEL_CONTEXT: raw})
+
+    assert entry.context == 0
