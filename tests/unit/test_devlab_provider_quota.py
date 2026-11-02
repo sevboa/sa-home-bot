@@ -198,7 +198,9 @@ async def test_provider_quota_missing_field_returns_none(setup, provider):
 
 
 async def test_provider_quota_non_int_returns_none(setup, provider):
-    provider.quota_body = {"data": {"free_model_daily_requests": {"used": 100, "limit": 500, "remaining": "lots"}}}
+    provider.quota_body = {
+        "data": {"free_model_daily_requests": {"used": 100, "limit": 500, "remaining": "lots"}}
+    }
     gateway, _ = await setup(provider_quota=True)
     await gateway.refresh_provider_quota()
     assert MODEL not in gateway._provider
