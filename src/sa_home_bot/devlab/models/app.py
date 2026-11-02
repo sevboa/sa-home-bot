@@ -20,6 +20,8 @@ from sa_home_bot.utils.lifespan import Lifespan
 
 log = logging.getLogger(__name__)
 
+PROVIDER_QUOTA_INTERVAL_S = 3600.0
+
 
 async def heartbeat_loop(
     gateway: Gateway, hub: HubClient, interval_s: float = HEARTBEAT_INTERVAL_S
@@ -30,6 +32,17 @@ async def heartbeat_loop(
             gateway.note_shared(reply)
         except Exception:
             log.exception("Heartbeat шлюза не удался")
+        await asyncio.sleep(interval_s)
+
+
+async def provider_quota_loop(
+    gateway: Gateway, interval_s: float = PROVIDER_QUOTA_INTERVAL_S
+) -> None:
+    while True:
+        try:
+            await gateway.refresh_provider_quota()
+        except Exception:
+            log.exception("Обновление provider_quota не удалось")
         await asyncio.sleep(interval_s)
 
 
