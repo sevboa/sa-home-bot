@@ -56,6 +56,7 @@ class FakeProcessWithDelay:
 def make_fake_spawn(chunks: list[bytes], delays: list[float], exit_code: int = 0):
     async def fake_spawn(*args, **kwargs):
         return FakeProcessWithDelay(chunks, delays, exit_code)
+
     return fake_spawn
 
 
@@ -121,9 +122,7 @@ async def test_stream_samples_steady():
     delays = [0.002] * 20
     fake_spawn = make_fake_spawn(chunks, delays, exit_code=0)
 
-    samples, rc = await stream_samples(
-        ["dummy"], duration_s=2.0, tick_s=0.01, spawn=fake_spawn
-    )
+    samples, rc = await stream_samples(["dummy"], duration_s=2.0, tick_s=0.01, spawn=fake_spawn)
 
     assert rc == 0
     assert samples[-1][1] == 20_000
@@ -135,9 +134,7 @@ async def test_stream_samples_freeze():
     delays = [0.0, 0.001]
     fake_spawn = make_fake_spawn(chunks, delays, exit_code=28)
 
-    samples, rc = await stream_samples(
-        ["dummy"], duration_s=2.0, tick_s=0.01, spawn=fake_spawn
-    )
+    samples, rc = await stream_samples(["dummy"], duration_s=2.0, tick_s=0.01, spawn=fake_spawn)
 
     assert rc == 28
     assert samples[-1][1] == 16_384
@@ -169,9 +166,7 @@ async def test_stream_samples_killed_after_deadline():
     async def fake_spawn(*args, **kwargs):
         return proc
 
-    samples, rc = await stream_samples(
-        ["dummy"], duration_s=0.1, tick_s=0.05, spawn=fake_spawn
-    )
+    samples, rc = await stream_samples(["dummy"], duration_s=0.1, tick_s=0.05, spawn=fake_spawn)
 
     assert rc is None
     assert proc._killed
@@ -185,6 +180,7 @@ async def test_run_single_ok():
     fake_spawn = make_fake_spawn(chunks, delays, exit_code=0)
 
     from sa_home_bot.config import VpnSeriesConfig
+
     cfg = VpnSeriesConfig(
         duration_s=2.0,
         tick_s=0.01,
@@ -207,6 +203,7 @@ async def test_run_single_freeze():
     fake_spawn = make_fake_spawn(chunks, delays, exit_code=28)
 
     from sa_home_bot.config import VpnSeriesConfig
+
     cfg = VpnSeriesConfig(
         duration_s=2.0,
         tick_s=0.01,
@@ -229,6 +226,7 @@ async def test_run_burst():
     fake_spawn = make_fake_spawn(chunks, delays, exit_code=0)
 
     from sa_home_bot.config import VpnSeriesConfig
+
     cfg = VpnSeriesConfig(
         duration_s=2.0,
         tick_s=0.01,
@@ -271,9 +269,7 @@ async def test_stream_samples_tick_even_without_data():
     async def fake_spawn(*args, **kwargs):
         return proc
 
-    samples, rc = await stream_samples(
-        ["dummy"], duration_s=0.5, tick_s=0.01, spawn=fake_spawn
-    )
+    samples, rc = await stream_samples(["dummy"], duration_s=0.5, tick_s=0.01, spawn=fake_spawn)
 
     assert rc is None
     assert proc._killed

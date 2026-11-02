@@ -49,9 +49,7 @@ async def stream_samples(
             if not process_ended:
                 try:
                     timeout = min(tick_s, deadline - now)
-                    chunk = await asyncio.wait_for(
-                        proc.stdout.read(65536), timeout=timeout
-                    )
+                    chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=timeout)
                 except TimeoutError:
                     continue
 
@@ -88,9 +86,7 @@ async def run_single(
         tick_s=cfg.tick_s,
         spawn=spawn,
     )
-    return classify(
-        samples, freeze_idle_s=cfg.freeze_idle_s, min_kbps=cfg.min_kbps, curl_exit=rc
-    )
+    return classify(samples, freeze_idle_s=cfg.freeze_idle_s, min_kbps=cfg.min_kbps, curl_exit=rc)
 
 
 async def run_burst(
