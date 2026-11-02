@@ -192,7 +192,6 @@ async def test_series_reality_tcp_blocked_no_tunnel(monkeypatch):
         return "connection refused"
 
     def fake_reality_conf_path(slot):
-        from pathlib import Path
         return Path("/fake/path.json")
 
     import sa_home_bot.node.vpn_probe_state as vpn_probe_state_module
