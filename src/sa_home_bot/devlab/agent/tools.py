@@ -290,6 +290,23 @@ class ToolBox:
             raise ToolError("paths — только пути тестов, без флагов pytest")
         paths = [safe_relative(t) for t in tokens]
         argv = [*self._spec.test_argv, *paths]
-        result = await self._sandbox.exec(argv, self._spec.test_timeout_s)
-        text = result.summary(self._spec.output_chars, self._spec.test_timeout_s)
+        if paths:
+            filtered = []
+            skip_next = False
+            for arg in argv:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == "-n":
+                    skip_next = True
+                    continue
+                if arg.startswith("-n=") or arg == "-nauto":
+                    continue
+                filtered.append(arg)
+            argv = filtered
+            timeout_s = self._spec.narrow_test_timeout_s
+        else:
+            timeout_s = self._spec.test_timeout_s
+        result = await self._sandbox.exec(argv, timeout_s)
+        text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)

@@ -10,6 +10,7 @@ from sa_home_bot.devlab.executor.spec import (
 )
 
 DEFAULT_TEST_TIMEOUT_S = 3600.0
+DEFAULT_NARROW_TEST_TIMEOUT_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class AgentSpec:
     diff_prefixes: tuple[str, ...] = ()
     command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S
     test_timeout_s: float = DEFAULT_TEST_TIMEOUT_S
+    narrow_test_timeout_s: float = DEFAULT_NARROW_TEST_TIMEOUT_S
     output_chars: int = DEFAULT_OUTPUT_CHARS
 
     @classmethod
@@ -37,5 +39,6 @@ class AgentSpec:
             diff_prefixes=tuple(section.diff_prefixes),
             command_timeout_s=section.command_timeout_s,
             test_timeout_s=test.timeout_s,
+            narrow_test_timeout_s=section.narrow_test_timeout_s,
             output_chars=section.output_chars,
         )
