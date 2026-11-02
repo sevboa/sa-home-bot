@@ -81,12 +81,15 @@ async def run_models(settings: Settings) -> None:
         "Служба devlab_models запущена: http://%s:%d, моделей %d", host, cfg.port, len(backends)
     )
     beat = asyncio.create_task(heartbeat_loop(gateway, hub))
+    quota = asyncio.create_task(provider_quota_loop(gateway))
     try:
         await lifespan.wait()
     finally:
         beat.cancel()
+        quota.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await beat
+            await quota
         if neighbor is not None:
             await stop_following(neighbor, gate)
         log.info("Останов службы devlab_models...")
