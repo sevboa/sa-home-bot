@@ -115,6 +115,8 @@ async def test_series_unknown_mode_returns_error(monkeypatch):
 
 
 async def test_series_self_check_skipped(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "gethostname", lambda: "wooster")
     service = _service(_FakeNodeLink())
     result = await service.run_command("series", {"server": "wooster", "mode": "single"})
     assert result == {"accepted": True, "server": "wooster", "skipped": "self-check исключён"}
