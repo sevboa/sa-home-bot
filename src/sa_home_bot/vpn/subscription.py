@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import dataclasses
 import functools
 import hashlib
 import hmac
@@ -11,9 +10,9 @@ import html
 import ipaddress
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Sequence
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
@@ -238,9 +237,9 @@ def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[
         for e in entries:
             if e.params.fingerprint == fp:
                 continue
-            new_params = dataclasses.replace(e.params, fingerprint=fp)
-            new_name = f"{e.name} · {fp}"
-            result.append(dataclasses.replace(e, params=new_params, name=new_name))
+            result.append(
+                replace(e, params=replace(e.params, fingerprint=fp), name=f"{e.name} · {fp}")
+            )
     return result
 
 
