@@ -158,7 +158,9 @@ async def test_series_single_tunnel_up_down_once(monkeypatch):
     monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
 
     service = _service(_FakeNodeLink())
-    await _run_with_timeout(service.run_command("series", {"server": PROBE_SERVER, "mode": "single"}))
+    await _run_with_timeout(
+        service.run_command("series", {"server": PROBE_SERVER, "mode": "single"})
+    )
 
     await asyncio.sleep(0.1)
 
