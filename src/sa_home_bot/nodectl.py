@@ -57,7 +57,7 @@ def _load_settings(args: argparse.Namespace) -> Settings:
 
 _STATUS_ICON = {"running": "🟢", "restarting": "🟠", "stopped": "🔴"}
 
-NO_ARG_ACTIONS = ("restart_node", "poweroff", "reboot", "suspend")
+NO_ARG_ACTIONS = ("poweroff", "reboot", "suspend")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,7 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="имя службы (см. nodectl status)")
     p = sub.add_parser("join", help="присоединиться к рою через уже существующую ноду")
     p.add_argument("endpoint", help="endpoint соседа: tcp://host:port")
-    sub.add_parser("restart_node", help="перезапустить саму ноду (супервизор)")
+    p = sub.add_parser("restart_node", help="перезапустить саму ноду (супервизор)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="не ждать занятых служб (по умолчанию рестарт откладывается до 30 мин)",
+    )
     sub.add_parser("poweroff", help="выключить машину ноды")
     sub.add_parser("reboot", help="перезагрузить машину ноды")
     sub.add_parser("suspend", help="усыпить машину ноды")
@@ -486,6 +491,16 @@ async def _run(args: argparse.Namespace) -> int:
             print(render_check_update(await client.command("check_update", dst=dst)))
         elif args.command == "update":
             print(render_update_result(await client.command("update", dst=dst)))
+        elif args.command == "restart_node":
+            result = await client.command(
+                args.command, {"force": True} if args.force else None, dst=dst
+            )
+            where = f"нода {args.node}" if args.node else "нода"
+            if result.get("deferred") is not None:
+                print(f"{where}: {result.get('message', 'рестарт отложен')}.")
+            else:
+                print(f"Принято: {where} выполнит {result.get('scheduled', args.command)} "
+                      f"через {result.get('delay_s', '?')} с.")
         elif args.command in NO_ARG_ACTIONS:
             result = await client.command(args.command, dst=dst)
             where = f"нода {args.node}" if args.node else "нода"

@@ -87,6 +87,9 @@ UPDATE_TITLE = "⬆️ Обновить"
 SEND_WOL_TITLE = "📡 Отправить Wake-on-LAN"
 
 POWER_DELAY_S = 1.0
+RESTART_DEFER_POLL_S = 30.0
+RESTART_DEFER_MAX_S = 1800.0
+ARG_FORCE = "force"
 
 
 def power_commands() -> dict[str, list[str]]:
@@ -166,6 +169,7 @@ class NodeService:
         self._power_runner = power_runner or _default_power_runner
         self._idle_poweroff = idle_poweroff and controllable
         self._restart_node = restart_node
+        self._restart_wait_task: asyncio.Task[None] | None = None
         self._state = state if state is not None else NodeState()
         self._state_path = state_path
         self._local_service_endpoints = local_service_endpoints or {}
@@ -366,7 +370,7 @@ class NodeService:
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_RESTART_NODE:
-            return self._schedule_restart_node()
+            return self._schedule_restart_node(bool(args.get(ARG_FORCE)))
         if action in self._power:
             return self._schedule_power(action)
         if action == ACTION_CLOSE_SSH_SESSIONS:
@@ -700,7 +704,35 @@ class NodeService:
         self._power_task = task
         return {"scheduled": action, "delay_s": POWER_DELAY_S}
 
-    def _schedule_restart_node(self) -> dict[str, Any]:
+    def _busy_services(self) -> list[str]:
+        return self._router.busy_services() if self._router is not None else []
+
+    def _schedule_restart_node(self, force: bool = False) -> dict[str, Any]:
+        assert self._restart_node is not None
+        waiting = self._restart_wait_task is not None and not self._restart_wait_task.done()
+        if force and waiting:
+            self._restart_wait_task.cancel()
+            waiting = False
+        busy = [] if force else self._busy_services()
+        if busy or waiting:
+            if not waiting:
+                log.warning(
+                    "Запрошен само-рестарт ноды, службы заняты (%s) — жду до %.0f с",
+                    ", ".join(busy),
+                    RESTART_DEFER_MAX_S,
+                )
+                self._restart_wait_task = asyncio.create_task(
+                    self._restart_when_idle(), name="restart-node-wait"
+                )
+            busy = busy or self._busy_services()
+            return {
+                "deferred": busy,
+                "max_wait_s": RESTART_DEFER_MAX_S,
+                "message": f"рестарт отложен до освобождения: {', '.join(busy) or 'служб'}",
+            }
+        return self._restart_now()
+
+    def _restart_now(self) -> dict[str, Any]:
         assert self._restart_node is not None
         log.warning("Запрошен само-рестарт ноды через %.0f с", POWER_DELAY_S)
 
@@ -711,6 +743,22 @@ class NodeService:
         task = asyncio.create_task(run(), name="restart-node")
         self._power_task = task
         return {"scheduled": ACTION_RESTART_NODE, "delay_s": POWER_DELAY_S}
+
+    async def _restart_when_idle(self) -> None:
+        waited = 0.0
+        while waited < RESTART_DEFER_MAX_S:
+            await asyncio.sleep(RESTART_DEFER_POLL_S)
+            waited += RESTART_DEFER_POLL_S
+            if not self._busy_services():
+                log.warning("Службы освободились — перезапускаю ноду")
+                break
+        else:
+            log.warning(
+                "Службы заняты дольше %.0f с (%s) — перезапускаю ноду принудительно",
+                RESTART_DEFER_MAX_S,
+                ", ".join(self._busy_services()),
+            )
+        self._restart_now()
 
     @staticmethod
     async def _blocking_sessions() -> tuple[list[ssh_sessions.SshSession], list[str]]:

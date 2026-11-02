@@ -188,3 +188,75 @@ async def test_peer_link_follows_executor_busy(tracker, monkeypatch):
         await link.stop()
         await server.stop()
         shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def _restart_service(monkeypatch, link, calls):
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_POLL_S", 0.01)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 0.05)
+    sup, _ = _fake_supervisor()
+    router = NodeRouter("n", local_services={"devlab": link})
+    return NodeService(sup, router, restart_node=lambda: calls.append("restart"))
+
+
+async def test_restart_node_idle_restarts_at_once(monkeypatch):
+    calls: list[str] = []
+    svc = _restart_service(monkeypatch, StubLink(True, False), calls)
+    result = await svc.run_command("restart_node", {})
+    assert result["scheduled"] == "restart_node"
+    await asyncio.sleep(0.02)
+    assert calls == ["restart"]
+
+
+async def test_restart_node_busy_is_deferred_until_idle(monkeypatch):
+    calls: list[str] = []
+    link = StubLink(True, True)
+    svc = _restart_service(monkeypatch, link, calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    result = await svc.run_command("restart_node", {})
+    assert result["deferred"] == ["devlab"]
+    assert "рестарт отложен до освобождения: devlab" in result["message"]
+    await asyncio.sleep(0.05)
+    assert calls == []
+    link.busy = False
+    await asyncio.sleep(0.05)
+    assert calls == ["restart"]
+
+
+async def test_restart_node_busy_restarts_after_ceiling(monkeypatch):
+    calls: list[str] = []
+    svc = _restart_service(monkeypatch, StubLink(True, True), calls)
+    await svc.run_command("restart_node", {})
+    await asyncio.sleep(0.15)
+    assert calls == ["restart"]
+
+
+async def test_restart_node_repeat_does_not_add_second_wait(monkeypatch):
+    calls: list[str] = []
+    svc = _restart_service(monkeypatch, StubLink(True, True), calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    first = await svc.run_command("restart_node", {})
+    task = svc._restart_wait_task
+    second = await svc.run_command("restart_node", {})
+    assert first["deferred"] == second["deferred"] == ["devlab"]
+    assert svc._restart_wait_task is task
+    task.cancel()
+
+
+async def test_restart_node_force_ignores_busy_and_cancels_wait(monkeypatch):
+    calls: list[str] = []
+    svc = _restart_service(monkeypatch, StubLink(True, True), calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    forced = await svc.run_command("restart_node", {"force": True})
+    assert forced["scheduled"] == "restart_node"
+    await asyncio.sleep(0.02)
+    assert calls == ["restart"]
+
+    calls.clear()
+    await svc.run_command("restart_node", {})
+    task = svc._restart_wait_task
+    forced = await svc.run_command("restart_node", {"force": True})
+    await asyncio.sleep(0.05)
+    assert forced["scheduled"] == "restart_node"
+    assert task.cancelled()
+    assert calls == ["restart"]

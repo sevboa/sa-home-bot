@@ -75,6 +75,15 @@ async def test_restart_node_of_own_node_is_self_shutdown(store):
     assert link.commands == [("restart_node", {})]
 
 
+async def test_restart_node_deferred_reports_waiting(store):
+    message = "рестарт отложен до освобождения: devlab"
+    link = FakeNodeLink(result={"deferred": ["devlab"], "message": message})
+    callback = FakeCallback("act:node:restart_node")
+    await _dispatch(callback, store, link)
+    assert len(callback.message.answers) == 1
+    assert "рестарт отложен до освобождения: devlab" in callback.message.answers[0]
+
+
 async def test_replayed_callback_after_restart_is_ignored(store):
     link = _dying_link()
     first = FakeCallback("act:node:restart:telegram-bot", callback_id="same-id")

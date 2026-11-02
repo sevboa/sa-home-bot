@@ -85,6 +85,12 @@ async def tool_node_manage(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     if action == NODE_ACTION_RESTART:
         who = wanted_node or "своя нода"
+        if result.get("deferred") is not None:
+            return (
+                f"{who}: {result.get('message', 'рестарт отложен')} (потолок ожидания "
+                f"{int(result.get('max_wait_s', 0)) // 60} мин, потом перезапустится сама). "
+                "Повторять restart_node не нужно."
+            )
         text = f"Принято: {who} перезапустится через {result.get('delay_s', '?')} с."
         if wanted_node is None:
             text += " Это моя нода — я ненадолго пропаду из этого разговора и вернусь сам."
