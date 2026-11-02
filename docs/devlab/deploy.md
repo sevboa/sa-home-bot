@@ -29,6 +29,7 @@ wooster, исполнитель на mycraft; сквозной тест `tests/u
    context = 65536
    remote = true
    shared_key = true
+   provider_quota = true
    ```
    Имя модели одинаково на обеих нодах: исполнитель переключается между шлюзами без потери диалога.
    `bind_host` пуст: шлюз слушает адрес tailscale0 и сам присылает его в heartbeat (`url`). Ключ
