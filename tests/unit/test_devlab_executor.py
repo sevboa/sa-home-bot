@@ -411,6 +411,30 @@ async def test_both_messages_refused_clears_current_and_keeps_branch(env, monkey
     assert await repos.branch_exists(env.store.git_root, PROJECT, ref)
 
 
+@pytest.mark.parametrize(
+    ("status", "branch_kept"),
+    [("done", False), ("failed", False), ("stopped", False), ("queued", True)],
+)
+async def test_refusal_shows_final_status_drops_branch(env, monkeypatch, status, branch_kept):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/15"
+    job_id, state_path = await orphan_job(env, "exec", ref)
+    restarted = env.worker(FakeTestRunner())
+
+    async def refusing_post(job, kind, payload):
+        raise HubRequestError(f"задание {job}: переход {status} → failed недопустим", 400)
+
+    monkeypatch.setattr(restarted._hub, "post", refusing_post)
+    await restarted.recover()
+    assert json.loads(state_path.read_text())["current"] is None
+    assert await repos.branch_exists(env.store.git_root, PROJECT, ref) is branch_kept
+
+
+async def test_held_jobs_follow_current(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/16"
+    job_id, _ = await orphan_job(env, "exec", ref)
+    assert env.worker(FakeTestRunner()).held_jobs == [job_id]
+
+
 async def test_failed_post_failure_keeps_current_and_branch(env, monkeypatch):
     ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/13"
     await env.push(ref, {"a.txt": b"x"})

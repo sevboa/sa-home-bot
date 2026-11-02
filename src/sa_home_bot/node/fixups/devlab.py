@@ -354,9 +354,24 @@ images)
 prune)
     exec podman image prune --force
     ;;
+sweep)
+    for keep_name in "$@"; do name "$keep_name"; done
+    keep=" $* "
+    kept() {{ case "$keep" in *" $1 "*) return 0;; esac; return 1; }}
+    for container in $(podman ps --all --filter name=devlab- --format '{{{{.Names}}}}'); do
+        case "$container" in devlab-*) ;; *) continue;; esac
+        kept "${{container#devlab-}}" || podman rm --force "$container" >/dev/null || true
+    done
+    for path in "${{WORK:?}}"/*; do
+        [ -e "$path" ] || continue
+        base="${{path##*/}}"
+        kept "${{base%.containerfile}}" || rm -rf "$path"
+    done
+    exec podman image prune --force
+    ;;
 *)
     fail "подкоманды: sync-in refresh sync-out clean build create start stop rm pause" \\
-        "unpause interrupt exec ps images prune"
+        "unpause interrupt exec ps images prune sweep"
     ;;
 esac
 """

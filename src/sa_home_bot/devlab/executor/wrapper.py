@@ -8,7 +8,7 @@ import re
 import shlex
 import tarfile
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -205,6 +205,10 @@ class WrapperClient:
             await self.call("rm", name, merge_stderr=True, timeout=CLEANUP_TIMEOUT_S)
         except Exception as exc:
             log.warning("rm %s: %s", name, exc)
+
+    async def sweep(self, keep: Iterable[str]) -> None:
+        names = sorted({job_id.lower() for job_id in keep if NAME_RE.match(job_id.lower())})
+        await self.checked("уборка осиротевших копий", "sweep", *names, timeout=SYNC_TIMEOUT_S)
 
     async def cleanup(self, name: str) -> None:
         await self.remove_container(name)

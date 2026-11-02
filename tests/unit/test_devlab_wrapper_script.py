@@ -157,5 +157,56 @@ def test_pause_all_selects_devlab_containers_in_the_right_state(sandbox, command
 def test_unknown_command_lists_new_subcommands(sandbox):
     result = sandbox("nope")
     assert result.returncode == 2
-    for word in ("pause", "unpause", "interrupt"):
+    for word in ("pause", "unpause", "interrupt", "sweep"):
         assert word in result.stderr.decode()
+
+
+@pytest.fixture
+def sweeper(tmp_path):
+    settings = make_settings(["devlab"])
+    settings.devlab.root = str(tmp_path / "root")
+    work = tmp_path / "root" / "home" / "work"
+    for name in ("keep", "old"):
+        (work / name).mkdir(parents=True)
+        (work / f"{name}.containerfile").write_text("x")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "podman.log"
+    fake = bin_dir / "podman"
+    fake.write_text(
+        '#!/bin/sh\necho "$*" >> "$LOG"\n'
+        'if [ "$1" = ps ]; then printf "devlab-keep\\ndevlab-old\\nother\\n"; fi\n'
+    )
+    fake.chmod(0o755)
+    script = tmp_path / "wrapper.sh"
+    script.write_text(devlab.devlab_wrapper_content(settings))
+
+    def call(*args: str):
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "LOG": str(log)}
+        return subprocess.run(["sh", str(script), *args], capture_output=True, env=env)
+
+    return call, work, log
+
+
+def test_sweep_removes_everything_but_kept(sweeper):
+    call, work, log = sweeper
+    assert call("sweep", "keep").returncode == 0
+    assert sorted(p.name for p in work.iterdir()) == ["keep", "keep.containerfile"]
+    commands = log.read_text().splitlines()
+    assert "rm --force devlab-old" in commands
+    assert not any("devlab-keep" in c or "other" in c for c in commands if c.startswith("rm"))
+    assert commands[-1] == "image prune --force"
+
+
+def test_sweep_without_keep_removes_all(sweeper):
+    call, work, _ = sweeper
+    assert call("sweep").returncode == 0
+    assert list(work.iterdir()) == []
+
+
+@pytest.mark.parametrize("bad", ["../x", "a b", "$(id)", "A"])
+def test_sweep_rejects_bad_name_before_touching_anything(sweeper, bad):
+    call, work, log = sweeper
+    assert call("sweep", "keep", bad).returncode == 2
+    assert len(list(work.iterdir())) == 4
+    assert not log.exists()

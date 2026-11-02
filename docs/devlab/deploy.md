@@ -44,7 +44,9 @@ wooster, исполнитель на mycraft; сквозной тест `tests/u
    `pause`, `unpause` и `interrupt`, а фикс `devlab-cpu-weight` ставит `CPUWeight=10` слайсу
    пользователя `devlab`: без `nodectl fix` на mycraft (обновлённая обёртка) исполнитель после выката
    падает на первой же заморозке (`пауза контейнеров: код 2`), а таймаут команды не сработает по
-   `interrupt`. Порядок: `nodectl fix`, потом рестарт службы `devlab`.
+   `interrupt`. Порядок: `nodectl fix`, потом рестарт службы `devlab`. С 60.9.9 обёртка получила подкоманду
+   `sweep` (уборка контейнеров и копий не текущих заданий при старте исполнителя): без `nodectl fix`
+   исполнитель стартует, но пишет в лог предупреждение, а осиротевшие контейнеры остаются.
 3. На alfred: `nodectl call devlab_hub issue_token name=mycraft role=executor`.
 4. В instance-конфиг mycraft:
    ```toml

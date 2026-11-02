@@ -16,6 +16,7 @@ from sa_home_bot.devlab.executor.agent_worker import (
     AgentSettings,
     AgentState,
     AgentWorker,
+    ParkedEntry,
 )
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.routing import CatalogEntry
@@ -259,3 +260,12 @@ async def test_agent_window_comes_from_catalog(env, monkeypatch, entries, expect
 
     assert await env.status(job_id) == protocol.STATUS_DONE
     assert LimitsProbe.seen[0].context_tokens == expected
+
+async def test_held_jobs_are_parked_ones(env):
+    state = AgentState(
+        parked={"p-1": ParkedEntry(job={}), "p-2": ParkedEntry(job={}, answered=True)}
+    )
+    path = env.tmp_path / "exec" / AGENT_STATE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(state.model_dump_json())
+    assert make_worker(env, ScriptedChatModel()).held_jobs == ["p-1", "p-2"]

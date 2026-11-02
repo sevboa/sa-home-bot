@@ -172,6 +172,11 @@ class AgentWorker(WorkerLoops):
         return self._state.cursor
 
     @property
+    def held_jobs(self) -> list[str]:
+        current = [self._resume.id] if self._resume else []
+        return [*current, *self._state.parked]
+
+    @property
     def parked_jobs(self) -> list[str]:
         return list(self._state.parked)
 

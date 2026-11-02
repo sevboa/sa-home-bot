@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shlex
 import shutil
 import time
@@ -34,7 +35,13 @@ JOBS_DIR = "jobs"
 PYTEST_WORD = "pytest"
 JUNIT_FLAG = f"--junitxml={JUNIT_FILE}"
 FAILED_TEXT_CHARS = 1000
+REFUSED_STATUS_RE = re.compile(r"переход (\w+) → ")
 ORPHAN_FAILED_TEXT = "исполнитель перезапущен во время прогона"
+
+
+def refused_as_final(exc: HubRequestError) -> bool:
+    match = REFUSED_STATUS_RE.search(str(exc))
+    return match is not None and match.group(1) in protocol.TERMINAL_STATUSES
 
 
 class ExecutorState(BaseModel):
@@ -180,6 +187,10 @@ class TestWorker(WorkerLoops):
     def cursor(self) -> int:
         return self._state.cursor
 
+    @property
+    def held_jobs(self) -> list[str]:
+        return [self._state.current] if self._state.current is not None else []
+
     def _save(self, **changes: int | str | None) -> None:
         self._state = self._state.model_copy(update=changes)
         save_model(self._state, self._state_path)
@@ -219,6 +230,8 @@ class TestWorker(WorkerLoops):
                 )
                 if not exc.permanent:
                     return None, False
+                if refused_as_final(exc):
+                    return protocol.MSG_FAILED, True
         return None, True
 
     async def _drop_orphan_branch(self) -> None:

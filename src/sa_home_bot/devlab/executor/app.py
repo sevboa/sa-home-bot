@@ -16,6 +16,7 @@ from sa_home_bot.devlab.executor.podman import PodmanTestRunner
 from sa_home_bot.devlab.executor.routing import GatewayModels, ModelCatalog
 from sa_home_bot.devlab.executor.runner import TestRunner
 from sa_home_bot.devlab.executor.service import ExecutorService
+from sa_home_bot.devlab.executor.sweep import sweep_orphans
 from sa_home_bot.devlab.executor.worker import (
     TestWorker,
     WorkerLoops,
@@ -97,6 +98,7 @@ async def run_executor(
     await server.start()
     log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
     neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
+    await sweep_orphans(containers, work_dir, [*tester.held_jobs, *agent.held_jobs])
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
         asyncio.create_task(agent.run(heartbeat=False)),
