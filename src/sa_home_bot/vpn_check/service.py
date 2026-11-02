@@ -216,15 +216,20 @@ class VpnCheckService:
                 except OSError:
                     target = None
 
+            tunnel_up = False
+
             async def do_handshake() -> str | None:
+                nonlocal tunnel_up
                 err = await self._tunnel_up(slot)
                 if err is not None:
                     return err
+                tunnel_up = True
                 return await self._egress_gate(slot)
 
             raw_result = await raw_probe(slot, target, do_handshake)
             if raw_result.verdict.value != "ok":
-                await self._tunnel_down(slot)
+                if tunnel_up:
+                    await self._tunnel_down(slot)
                 return {
                     "server": slot.server,
                     "transport": slot.transport,
