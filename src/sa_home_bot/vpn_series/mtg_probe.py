@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ssl
 import time
 from typing import Literal
@@ -26,18 +27,16 @@ async def tls_handshake(
     ctx.verify_mode = ssl.CERT_NONE
     start = time.perf_counter()
     try:
-        reader, writer = await asyncio.wait_for(
+        _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port, ssl=ctx, server_hostname=sni),
             timeout,
         )
     except (OSError, ssl.SSLError, TimeoutError) as exc:
         return f"{type(exc).__name__}: {exc}", None
     elapsed_ms = int((time.perf_counter() - start) * 1000)
-    try:
-        writer.close()
+    writer.close()
+    with contextlib.suppress(OSError):
         await writer.wait_closed()
-    except OSError:
-        pass
     return None, elapsed_ms
 
 
