@@ -63,5 +63,20 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 ### Расписание
 Метод `async def series_loop(self)` — бесконечно: `asyncio.sleep(interval_s)`, затем `_series_run` по каждому серверу слотов в режиме `single` (исключения логировать, цикл не падает). Запуск в `vpn_check/app.py`: `asyncio.create_task(service.series_loop())` только при `settings.vpn_series.enabled`, отмена задачи в `finally`.
 
-### Отчёт в vpn
-Отправка результата в `vpn` — задача 63.1.5.
+### Отчёт в vpn (63.1.5, 2026-11-03)
+После прохода по слотам `_series_run` одним вызовом шлёт `report_series {node, results}` во все живые
+инстансы `vpn` (`vpn_nodes.fanout`, общий с `report_check` хелпер `_report_to_vpn`). Если ни один слот
+не дал результата (все упали исключением), отчёт не шлётся.
+
+Приём — `vpn/checks.py::_report_series`. Вердикт пары (сервер, транспорт) —
+`domain/vpn_series.py::series_verdict`: не-`ok` вердикт TCP-части (`tcp_blocked`, `proto_blocked`)
+важнее серии; иначе первый из `freeze`/`cut`/`error`; `slow` считается рабочим (медленно, но живо —
+блокировкой не считаем). Гистерезис тот же `reconcile_band`, пороги отдельные от `check_*`:
+`[vpn] series_fail_threshold = 2`, `series_clear_threshold = 1` — при расписании раз в 3 ч алерт
+приходит не раньше чем через ~6 ч от начала поломки, зато одна случайная заморозка не будит.
+
+Состояние — таблица `vpn_series_states` (ключ node, server, transport; `last_report` — JSON отчёта
+целиком, для строки `/vpn` в 63.1.6). `vpn_check_states` не трогается. События:
+`vpn_series_failed {node, server, transport, verdict, consecutive}` и
+`vpn_series_recovered {node, server, transport}`; рендер для админов — 63.1.6. В снапшот бэкапа
+таблица не входит (оперативные данные, как `vpn_check_states`).

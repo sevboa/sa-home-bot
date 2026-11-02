@@ -27,6 +27,7 @@ from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.process import run
 from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
+from sa_home_bot.vpn.protocol import ACTION_REPORT_CHECK, ACTION_REPORT_SERIES
 from sa_home_bot.vpn_check.protocol import (
     ACTION_CHECK,
     ACTION_SERIES,
@@ -154,9 +155,12 @@ class VpnCheckService:
         results: list[dict[str, Any]] = []
         for slot in slots:
             results.extend(await self._check_slot(slot, targets))
+        await self._report_to_vpn(ACTION_REPORT_CHECK, results)
+
+    async def _report_to_vpn(self, action: str, results: list[dict[str, Any]]) -> None:
         try:
             reports = await vpn_nodes.fanout(
-                self._node_link, "report_check", {"node": self._node, "results": results}
+                self._node_link, action, {"node": self._node, "results": results}
             )
             if not reports:
                 log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")
@@ -238,6 +242,7 @@ class VpnCheckService:
         }
 
     async def _series_run(self, slots: list[ProbeSlot], mode: str) -> None:
+        results: list[dict[str, Any]] = []
         for slot in slots:
             try:
                 result = await self._series_slot(slot, mode)
@@ -253,6 +258,9 @@ class VpnCheckService:
                 result["raw"]["verdict"],
                 [s["verdict"] for s in result["series"]],
             )
+            results.append(result)
+        if results:
+            await self._report_to_vpn(ACTION_REPORT_SERIES, results)
 
     async def series_loop(self) -> None:
         while True:

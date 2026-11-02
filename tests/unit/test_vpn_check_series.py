@@ -357,8 +357,42 @@ async def test_series_tunnel_down_when_series_raises(monkeypatch):
     monkeypatch.setattr(VpnCheckService, "_egress_gate", fake_egress_gate)
     monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
 
-    service = _service(_FakeNodeLink())
+    link = _FakeNodeLink()
+    service = _service(link)
     await _run_with_timeout(service._series_run([_slot()], "single"))
 
     assert tunnel_calls == ["up", "down"]
     assert service._series_last == {}
+    assert link.calls == []
+
+
+async def test_series_run_reports_to_vpn(monkeypatch):
+    async def noop(self, slot):
+        return None
+
+    async def fake_run_single(slot, cfg, *, spawn=None):
+        from sa_home_bot.vpn_series.measure import SeriesResult
+
+        return SeriesResult(
+            bytes_total=16384,
+            duration_s=30.0,
+            stalled_at_bytes=16384,
+            max_idle_s=29.0,
+            kbps=4.0,
+            verdict="freeze",
+        )
+
+    for name in ("_tunnel_up", "_tunnel_down", "_egress_gate"):
+        monkeypatch.setattr(VpnCheckService, name, noop)
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.run_single", fake_run_single)
+
+    link = _FakeNodeLink()
+    service = _service(link)
+    await _run_with_timeout(service._series_run([_slot()], "single"))
+
+    [call] = link.calls
+    assert call["action"] == "report_series"
+    assert call["args"]["node"] == service._node
+    [result] = call["args"]["results"]
+    assert (result["server"], result["transport"]) == (PROBE_SERVER, "awg")
+    assert [s["verdict"] for s in result["series"]] == ["freeze"]

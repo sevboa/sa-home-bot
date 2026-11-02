@@ -109,6 +109,7 @@ ACTION_APK_CHUNK = "apk_chunk"
 ACTION_APK_SET_FILE_ID = "apk_set_file_id"
 
 ACTION_REPORT_CHECK = "report_check"
+ACTION_REPORT_SERIES = "report_series"
 ACTION_CHECK_NOW = "check_now"
 ACTION_CHECK_STATUS = "check_status"
 
@@ -132,6 +133,8 @@ EVENT_VPN_EXTRA_RESOLVED = "vpn_extra_resolved"
 EVENT_VPN_NODE_QUOTA_WARNING = "vpn_node_quota_warning"
 EVENT_VPN_CHECK_FAILED = "vpn_check_failed"
 EVENT_VPN_CHECK_RECOVERED = "vpn_check_recovered"
+EVENT_VPN_SERIES_FAILED = "vpn_series_failed"
+EVENT_VPN_SERIES_RECOVERED = "vpn_series_recovered"
 EVENT_VPN_SERVER_RESTORED = "vpn_server_restored"
 
 ERR_QUOTA_CEILING = "vpn_quota_ceiling"

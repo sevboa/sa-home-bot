@@ -533,6 +533,8 @@ class VpnConfig(BaseModel):
     check_interval_s: float = Field(default=300.0, gt=0)
     check_fail_threshold: int = Field(default=2, ge=1)
     check_clear_threshold: int = Field(default=1, ge=1)
+    series_fail_threshold: int = Field(default=2, ge=1)
+    series_clear_threshold: int = Field(default=1, ge=1)
     check_dispatch_timeout_s: float = Field(default=5.0, gt=0)
 
     transports: list[str] = Field(default_factory=lambda: ["awg"])

@@ -560,6 +560,22 @@ CREATE TABLE IF NOT EXISTS vpn_check_states (
     PRIMARY KEY (node, server, transport, target)
 );
 
+-- Серийная проверка из РФ (63.1.5): одна строка на (наблюдатель, сервер, транспорт),
+-- last_report — JSON последнего отчёта vpn_check.series.
+CREATE TABLE IF NOT EXISTS vpn_series_states (
+    node               TEXT NOT NULL,
+    server             TEXT NOT NULL,
+    transport          TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    last_verdict       TEXT NOT NULL,
+    last_report        TEXT NOT NULL,
+    consecutive_count  INTEGER NOT NULL DEFAULT 0,
+    alerting_since     TEXT,
+    first_seen_at      TEXT NOT NULL,
+    last_seen_at       TEXT NOT NULL,
+    PRIMARY KEY (node, server, transport)
+);
+
 -- Журнал системных/админских событий роя (node_down/up/leaving/returned/
 -- joined, singleton, update_finished, admin-алерты VPN/idle_power_blocked —
 -- bot/node_events.py) — тот же текст, что уходит в рассылку, только ещё и

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -17,6 +18,10 @@ from sa_home_bot.domain.vpn_check import (
     reconcile_vpn_check,
     rollup_status,
 )
+from sa_home_bot.domain.vpn_series import (
+    reconcile_vpn_series,
+    series_verdict,
+)
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     Address,
@@ -26,6 +31,8 @@ from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_CHECK_FAILED,
     EVENT_VPN_CHECK_RECOVERED,
+    EVENT_VPN_SERIES_FAILED,
+    EVENT_VPN_SERIES_RECOVERED,
     TELEGRAM_EGRESS_TARGET,
     TELEGRAM_EGRESS_TRANSPORT,
 )
@@ -122,6 +129,93 @@ class ChecksMixin:
                     {**base, "targets": run["recovered"], "all_ok": run["bad"] == 0},
                 )
         return {"accepted": True}
+
+    async def _report_series(self, args: dict[str, Any]) -> dict[str, Any]:
+        node = str(args.get("node", "")).strip()
+        results = args.get("results")
+        if not node or not isinstance(results, list) or not results:
+            raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
+        now = utc_now()
+        for raw in results:
+            if not isinstance(raw, dict):
+                continue
+            server = str(raw.get("server", "")).strip()
+            transport = str(raw.get("transport", "")).strip()
+            probe = raw.get("raw")
+            if not server or not transport or not isinstance(probe, dict):
+                continue
+            series = raw.get("series") if isinstance(raw.get("series"), list) else []
+            verdict = series_verdict(
+                str(probe.get("verdict", "")),
+                [str(item.get("verdict", "")) for item in series if isinstance(item, dict)],
+            )
+            await self._apply_series_result(node, server, transport, verdict, raw, now)
+        return {"accepted": True}
+
+    async def _apply_series_result(
+        self,
+        node: str,
+        server: str,
+        transport: str,
+        verdict: str,
+        report: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        cur = await self._db.conn.execute(
+            "SELECT status, consecutive_count, alerting_since, first_seen_at "
+            "FROM vpn_series_states WHERE node = ? AND server = ? AND transport = ?",
+            (node, server, transport),
+        )
+        row = await cur.fetchone()
+        known = None
+        first_seen_at = now.isoformat()
+        if row is not None:
+            known = KnownCheckState(
+                status=row["status"],
+                consecutive_count=row["consecutive_count"],
+                alerting_since=(
+                    datetime.fromisoformat(row["alerting_since"]) if row["alerting_since"] else None
+                ),
+            )
+            first_seen_at = row["first_seen_at"]
+        state = reconcile_vpn_series(
+            verdict,
+            known,
+            now,
+            fail_threshold=self._cfg.series_fail_threshold,
+            clear_threshold=self._cfg.series_clear_threshold,
+        )
+        await self._db.conn.execute(
+            "INSERT INTO vpn_series_states ("
+            "node, server, transport, status, last_verdict, last_report, consecutive_count, "
+            "alerting_since, first_seen_at, last_seen_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node, server, transport) DO UPDATE SET "
+            "status = excluded.status, last_verdict = excluded.last_verdict, "
+            "last_report = excluded.last_report, consecutive_count = excluded.consecutive_count, "
+            "alerting_since = excluded.alerting_since, last_seen_at = excluded.last_seen_at",
+            (
+                node,
+                server,
+                transport,
+                state.status,
+                verdict,
+                json.dumps(report, ensure_ascii=False),
+                state.consecutive_count,
+                state.alerting_since.isoformat() if state.alerting_since else None,
+                first_seen_at,
+                now.isoformat(),
+            ),
+        )
+        await self._db.conn.commit()
+        base = {"node": node, "server": server, "transport": transport}
+        if state.transitioned_to == CHECK_ALERTING:
+            await self._emit(
+                EVENT_VPN_SERIES_FAILED,
+                {**base, "verdict": verdict, "consecutive": self._cfg.series_fail_threshold},
+            )
+        elif state.transitioned_to == CHECK_OK:
+            await self._emit(EVENT_VPN_SERIES_RECOVERED, base)
 
     async def _apply_check_result(
         self,
