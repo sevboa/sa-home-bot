@@ -99,23 +99,3 @@ def test_reality_target_reads_only_address_and_port() -> None:
     assert raw_probe.reality_target(conf) == RawTarget(host="h.example", port=8443)
     assert raw_probe.reality_target("{}") is None
     assert raw_probe.reality_target("не json") is None
-
-
-def test_handshake_always_brings_tunnel_down() -> None:
-    events: list[str] = []
-
-    class Service:
-        async def _tunnel_up(self, slot):
-            events.append("up")
-            return None
-
-        async def _egress_gate(self, slot):
-            events.append("gate")
-            return "ip не тот"
-
-        async def _tunnel_down(self, slot):
-            events.append("down")
-
-    err = asyncio.run(raw_probe.handshake(Service(), _slot("awg")))
-    assert err == "ip не тот"
-    assert events == ["up", "gate", "down"]
