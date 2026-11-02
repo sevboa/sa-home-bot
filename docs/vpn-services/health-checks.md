@@ -25,3 +25,7 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 
 ## Серийная проверка: раннер (Этап 63.1.2, 2026-11-03)
 `vpn_series/runner.py` — сборка `curl` argv (netns exec, socks5 для reality), стриминг stdout с тиками `tick_s` и дедлайном `duration_s + 5`, агрегация в `classify`. `run_single` — одиночный прогон; `run_burst` — `burst_connections` параллельных прогонов через `asyncio.gather`. Конфиг `[vpn_series]`: `url` (файл 200 МБ), `duration_s`, `burst_connections`, `freeze_idle_s`, `min_kbps`, `tick_s`. Дефолты подобраны под 2–3 минуты замера и 6 параллельных соединений.
+
+## mtg_probe (vpn_series)
+
+`src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
