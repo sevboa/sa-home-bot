@@ -9,6 +9,7 @@ import pytest
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.queue import SCHEMA as S_QUEUE_SCHEMA
+from sa_home_bot.devlab.hub.queue import TransitionRefused
 from sa_home_bot.devlab.hub.store import HUB_DB_NAME, HubStore
 from sa_home_bot.utils.clock import utc_now
 
@@ -414,6 +415,15 @@ async def test_test_job_transitions(queue):
     assert (await queue.get_job(failed.id)).status == S.STATUS_FAILED
     await queue.post_from_client(CLIENT, failed.id, S.MSG_RESUME, {})
     assert (await queue.get_job(failed.id)).status == S.STATUS_QUEUED
+
+
+async def test_refused_transition_carries_current_status(queue):
+    failed = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(failed.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "x"})
+    with pytest.raises(TransitionRefused) as info:
+        await queue.post_from_executor(failed.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "x"})
+    assert info.value.status == S.STATUS_FAILED
 
 
 async def test_test_job_rejects_question_and_agent_rejects_test_done(queue):

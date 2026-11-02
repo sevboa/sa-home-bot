@@ -78,6 +78,12 @@ JOB_COLUMNS = (
 )
 
 
+class TransitionRefused(HubError):
+    def __init__(self, message: str, status: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 @dataclass(frozen=True)
 class Job:
     id: str
@@ -665,7 +671,9 @@ class HubQueue:
     @staticmethod
     def _check_transition(job: Job, target: str) -> None:
         if target not in protocol.TRANSITIONS[job.status]:
-            raise HubError(f"задание {job.id}: переход {job.status} → {target} недопустим")
+            raise TransitionRefused(
+                f"задание {job.id}: переход {job.status} → {target} недопустим", job.status
+            )
 
     @staticmethod
     async def _set_status(conn: aiosqlite.Connection, job: Job, target: str) -> None:

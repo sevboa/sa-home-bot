@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 from sa_home_bot.config import DevlabConfig
@@ -27,6 +28,7 @@ def populate(work: Path) -> None:
         (work / sub / name / "f.txt").write_text("x")
     (work / "jobs" / "j-old.tar").write_text("x")
     (work / "state.json").write_text("{}")
+    (work / "agent-state.json").write_text("{}")
     (work / "mirrors").mkdir()
 
 
@@ -57,3 +59,33 @@ async def test_sweep_orphans_survives_old_wrapper(tmp_path):
     wrapper = WrapperClient(DevlabConfig(), spawn)
     await sweep_orphans(wrapper, tmp_path, [])
     assert spawn.calls[0][5:] == ["sweep"]
+
+
+def test_agent_dir_kept_when_state_file_missing(tmp_path, caplog):
+    populate(tmp_path)
+    (tmp_path / "agent-state.json").unlink()
+    removed = remove_foreign_entries(tmp_path, {"j-keep"})
+    assert removed == 2
+    assert sorted(p.name for p in (tmp_path / "agent").iterdir()) == ["a-old", "a-parked"]
+    assert "каталог агента не чищу" in caplog.text
+
+
+def test_empty_agent_dir_without_state_is_fine(tmp_path):
+    (tmp_path / "agent").mkdir()
+    assert remove_foreign_entries(tmp_path, set()) == 0
+
+
+def test_failure_on_one_entry_does_not_stop_the_rest(tmp_path, monkeypatch):
+    populate(tmp_path)
+    real = shutil.rmtree
+
+    def flaky(path, *args, **kwargs):
+        if Path(path).name == "j-old":
+            raise OSError("busy")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", flaky)
+    removed = remove_foreign_entries(tmp_path, {"j-keep", "a-parked"})
+    assert removed == 2
+    assert (tmp_path / "jobs" / "j-old").exists()
+    assert not (tmp_path / "agent" / "a-old").exists()

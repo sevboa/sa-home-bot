@@ -40,8 +40,11 @@ ORPHAN_FAILED_TEXT = "исполнитель перезапущен во вре�
 
 
 def refused_as_final(exc: HubRequestError) -> bool:
-    match = REFUSED_STATUS_RE.search(str(exc))
-    return match is not None and match.group(1) in protocol.TERMINAL_STATUSES
+    status = exc.refused_status
+    if status is None:
+        match = REFUSED_STATUS_RE.search(str(exc))
+        status = match.group(1) if match else None
+    return status in protocol.TERMINAL_STATUSES
 
 
 class ExecutorState(BaseModel):
@@ -186,10 +189,6 @@ class TestWorker(WorkerLoops):
     @property
     def cursor(self) -> int:
         return self._state.cursor
-
-    @property
-    def held_jobs(self) -> list[str]:
-        return [self._state.current] if self._state.current is not None else []
 
     def _save(self, **changes: int | str | None) -> None:
         self._state = self._state.model_copy(update=changes)

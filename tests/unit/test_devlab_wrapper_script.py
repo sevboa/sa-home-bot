@@ -210,3 +210,35 @@ def test_sweep_rejects_bad_name_before_touching_anything(sweeper, bad):
     assert call("sweep", "keep", bad).returncode == 2
     assert len(list(work.iterdir())) == 4
     assert not log.exists()
+
+
+def test_sweep_on_empty_work_dir(sweeper):
+    call, work, _ = sweeper
+    for entry in list(work.iterdir()):
+        if entry.is_dir():
+            entry.rmdir()
+        else:
+            entry.unlink()
+    assert call("sweep", "keep").returncode == 0
+
+
+def test_sweep_aborts_before_removing_when_podman_ps_fails(sweeper, tmp_path):
+    call, work, log = sweeper
+    fake = tmp_path / "bin" / "podman"
+    fake.write_text('#!/bin/sh\necho "$*" >> "$LOG"\n[ "$1" = ps ] && exit 1\nexit 0\n')
+    result = call("sweep", "keep")
+    assert result.returncode == 2
+    assert len(list(work.iterdir())) == 4
+    assert log.read_text().splitlines() == [log.read_text().splitlines()[0]]
+    assert not any(line.startswith(("rm", "image")) for line in log.read_text().splitlines())
+
+
+def test_sweep_removes_symlink_without_following_it(sweeper, tmp_path):
+    call, work, _ = sweeper
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "f.txt").write_text("x")
+    (work / "link").symlink_to(target)
+    assert call("sweep", "keep").returncode == 0
+    assert not (work / "link").exists() and not (work / "link").is_symlink()
+    assert (target / "f.txt").exists()

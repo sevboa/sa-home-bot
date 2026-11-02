@@ -19,6 +19,7 @@ from sa_home_bot.devlab.executor.worker import (
     ExecutorState,
     TestWorker,
     WorkerSettings,
+    refused_as_final,
 )
 from sa_home_bot.devlab.hub import repos
 from sa_home_bot.devlab.hub.app import build_hub_app
@@ -429,10 +430,24 @@ async def test_refusal_shows_final_status_drops_branch(env, monkeypatch, status,
     assert await repos.branch_exists(env.store.git_root, PROJECT, ref) is branch_kept
 
 
-async def test_held_jobs_follow_current(env):
-    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/16"
-    job_id, _ = await orphan_job(env, "exec", ref)
-    assert env.worker(FakeTestRunner()).held_jobs == [job_id]
+async def test_hub_reports_structured_status_and_recover_drops_branch(env):
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/17"
+    job_id, state_path = await orphan_job(env, "exec", ref)
+    restarted = env.worker(FakeTestRunner())
+    await restarted._hub.post(job_id, protocol.MSG_FAILED, {})
+    with pytest.raises(HubRequestError) as info:
+        await restarted._hub.post(job_id, protocol.MSG_FAILED, {})
+    assert info.value.refused_status == protocol.STATUS_FAILED
+    await restarted.recover()
+    assert json.loads(state_path.read_text())["current"] is None
+    assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
+
+
+def test_refused_as_final_prefers_field_and_falls_back_to_text():
+    assert refused_as_final(HubRequestError("x", 400, "done"))
+    assert not refused_as_final(HubRequestError("переход done → failed", 400, "queued"))
+    assert refused_as_final(HubRequestError("переход stopped → failed недопустим", 400))
+    assert not refused_as_final(HubRequestError("отказ", 400))
 
 
 async def test_failed_post_failure_keeps_current_and_branch(env, monkeypatch):

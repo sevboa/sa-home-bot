@@ -358,7 +358,9 @@ sweep)
     for keep_name in "$@"; do name "$keep_name"; done
     keep=" $* "
     kept() {{ case "$keep" in *" $1 "*) return 0;; esac; return 1; }}
-    for container in $(podman ps --all --filter name=devlab- --format '{{{{.Names}}}}'); do
+    listed="$(podman ps --all --filter name=devlab- --format '{{{{.Names}}}}')" \\
+        || fail "podman ps не отработал"
+    for container in $listed; do
         case "$container" in devlab-*) ;; *) continue;; esac
         kept "${{container#devlab-}}" || podman rm --force "$container" >/dev/null || true
     done

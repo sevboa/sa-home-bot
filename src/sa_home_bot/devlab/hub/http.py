@@ -7,6 +7,7 @@ from aiohttp import web
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.nodes import NodeDirectory
+from sa_home_bot.devlab.hub.queue import TransitionRefused
 from sa_home_bot.devlab.hub.store import HubStore, Principal
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -63,7 +64,10 @@ async def error_middleware(request: web.Request, handler: Handler) -> web.Stream
     try:
         return await handler(request)
     except HubError as exc:
-        return web.json_response({protocol.FIELD_ERROR: str(exc)}, status=400)
+        body = {protocol.FIELD_ERROR: str(exc)}
+        if isinstance(exc, TransitionRefused):
+            body[protocol.FIELD_STATUS] = exc.status
+        return web.json_response(body, status=400)
 
 
 @public

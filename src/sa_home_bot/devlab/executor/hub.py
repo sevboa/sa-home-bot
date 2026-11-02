@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -13,10 +14,21 @@ UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=300)
 ERROR_SNIPPET_CHARS = 300
 
 
+def refused_status_of(text: str) -> str | None:
+    try:
+        value = json.loads(text).get(protocol.FIELD_STATUS)
+    except (ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
 class HubRequestError(Exception):
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self, message: str, status: int | None = None, refused_status: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.refused_status = refused_status
 
     @property
     def permanent(self) -> bool:
@@ -32,7 +44,9 @@ class ExecutorHub(HubHttp):
                 text = await resp.text()
                 if resp.status != 200:
                     raise HubRequestError(
-                        f"{path}: HTTP {resp.status} {text[:ERROR_SNIPPET_CHARS]}", resp.status
+                        f"{path}: HTTP {resp.status} {text[:ERROR_SNIPPET_CHARS]}",
+                        resp.status,
+                        refused_status_of(text),
                     )
                 return await resp.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError) as exc:

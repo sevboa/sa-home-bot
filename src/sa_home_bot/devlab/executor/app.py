@@ -98,7 +98,7 @@ async def run_executor(
     await server.start()
     log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
     neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
-    await sweep_orphans(containers, work_dir, [*tester.held_jobs, *agent.held_jobs])
+    await sweep_orphans(containers, work_dir, agent.held_jobs)
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
         asyncio.create_task(agent.run(heartbeat=False)),

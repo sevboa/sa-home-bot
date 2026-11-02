@@ -12,6 +12,7 @@ from sa_home_bot.config import DevlabConfig, DevlabModelConfig, Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.executor import app as executor_app
+from sa_home_bot.devlab.executor.agent_worker import AGENT_STATE_FILE, AgentState, ParkedEntry
 from sa_home_bot.devlab.models.backends import build_backend
 from sa_home_bot.devlab.models.gateway import Gateway
 from sa_home_bot.devlab.models.hubclient import HubClient
@@ -210,6 +211,21 @@ async def test_agent_job_runs_while_test_job_passes(env, rig, monkeypatch):
         while await rig.heartbeat_jobs() != []:
             await asyncio.sleep(0.02)
     assert sum((await rig.requests_by_gateway(job_id)).values()) == 2
+
+
+async def test_executor_sweeps_orphans_before_loops_keeping_parked(env, rig, monkeypatch):
+    state = AgentState(parked={"p-1": ParkedEntry(job={})})
+    (env.tmp_path / "exec").mkdir(parents=True, exist_ok=True)
+    (env.tmp_path / "exec" / AGENT_STATE_FILE).write_text(state.model_dump_json())
+    calls = []
+
+    async def record(wrapper, work_dir, keep):
+        calls.append((work_dir, list(keep)))
+
+    monkeypatch.setattr(executor_app, "sweep_orphans", record)
+    await rig.start_executor(monkeypatch)
+    await wait_until(lambda: calls, timeout=DONE_TIMEOUT_S)
+    assert calls == [(env.tmp_path / "exec", ["p-1"])]
 
 
 async def test_task_survives_gateway_loss_mid_job(env, rig, monkeypatch):
