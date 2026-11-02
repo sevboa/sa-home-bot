@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import time
+
 from sa_home_bot.devlab.agent.context import (
     DROPPED_STEPS_PATTERN,
     FOLDED_REPLY_PREFIX,
     RECENT_OUTPUT_CHARS,
-    TRUNCATED_PREFIX,
+    TRUNCATED_PATTERN,
     estimate_tokens,
     fold_old_results,
     pinned_report,
+    task_text,
 )
+from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
+from sa_home_bot.devlab.executor.agent_worker import rules_hint
 
 BUDGET = 13000
 
@@ -53,7 +58,9 @@ def test_two_hundred_steps_converge_and_keep_pairs():
     messages = dialog(200)
     assert fold_old_results(messages, BUDGET, 4) <= BUDGET
     assert_valid(messages)
-    assert any(DROPPED_STEPS_PATTERN.match(str(m["content"])) for m in messages)
+    assert DROPPED_STEPS_PATTERN.search(messages[1]["content"])
+    assert messages[1]["content"].startswith("t\n\n")
+    assert [m["role"] for m in messages].count("user") == 1
 
 
 def test_recent_outputs_are_truncated_keeping_head_and_tail():
@@ -62,7 +69,7 @@ def test_recent_outputs_are_truncated_keeping_head_and_tail():
     fold_old_results(messages, 4500, 4)
     content = messages[3]["content"]
     assert content.startswith("начало") and content.endswith("конец")
-    assert TRUNCATED_PREFIX in content
+    assert TRUNCATED_PATTERN.search(content)
     assert len(content) < RECENT_OUTPUT_CHARS + 100
     assert_valid(messages)
 
@@ -76,14 +83,64 @@ def test_large_assistant_replies_fold_before_recent_outputs():
     assert_valid(messages)
 
 
-def test_dropped_marker_accumulates_and_pairs_stay_whole():
+def test_dropped_marker_accumulates_in_task_and_pairs_stay_whole():
     messages = dialog(30, output=3000)
     fold_old_results(messages, 2500, 2)
     assert_valid(messages)
-    first = messages[2]
-    found = DROPPED_STEPS_PATTERN.match(first["content"])
-    assert found and int(found.group(1)) > 0
-    assert sum(1 for m in messages if DROPPED_STEPS_PATTERN.match(str(m["content"]))) == 1
+    first = int(DROPPED_STEPS_PATTERN.search(messages[1]["content"]).group(1))
+    assert first > 0
+    messages += pair(99, 3000) + pair(100, 3000) + pair(101, 3000)
+    fold_old_results(messages, 2500, 2)
+    assert_valid(messages)
+    again = int(DROPPED_STEPS_PATTERN.search(messages[1]["content"]).group(1))
+    assert again > first
+    assert messages[1]["content"].count("[свёрнуто") == 1
+    assert task_text(messages) == "t"
+
+
+def test_last_unit_is_never_dropped_only_trimmed():
+    messages = dialog(3, output=100)
+    huge = pair(9, 50000)
+    huge[0]["tool_calls"][0]["function"]["arguments"] = "y" * 30000
+    messages += huge
+    assert fold_old_results(messages, 2500, 1) <= 2500
+    assert_valid(messages)
+    assert messages[-2]["tool_calls"][0]["id"] == "c9"
+    assert TRUNCATED_PATTERN.search(messages[-1]["content"])
+
+
+def test_several_tool_calls_in_one_unit_stay_together():
+    messages = dialog(0)
+    for index in range(10):
+        first, second = pair(index * 2, 3000), pair(index * 2 + 1, 3000)
+        first[0]["tool_calls"] += second[0]["tool_calls"]
+        messages += first + [second[1]]
+    assert fold_old_results(messages, 2500, 1) <= 2500
+    assert_valid(messages)
+
+
+def test_owner_answers_are_never_dropped_only_compressed():
+    messages = dialog(10, output=3000)
+    answer = {"role": "user", "content": ANSWER_PREFIX + "а" * 9000}
+    messages.insert(4, answer)
+    fold_old_results(messages, 2500, 1)
+    assert_valid(messages)
+    kept = [m for m in messages if str(m["content"]).startswith(ANSWER_PREFIX)]
+    assert len(kept) == 1
+    assert len(kept[0]["content"]) < 9000
+
+
+def test_thousand_steps_fold_fast():
+    messages = dialog(1000)
+    started = time.monotonic()
+    assert fold_old_results(messages, BUDGET, 4) <= BUDGET
+    assert time.monotonic() - started < 2
+    assert_valid(messages)
+
+
+def test_rules_hint_empty_and_filled():
+    assert rules_hint([]) == ""
+    assert "RULES.md: 5 симв." in rules_hint([("RULES.md", "abcde")])
 
 
 def test_folding_is_idempotent_and_noop_when_fits():
@@ -99,6 +156,7 @@ def test_pinned_alone_over_budget_stays_over_and_reports_sizes():
     messages[1]["content"] = "з" * 60000
     assert fold_old_results(messages, 2000, 4) > 2000
     assert_valid(messages)
+    assert "[свёрнуто" not in task_text(messages)
     report = pinned_report(messages)
     assert "3000 симв." in report and "60000 симв." in report
     assert estimate_tokens("з" * 60000) > 2000

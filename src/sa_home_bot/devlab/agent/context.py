@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from typing import Any
+
+from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
 
 CHARS_PER_TOKEN = 3
 FOLDED_OUTPUT_PREFIX = "[вывод свёрнут"
@@ -14,16 +15,45 @@ PINNED_MESSAGES = 2
 RECENT_OUTPUT_CHARS = 2000
 FOLDED_REPLY_PREFIX = "[ответ свёрнут"
 FOLDED_REPLY = FOLDED_REPLY_PREFIX + ": {size} симв.]"
-TRUNCATED_PREFIX = "[…обрезано"
-TRUNCATED_MARK = TRUNCATED_PREFIX + " {size} симв.…]"
+TRUNCATED_MARK = "[…обрезано {size} симв.…]"
+TRUNCATED_PATTERN = re.compile(r"\n\[…обрезано \d+ симв\.…\]\n")
 DROPPED_STEPS = "[свёрнуто {count} шагов]"
-DROPPED_STEPS_PATTERN = re.compile(r"^\[свёрнуто (\d+) шагов\]$")
-
-_Fits = Callable[[], bool]
+DROPPED_STEPS_PATTERN = re.compile(r"\n\n\[свёрнуто (\d+) шагов\]$")
+MARKER_RESERVE_CHARS = 60
+SEPARATOR_CHARS = 2
 
 
 def estimate_tokens(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False)) // CHARS_PER_TOKEN + 1
+
+
+def _size(message: dict[str, Any]) -> int:
+    return len(json.dumps(message, ensure_ascii=False))
+
+
+class _Window:
+    def __init__(self, messages: list[dict[str, Any]], budget_tokens: int) -> None:
+        self.messages = messages
+        self.limit = budget_tokens
+        self.reset()
+
+    def reset(self) -> None:
+        messages = self.messages
+        self.sizes = [_size(m) for m in messages]
+        self.total = sum(self.sizes)
+
+    def fits(self, extra: int = 0) -> bool:
+        count = len(self.messages)
+        chars = self.total + extra + SEPARATOR_CHARS * max(count - 1, 0) + 2
+        return chars // CHARS_PER_TOKEN + 1 <= self.limit
+
+    def touch(self, index: int) -> None:
+        size = _size(self.messages[index])
+        self.total += size - self.sizes[index]
+        self.sizes[index] = size
+
+    def tokens(self) -> int:
+        return estimate_tokens(self.messages)
 
 
 def _old_boundary(messages: list[dict[str, Any]], keep_recent: int) -> int:
@@ -33,30 +63,35 @@ def _old_boundary(messages: list[dict[str, Any]], keep_recent: int) -> int:
     return tool_indexes[-keep_recent] if keep_recent else len(messages)
 
 
-def _fold_tool_outputs(messages: list[dict[str, Any]], boundary: int, fits: _Fits) -> bool:
+def _fold_tool_outputs(window: _Window, boundary: int) -> bool:
     for index in range(PINNED_MESSAGES, boundary):
-        message = messages[index]
+        message = window.messages[index]
         if message["role"] == "tool" and not message["content"].startswith(FOLDED_OUTPUT_PREFIX):
             message["content"] = FOLDED_OUTPUT.format(size=len(message["content"]))
-            if fits():
+            window.touch(index)
+            if window.fits():
                 return True
     return False
 
 
-def _fold_arguments(messages: list[dict[str, Any]], boundary: int, fits: _Fits) -> bool:
+def _fold_arguments(window: _Window, boundary: int) -> bool:
     for index in range(PINNED_MESSAGES, boundary):
-        for call in messages[index].get("tool_calls") or ():
+        touched = False
+        for call in window.messages[index].get("tool_calls") or ():
             function = call["function"]
             if len(function["arguments"]) >= FOLD_ARGUMENTS_MIN_CHARS:
                 function["arguments"] = FOLDED_ARGUMENTS.format(size=len(function["arguments"]))
-                if fits():
-                    return True
+                touched = True
+        if touched:
+            window.touch(index)
+            if window.fits():
+                return True
     return False
 
 
-def _fold_replies(messages: list[dict[str, Any]], boundary: int, fits: _Fits) -> bool:
+def _fold_replies(window: _Window, boundary: int) -> bool:
     for index in range(PINNED_MESSAGES, boundary):
-        message = messages[index]
+        message = window.messages[index]
         content = message.get("content")
         if (
             message["role"] == "assistant"
@@ -65,7 +100,8 @@ def _fold_replies(messages: list[dict[str, Any]], boundary: int, fits: _Fits) ->
             and not content.startswith(FOLDED_REPLY_PREFIX)
         ):
             message["content"] = FOLDED_REPLY.format(size=len(content))
-            if fits():
+            window.touch(index)
+            if window.fits():
                 return True
     return False
 
@@ -76,63 +112,120 @@ def _truncate(content: str) -> str:
     return content[:half] + "\n" + TRUNCATED_MARK.format(size=cut) + "\n" + content[-half:]
 
 
-def _truncate_recent(messages: list[dict[str, Any]], fits: _Fits) -> bool:
-    for message in messages[PINNED_MESSAGES:]:
-        content = message.get("content")
-        if (
-            message["role"] == "tool"
-            and isinstance(content, str)
-            and len(content) > RECENT_OUTPUT_CHARS
-            and TRUNCATED_PREFIX not in content
-        ):
-            message["content"] = _truncate(content)
-            if fits():
+def _truncatable(content: Any) -> bool:
+    return (
+        isinstance(content, str)
+        and len(content) > RECENT_OUTPUT_CHARS
+        and TRUNCATED_PATTERN.search(content) is None
+    )
+
+
+def _is_answer(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        message["role"] == "user" and isinstance(content, str) and content.startswith(ANSWER_PREFIX)
+    )
+
+
+def _truncate_messages(window: _Window, roles: tuple[str, ...]) -> bool:
+    for index in range(PINNED_MESSAGES, len(window.messages)):
+        message = window.messages[index]
+        if message["role"] not in roles or (message["role"] == "user" and not _is_answer(message)):
+            continue
+        if _truncatable(message["content"]):
+            message["content"] = _truncate(message["content"])
+            window.touch(index)
+            if window.fits():
                 return True
     return False
 
 
-def _drop_oldest(messages: list[dict[str, Any]]) -> bool:
-    count = 0
+def _units(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    units = []
     start = PINNED_MESSAGES
-    if start < len(messages) and messages[start]["role"] == "user":
-        found = DROPPED_STEPS_PATTERN.match(messages[start]["content"] or "")
-        if found:
-            count = int(found.group(1))
-            start += 1
-    if start >= len(messages):
+    while start < len(messages):
+        end = start + 1
+        if messages[start]["role"] == "assistant" and messages[start].get("tool_calls"):
+            while end < len(messages) and messages[end]["role"] == "tool":
+                end += 1
+        units.append((start, end))
+        start = end
+    return units
+
+
+def _mark_task(messages: list[dict[str, Any]], dropped: int) -> None:
+    task = messages[1]["content"]
+    found = DROPPED_STEPS_PATTERN.search(task)
+    previous = 0
+    if found:
+        previous = int(found.group(1))
+        task = task[: found.start()]
+    messages[1]["content"] = task + "\n\n" + DROPPED_STEPS.format(count=previous + dropped)
+
+
+def _drop_batch(window: _Window) -> bool:
+    units = _units(window.messages)[:-1]
+    chosen: list[tuple[int, int]] = []
+    freed = 0
+    for start, end in units:
+        if end - start == 1 and _is_answer(window.messages[start]):
+            continue
+        chosen.append((start, end))
+        freed += sum(window.sizes[start:end]) + SEPARATOR_CHARS * (end - start)
+        if window.fits(MARKER_RESERVE_CHARS - freed):
+            break
+    if not chosen:
         return False
-    end = start + 1
-    if messages[start]["role"] == "assistant" and messages[start].get("tool_calls"):
-        while end < len(messages) and messages[end]["role"] == "tool":
-            end += 1
-    messages[PINNED_MESSAGES:end] = [
-        {"role": "user", "content": DROPPED_STEPS.format(count=count + 1)}
-    ]
+    doomed = {i for start, end in chosen for i in range(start, end)}
+    window.messages[:] = [m for i, m in enumerate(window.messages) if i not in doomed]
+    _mark_task(window.messages, len(chosen))
+    window.reset()
     return True
 
 
-def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_recent: int) -> int:
-    def fits() -> bool:
-        return estimate_tokens(messages) <= budget_tokens
+def _trim_last_unit(window: _Window) -> bool:
+    units = _units(window.messages)
+    if not units:
+        return False
+    start, end = units[-1]
+    for index in range(start, end):
+        message = window.messages[index]
+        for call in message.get("tool_calls") or ():
+            function = call["function"]
+            if len(function["arguments"]) > RECENT_OUTPUT_CHARS:
+                function["arguments"] = FOLDED_ARGUMENTS.format(size=len(function["arguments"]))
+        if message["role"] != "tool" and _truncatable(message.get("content")):
+            message["content"] = _truncate(message["content"])
+        window.touch(index)
+    return window.fits()
 
-    if fits():
-        return estimate_tokens(messages)
+
+def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_recent: int) -> int:
+    window = _Window(messages, budget_tokens)
+    if window.fits():
+        return window.tokens()
     boundary = _old_boundary(messages, keep_recent)
     for stage in (_fold_tool_outputs, _fold_arguments, _fold_replies):
-        if stage(messages, boundary, fits):
-            return estimate_tokens(messages)
-    if _truncate_recent(messages, fits):
-        return estimate_tokens(messages)
-    while not fits() and _drop_oldest(messages):
-        pass
-    return estimate_tokens(messages)
+        if stage(window, boundary):
+            return window.tokens()
+    if _truncate_messages(window, ("tool",)):
+        return window.tokens()
+    if _truncate_messages(window, ("user",)):
+        return window.tokens()
+    if _drop_batch(window) and window.fits():
+        return window.tokens()
+    _trim_last_unit(window)
+    return window.tokens()
+
+
+def task_text(messages: list[dict[str, Any]]) -> str:
+    return DROPPED_STEPS_PATTERN.sub("", str(messages[1].get("content") or ""))
 
 
 def pinned_report(messages: list[dict[str, Any]]) -> str:
-    parts = []
-    for label, message in zip(
-        ("системное сообщение", "задание"), messages[:PINNED_MESSAGES], strict=False
-    ):
-        content = str(message.get("content") or "")
-        parts.append(f"{label} {len(content)} симв. (~{estimate_tokens(content)} ток.)")
-    return ", ".join(parts)
+    system = str(messages[0].get("content") or "")
+    task = task_text(messages)
+    return (
+        f"системное сообщение {len(system)} симв. (~{estimate_tokens(system)} ток.), "
+        f"задание {len(task)} симв. (~{estimate_tokens(task)} ток.)"
+    )

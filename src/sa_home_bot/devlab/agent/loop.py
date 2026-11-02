@@ -38,7 +38,8 @@ CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
 OVERFLOW_REASON = (
-    "{pinned}; бюджет диалога {budget} ток. при окне {window} ток.: "
+    "{pinned}, схемы инструментов {tools} ток.; бюджет диалога {budget} ток. "
+    "при окне {window} ток.: "
     "сократи [agent] rules или task.md"
 )
 
@@ -117,7 +118,6 @@ class AgentLoop:
         clock: Callable[[], float] = time.monotonic,
         overflow_hint: str = "",
     ) -> None:
-        self._overflow_hint = overflow_hint
         self._model = model
         self._tools = tools
         self._guard = guard
@@ -127,6 +127,7 @@ class AgentLoop:
         self._spend = spend
         self._tokens = tokens
         self._clock = clock
+        self._overflow_hint = overflow_hint
 
     def _result(self, status: AgentStatus, seg: Segment, **fields: Any) -> AgentResult:
         return AgentResult(
@@ -172,9 +173,8 @@ class AgentLoop:
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
         seg = Segment(messages, self._clock())
-        budget = (
-            limits.context_tokens - limits.reply_tokens - estimate_tokens(self._tools.definitions)
-        )
+        tools_tokens = estimate_tokens(self._tools.definitions)
+        budget = limits.context_tokens - limits.reply_tokens - tools_tokens
         while True:
             crane = self._crane(seg)
             if crane is not None:
@@ -185,6 +185,7 @@ class AgentLoop:
                     seg,
                     reason=OVERFLOW_REASON.format(
                         pinned=pinned_report(messages),
+                        tools=tools_tokens,
                         budget=budget,
                         window=limits.context_tokens,
                     )
