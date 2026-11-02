@@ -253,9 +253,14 @@ class SubscriptionLinksMixin:
                 label = "устройство"
             nxt = utc_now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             nxt = (nxt + timedelta(days=32)).replace(day=1)
+            spare = (
+                tuple(self._reality_cfg.spare_fingerprints)
+                if self._reality_cfg is not None
+                else ()
+            )
             result = subs.Subscription(
                 device_label=label,
-                entries=tuple(subs.sort_entries(entries)),
+                entries=tuple(subs.expand_spares(subs.sort_entries(entries), spare)),
                 used_bytes=used,
                 total_bytes=total,
                 expire_ts=int(nxt.timestamp()),

@@ -19,7 +19,7 @@ from sa_home_bot.node.instances import (
     guests_package_path,
 )
 from sa_home_bot.node.kind import NodeKind
-from sa_home_bot.reality.client_config import DEFAULT_FLOW
+from sa_home_bot.reality.client_config import CLIENT_FINGERPRINT, DEFAULT_FLOW
 
 log = logging.getLogger(__name__)
 
@@ -415,9 +415,29 @@ class RealityTransportConfig(BaseModel):
     server_public_key: str = ""
     short_id: str = ""
     sni: str = "www.google.com"
+    dest: str = ""
+    fingerprint: str = CLIENT_FINGERPRINT
     flow: str = DEFAULT_FLOW
     api_addr: str = "127.0.0.1:10085"
     inbound_tag: str = "reality-in"
+    spare_fingerprints: list[str] = Field(default_factory=list)
+
+    @property
+    def effective_dest(self) -> str:
+        return self.dest or f"{self.sni}:443"
+
+    @field_validator("spare_fingerprints", mode="before")
+    @classmethod
+    def _validate_spare_fingerprints(cls, v: list[str]) -> list[str]:
+        allowed = {"chrome", "firefox", "edge", "safari", "ios", "android"}
+        seen: set[str] = set()
+        for fp in v:
+            if fp not in allowed:
+                raise ValueError(f"fingerprint {fp!r} не в допустимом списке: {sorted(allowed)}")
+            if fp in seen:
+                raise ValueError(f"дубликат fingerprint: {fp!r}")
+            seen.add(fp)
+        return v
 
 
 class VpnConfig(BaseModel):
@@ -434,10 +454,18 @@ class VpnConfig(BaseModel):
     jmax: int = Field(default=70, ge=0)
     s1: int = Field(default=50, ge=0)
     s2: int = Field(default=80, ge=0)
-    h1: int = Field(default=5, ge=1)
-    h2: int = Field(default=6, ge=1)
-    h3: int = Field(default=7, ge=1)
-    h4: int = Field(default=8, ge=1)
+    s3: int = Field(default=0, ge=0)
+    s4: int = Field(default=0, ge=0)
+    h1: int | str = 5
+    h2: int | str = 6
+    h3: int | str = 7
+    h4: int | str = 8
+    i1: str = ""
+    i2: str = ""
+    i3: str = ""
+    i4: str = ""
+    i5: str = ""
+    awg2: bool = False
     base_quota_gb: int = Field(default=500, ge=0)
     extra_step_gb: int = Field(default=100, gt=0)
     self_ceiling_gb: int = Field(default=1000, ge=0)
@@ -455,6 +483,28 @@ class VpnConfig(BaseModel):
     )
     official_download_url: str = "https://amnezia.org/downloads"
     config_message_ttl_s: float = Field(default=600.0, gt=0)
+
+    @field_validator("h1", "h2", "h3", "h4", mode="before")
+    @classmethod
+    def _validate_h_range(cls, v: int | str) -> int | str:
+        if isinstance(v, int):
+            if v < 1:
+                raise ValueError("h1-h4: значение должно быть >= 1")
+            return v
+        if isinstance(v, str):
+            if "-" not in v:
+                raise ValueError("h1-h4: строка должна быть вида 'a-b'")
+            a_str, b_str = v.split("-", 1)
+            try:
+                a = int(a_str)
+                b = int(b_str)
+            except ValueError:
+                raise ValueError("h1-h4: границы диапазона должны быть целыми") from None
+            if a < 1 or b < 1:
+                raise ValueError("h1-h4: границы диапазона должны быть >= 1")
+            if a > b:
+                raise ValueError("h1-h4: левая граница не может быть больше правой")
+        return v
 
     hiddify_site_url: str = "https://hiddify.com"
     hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"

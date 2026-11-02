@@ -10,11 +10,13 @@ import html
 import ipaddress
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from urllib.parse import quote
 
 from sa_home_bot.reality.client_config import (
+    CLIENT_FINGERPRINT,
     DEFAULT_FLOW,
     RealityParams,
     render_singbox_multi,
@@ -87,6 +89,7 @@ class SubEntry:
                 "short_id": p.short_id,
                 "sni": p.sni,
                 "flow": p.flow,
+                "fingerprint": p.fingerprint,
             },
         }
 
@@ -104,6 +107,7 @@ class SubEntry:
                 short_id=str(p["short_id"]),
                 sni=str(p["sni"]),
                 flow=str(p.get("flow") or DEFAULT_FLOW),
+                fingerprint=str(p.get("fingerprint") or CLIENT_FINGERPRINT),
             ),
         )
 
@@ -223,6 +227,20 @@ def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
 
 def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
     return sorted(entries, key=lambda e: (e.name, e.node))
+
+
+def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[SubEntry]:
+    if not fingerprints:
+        return entries
+    result = list(entries)
+    for fp in fingerprints:
+        for e in entries:
+            if e.params.fingerprint == fp:
+                continue
+            result.append(
+                replace(e, params=replace(e.params, fingerprint=fp), name=f"{e.name} · {fp}")
+            )
+    return result
 
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:

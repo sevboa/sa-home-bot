@@ -490,6 +490,11 @@ jmin = 40
 jmax = 70
 s1 = 50
 s2 = 80
+# AmneziaWG 2.0 (awg2 = true): выдача S3, S4, I1–I5, H1–H4 диапазонами.
+# awg2 = false
+# s3 = 0
+# s4 = 0
+# i1 = ""
 h1 = 5
 h2 = 6
 h3 = 7
@@ -536,9 +541,12 @@ transports = ["awg"]
 # server_public_key = ""
 # short_id = ""
 # sni = "www.google.com"
+# dest = ""            # пусто = "<sni>:443"
+# fingerprint = "chrome"
 # flow = "xtls-rprx-vision"
 # api_addr = "127.0.0.1:10085"
 # inbound_tag = "reality-in"
+# spare_fingerprints = []      # напр. ["firefox", "edge"] — запасные профили в подписке
 
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.

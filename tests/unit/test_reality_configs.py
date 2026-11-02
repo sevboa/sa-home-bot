@@ -211,3 +211,65 @@ def test_render_probe_client_config_socks_inbound_and_reality_outbound():
     assert reality["shortId"] == PROBE_PARAMS.short_id
     assert vnext["address"] == PROBE_PARAMS.endpoint_host
     assert vnext["port"] == PROBE_PARAMS.port
+
+
+def test_default_fingerprint_is_chrome_everywhere() -> None:
+    assert PARAMS.fingerprint == "chrome"
+    assert "fp=chrome" in render_vless_url(PARAMS, UUID, "x")
+    proxy = next(o for o in _config()["outbounds"] if o["tag"] == "proxy")
+    assert proxy["tls"]["utls"]["fingerprint"] == "chrome"
+    probe = json.loads(render_probe_client_config(PARAMS, UUID, socks_port=1080))
+    assert "chrome" in json.dumps(probe)
+
+
+def test_custom_fingerprint_flows_to_url_singbox_and_probe() -> None:
+    params = RealityParams(
+        endpoint_host="203.0.113.7",
+        port=8443,
+        server_public_key="PUB",
+        short_id="ab",
+        sni="www.microsoft.com",
+        fingerprint="firefox",
+    )
+    url = render_vless_url(params, UUID, "x")
+    assert "fp=firefox" in url
+    assert parse_vless_url(url)[0] == params
+    proxy = next(
+        o
+        for o in json.loads(render_singbox_config(params, UUID))["outbounds"]
+        if o["tag"] == "proxy"
+    )
+    assert proxy["tls"]["utls"]["fingerprint"] == "firefox"
+    assert "firefox" in render_probe_client_config(params, UUID, socks_port=1080)
+
+
+def test_params_from_config_defaults_and_overrides() -> None:
+    from sa_home_bot.config import RealityTransportConfig
+
+    cfg = RealityTransportConfig(endpoint_host="h", server_public_key="k", short_id="s")
+    assert cfg.effective_dest == "www.google.com:443"
+    params = RealityParams.from_config(cfg)
+    assert (params.sni, params.fingerprint) == ("www.google.com", "chrome")
+    cfg2 = RealityTransportConfig(
+        endpoint_host="h",
+        sni="www.microsoft.com",
+        dest="www.microsoft.com:8443",
+        fingerprint="edge",
+    )
+    assert cfg2.effective_dest == "www.microsoft.com:8443"
+    assert RealityParams.from_config(cfg2).fingerprint == "edge"
+
+
+def test_server_settings_share_sni_with_client() -> None:
+    from sa_home_bot.config import RealityTransportConfig
+    from sa_home_bot.reality.xray import reality_server_settings
+
+    cfg = RealityTransportConfig(sni="www.microsoft.com")
+    settings = reality_server_settings(cfg.sni, cfg.effective_dest)
+    assert settings == {"dest": "www.microsoft.com:443", "serverNames": ["www.microsoft.com"]}
+    assert RealityParams.from_config(cfg).sni in settings["serverNames"]
+    default = RealityTransportConfig()
+    assert reality_server_settings(default.sni, default.effective_dest) == {
+        "dest": "www.google.com:443",
+        "serverNames": ["www.google.com"],
+    }
