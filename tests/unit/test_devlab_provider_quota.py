@@ -220,7 +220,7 @@ async def test_heartbeat_body_includes_provider_quota_after_refresh(setup, provi
     assert protocol.LIMIT_PROVIDER_LEFT in limits
     assert protocol.LIMIT_PROVIDER_LIMIT in limits
     assert limits[protocol.LIMIT_PROVIDER_LEFT] == 400
-    assert limits[protocol.FIELD_LIMITS][MODEL][protocol.LIMIT_PROVIDER_LIMIT] == 500
+    assert limits[protocol.LIMIT_PROVIDER_LIMIT] == 500
 
 
 async def test_heartbeat_body_no_provider_quota_without_flag(setup, provider):
