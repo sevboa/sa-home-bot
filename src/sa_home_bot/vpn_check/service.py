@@ -32,6 +32,7 @@ from sa_home_bot.vpn_check.protocol import (
     ACTION_CHECK,
     ACTION_SERIES,
     ACTION_SERIES_STATUS,
+    ACTION_SNI_PROBE,
     SERIES_MODE_BURST,
     SERIES_MODE_SINGLE,
     SERVICE_NAME,
@@ -39,6 +40,7 @@ from sa_home_bot.vpn_check.protocol import (
 from sa_home_bot.vpn_series.measure import SeriesResult
 from sa_home_bot.vpn_series.raw_probe import RawTarget, RawVerdict, raw_probe, reality_target
 from sa_home_bot.vpn_series.runner import run_burst, run_single
+from sa_home_bot.vpn_series.sni_probe import probe_many
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +89,7 @@ class VpnCheckService:
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=(ACTION_CHECK, ACTION_SERIES, ACTION_SERIES_STATUS),
+            capabilities=(ACTION_CHECK, ACTION_SERIES, ACTION_SERIES_STATUS, ACTION_SNI_PROBE),
             actions=(
                 ActionSpec(
                     id=ACTION_CHECK,
@@ -107,6 +109,11 @@ class VpnCheckService:
                     title="📊 Статус последней серийной проверки",
                     params=(),
                 ),
+                ActionSpec(
+                    id=ACTION_SNI_PROBE,
+                    title="🔍 Проверить SNI-кандидатов (прямо с хоста)",
+                    params=(ActionParam(name="domains", title="Домены через запятую"),),
+                ),
             ),
         )
 
@@ -120,6 +127,8 @@ class VpnCheckService:
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_SERIES_STATUS:
             return {"results": self._series_last}
+        if action == ACTION_SNI_PROBE:
+            return await self._sni_probe(args)
         if action not in (ACTION_CHECK, ACTION_SERIES):
             raise undeclared_action(action)
         if action == ACTION_CHECK:
@@ -148,6 +157,26 @@ class VpnCheckService:
             return {"accepted": True, "server": server, "mode": mode}
         asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
         return {"accepted": True, "server": server, "targets": targets}
+
+    async def _sni_probe(self, args: dict[str, Any]) -> dict[str, Any]:
+        domains_raw = args.get("domains")
+        if domains_raw is None:
+            raise ProtoError(ERR_BAD_REQUEST, "нужен параметр domains")
+        if isinstance(domains_raw, str):
+            domains = [d.strip() for d in domains_raw.split(",") if d.strip()]
+        elif isinstance(domains_raw, list):
+            domains = [str(d).strip() for d in domains_raw if str(d).strip()]
+        else:
+            raise ProtoError(ERR_BAD_REQUEST, "domains должен быть строкой или списком")
+        if not domains:
+            raise ProtoError(ERR_BAD_REQUEST, "domains не может быть пустым")
+        if len(domains) > 30:
+            raise ProtoError(ERR_BAD_REQUEST, "максимум 30 доменов за раз")
+        for d in domains:
+            if not d or "." not in d or not all(c.isalnum() or c in ".-" for c in d):
+                raise ProtoError(ERR_BAD_REQUEST, f"некорректный домен: {d}")
+        results = await probe_many(domains)
+        return {"results": [r.model_dump(mode="json") for r in results]}
 
     async def _run_and_report(
         self, server: str, slots: list[ProbeSlot], targets: list[str]

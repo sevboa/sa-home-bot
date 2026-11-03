@@ -588,3 +588,112 @@ async def test_head_rejected_falls_back_to_get(monkeypatch):
     result = _result_for(node_link, "https://strict.example")
     assert result["ok"] is True
     assert "http_code" not in result
+
+
+async def test_describe_declares_sni_probe_action():
+    desc = _service(_FakeNodeLink()).describe()
+    assert desc.find_action("sni_probe") is not None
+    action = desc.find_action("sni_probe")
+    assert action.title == "🔍 Проверить SNI-кандидатов (прямо с хоста)"
+    assert any(p.name == "domains" for p in action.params)
+
+
+async def test_sni_probe_without_domains_is_bad_request():
+    service = _service(_FakeNodeLink())
+    with pytest.raises(ProtoError) as excinfo:
+        await service.run_command("sni_probe", {})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "нужен параметр domains" in str(excinfo.value)
+
+
+async def test_sni_probe_empty_domains_is_bad_request():
+    service = _service(_FakeNodeLink())
+    with pytest.raises(ProtoError) as excinfo:
+        await service.run_command("sni_probe", {"domains": ""})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "domains не может быть пустым" in str(excinfo.value)
+
+
+async def test_sni_probe_too_many_domains_is_bad_request():
+    service = _service(_FakeNodeLink())
+    domains = ",".join([f"d{i}.example.com" for i in range(31)])
+    with pytest.raises(ProtoError) as excinfo:
+        await service.run_command("sni_probe", {"domains": domains})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "максимум 30 доменов" in str(excinfo.value)
+
+
+async def test_sni_probe_invalid_domain_is_bad_request():
+    service = _service(_FakeNodeLink())
+    with pytest.raises(ProtoError) as excinfo:
+        await service.run_command("sni_probe", {"domains": "invalid_domain"})
+    assert excinfo.value.code == ERR_BAD_REQUEST
+    assert "некорректный домен" in str(excinfo.value)
+
+
+async def test_sni_probe_list_input(monkeypatch):
+    from sa_home_bot.vpn_series.sni_probe import SniVerdict
+
+    async def fake_probe_many(domains, *, concurrency=4, timeout=5.0):
+        results = []
+        for d in domains:
+            results.append(
+                type(
+                    "R",
+                    (),
+                    {
+                        "domain": d,
+                        "verdict": SniVerdict.ok,
+                        "ms": 10,
+                        "error": None,
+                        "model_dump": lambda self, mode="json", d=d: {
+                            "domain": d,
+                            "verdict": "ok",
+                            "ms": 10,
+                            "error": None,
+                        },
+                    },
+                )()
+            )
+        return results
+
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.probe_many", fake_probe_many)
+    service = _service(_FakeNodeLink())
+    result = await service.run_command("sni_probe", {"domains": ["a.example.com", "b.example.com"]})
+    assert "results" in result
+    assert len(result["results"]) == 2
+    assert result["results"][0]["domain"] == "a.example.com"
+    assert result["results"][1]["domain"] == "b.example.com"
+
+
+async def test_sni_probe_string_input(monkeypatch):
+    from sa_home_bot.vpn_series.sni_probe import SniVerdict
+
+    async def fake_probe_many(domains, *, concurrency=4, timeout=5.0):
+        results = []
+        for d in domains:
+            results.append(
+                type(
+                    "R",
+                    (),
+                    {
+                        "domain": d,
+                        "verdict": SniVerdict.ok,
+                        "ms": 10,
+                        "error": None,
+                        "model_dump": lambda self, mode="json", d=d: {
+                            "domain": d,
+                            "verdict": "ok",
+                            "ms": 10,
+                            "error": None,
+                        },
+                    },
+                )()
+            )
+        return results
+
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.probe_many", fake_probe_many)
+    service = _service(_FakeNodeLink())
+    result = await service.run_command("sni_probe", {"domains": "a.example.com,b.example.com"})
+    assert "results" in result
+    assert len(result["results"]) == 2
