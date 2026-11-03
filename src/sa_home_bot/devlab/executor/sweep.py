@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from sa_home_bot.devlab.executor.agent_worker import AGENT_DIR, AGENT_STATE_FILE
@@ -50,9 +50,11 @@ def remove_foreign_entries(work_dir: Path, keep: Collection[str]) -> int:
     return removed
 
 
-async def sweep_orphans(wrapper: WrapperClient, work_dir: Path, keep: Collection[str]) -> None:
+async def sweep_orphans(
+    wrapper: WrapperClient, work_dirs: Sequence[Path], keep: Collection[str]
+) -> None:
     try:
-        removed = await asyncio.to_thread(remove_foreign_entries, work_dir, keep)
+        removed = sum([await asyncio.to_thread(remove_foreign_entries, d, keep) for d in work_dirs])
         if removed:
             log.info("Убрано осиротевших рабочих копий: %d", removed)
     except OSError as exc:

@@ -5,8 +5,9 @@ import contextlib
 import logging
 import shutil
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -73,6 +74,31 @@ FAILURE_PREFIX = {
 CATALOG_WINDOW_SHARE = 0.9
 
 
+class SlotRegistry:
+    def __init__(self) -> None:
+        self._bases: Counter[str] = Counter()
+        self._lock = asyncio.Lock()
+
+    @property
+    def busy_bases(self) -> list[str]:
+        return sorted(self._bases)
+
+    async def claim(self, take: Callable[[list[str]], Awaitable[Job | None]]) -> Job | None:
+        async with self._lock:
+            job = await take(self.busy_bases)
+            if job is not None:
+                self.occupy(job.base_branch)
+            return job
+
+    def occupy(self, base: str) -> None:
+        self._bases[base] += 1
+
+    def release(self, base: str) -> None:
+        self._bases[base] -= 1
+        if self._bases[base] <= 0:
+            del self._bases[base]
+
+
 def rules_hint(rules: list[tuple[str, str]]) -> str:
     if not rules:
         return ""
@@ -127,6 +153,7 @@ class AgentSettings(WorkerSettings):
     limits: AgentLimits = AgentLimits()
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
+    slots: SlotRegistry = field(default_factory=SlotRegistry)
 
 
 @dataclass
@@ -278,9 +305,7 @@ class AgentWorker(WorkerLoops):
     @property
     def progress(self) -> dict[str, int]:
         return {
-            job_id: self._spends[job_id].replies()
-            for job_id in self.jobs
-            if job_id in self._spends
+            job_id: self._spends[job_id].replies() for job_id in self.jobs if job_id in self._spends
         }
 
     def _spend_of(self, job: Job) -> JobSpend:
@@ -342,7 +367,13 @@ class AgentWorker(WorkerLoops):
             except HubRequestError as exc:
                 log.info("Каталог моделей недоступен: %s", self.scrub(str(exc)))
                 return False
-        job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], available)
+        if resumed is not None:
+            self._settings.slots.occupy(resumed.base_branch)
+            job = resumed
+        else:
+            job = await self._settings.slots.claim(
+                lambda busy: self._hub.claim([protocol.JOB_KIND_AGENT], available, busy)
+            )
         if job is None:
             return False
         await self.handle(job, resumed=resumed is not None)
@@ -357,14 +388,17 @@ class AgentWorker(WorkerLoops):
         self._busy.started(job.id)
         if not resumed:
             await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
-        if job.id in self._stopped:
-            await self.send(job.id, protocol.MSG_STOPPED, {})
-        else:
-            self._task = asyncio.create_task(self._work(job, root))
-            try:
-                await self._task
-            finally:
-                self._task = None
+        try:
+            if job.id in self._stopped:
+                await self.send(job.id, protocol.MSG_STOPPED, {})
+            else:
+                self._task = asyncio.create_task(self._work(job, root))
+                try:
+                    await self._task
+                finally:
+                    self._task = None
+        finally:
+            self._settings.slots.release(job.base_branch)
         if job.id not in self._state.parked:
             self._busy.finished(job.id)
             shutil.rmtree(root, ignore_errors=True)

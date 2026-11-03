@@ -9,7 +9,7 @@ from sa_home_bot.config import DevlabConfig, Settings
 from sa_home_bot.devlab.agent.loop import AgentLimits
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, podman_sandbox_factory
-from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker
+from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker, SlotRegistry
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
@@ -55,6 +55,21 @@ def agent_limits(cfg: DevlabConfig) -> AgentLimits:
     )
 
 
+MEMORY_UNITS_MB = {"k": 1 / 1024, "m": 1, "g": 1024}
+MIN_SLOT_MEMORY_MB = 2048
+
+
+def split_memory(memory: str, slots: int) -> str:
+    if slots == 1:
+        return memory
+    total_mb = int(memory[:-1]) * MEMORY_UNITS_MB[memory[-1]]
+    return f"{max(MIN_SLOT_MEMORY_MB, int(total_mb // slots))}m"
+
+
+def slot_dir(work_dir: Path, index: int) -> Path:
+    return work_dir if index == 0 else work_dir / f"agent-{index}"
+
+
 async def run_executor(
     settings: Settings,
     runner: TestRunner | None = None,
@@ -72,6 +87,9 @@ async def run_executor(
     work_dir = work_dir_of(cfg)
     work_dir.mkdir(parents=True, exist_ok=True)
     hub = ExecutorHub(cfg.hub_url, cfg.hub_token)
+    catalog = ModelCatalog(hub)
+    gateways = GatewayModels(catalog, cfg.hub_token)
+    busy = BusyTracker(cfg.owner_wait_s)
     worker_settings = WorkerSettings(
         hub_url=cfg.hub_url,
         token=cfg.hub_token,
@@ -79,31 +97,51 @@ async def run_executor(
         poll_interval_s=cfg.poll_interval_s,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
     )
-    catalog = ModelCatalog(hub)
-    gateways = GatewayModels(catalog, cfg.hub_token)
-    busy = BusyTracker(cfg.owner_wait_s)
     tester = TestWorker(hub, runner, worker_settings, busy)
-    agent = AgentWorker(
-        hub,
-        models or gateways,
-        sandboxes or podman_sandbox_factory(cfg, pause=gate),
-        AgentSettings(**vars(worker_settings), limits=agent_limits(cfg)),
-        catalog,
-        busy,
+    slots = SlotRegistry()
+    slot_dirs = [slot_dir(work_dir, i) for i in range(cfg.agent_slots)]
+    sandbox_factory = sandboxes or podman_sandbox_factory(
+        cfg,
+        pause=gate,
+        cpus=cfg.agent_cpus / cfg.agent_slots,
+        memory=split_memory(cfg.agent_memory, cfg.agent_slots),
     )
+    agents: list[AgentWorker] = []
+    for directory in slot_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+        agents.append(
+            AgentWorker(
+                hub,
+                models or gateways,
+                sandbox_factory,
+                AgentSettings(
+                    **{**vars(worker_settings), "work_dir": directory},
+                    limits=agent_limits(cfg),
+                    slots=slots,
+                ),
+                catalog,
+                busy,
+            )
+        )
     service = ExecutorService(settings.node.id or socket.gethostname(), busy)
     server = ProtoServer(cfg.socket, service, token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
-    log.info("Служба devlab (исполнитель) запущена: хаб %s, каталог %s", hub.url, work_dir)
+    log.info(
+        "Служба devlab (исполнитель) запущена: хаб %s, каталог %s, агентских слотов %d",
+        hub.url,
+        work_dir,
+        cfg.agent_slots,
+    )
     neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
-    await sweep_orphans(containers, work_dir, agent.held_jobs)
+
+    await sweep_orphans(containers, slot_dirs, [job for agent in agents for job in agent.held_jobs])
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
-        asyncio.create_task(agent.run(heartbeat=False)),
+        *(asyncio.create_task(agent.run(heartbeat=False)) for agent in agents),
         asyncio.create_task(
-            beat_forever(hub, busy, (tester, agent), cfg.heartbeat_interval_s, agent)
+            beat_forever(hub, busy, (tester, *agents), cfg.heartbeat_interval_s, agents[0])
         ),
     ]
     try:

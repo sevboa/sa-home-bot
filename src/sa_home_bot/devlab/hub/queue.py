@@ -337,6 +337,7 @@ class HubQueue:
         executor: str,
         models: Collection[str],
         kinds: Collection[str] = (protocol.JOB_KIND_AGENT,),
+        busy_bases: Collection[str] = (),
     ) -> Job | None:
         unknown = [k for k in kinds if k not in protocol.JOB_KINDS]
         if unknown:
@@ -347,8 +348,9 @@ class HubQueue:
             fits.append("kind = ?")
             args.append(protocol.JOB_KIND_TEST)
         if protocol.JOB_KIND_AGENT in kinds and models:
-            fits.append(f"(kind = ? AND model IN ({_in(models)}))")
-            args.extend([protocol.JOB_KIND_AGENT, *models])
+            free_base = f" AND base_branch NOT IN ({_in(busy_bases)})" if busy_bases else ""
+            fits.append(f"(kind = ? AND model IN ({_in(models)}){free_base})")
+            args.extend([protocol.JOB_KIND_AGENT, *models, *busy_bases])
         if not fits:
             return None
         async with self._tx() as conn:
