@@ -20,7 +20,7 @@
 - `forbidden_paths`: пути, закрытые для записи (читать агент может: нужны образцы и тесты);
 - `secret_paths`: пути, закрытые и для чтения, и для записи (glob или префикс-каталог с `/`);
 - `diff_prefixes`: префиксы путей, где у результата должен быть непустой дифф (страж завершения; пусто: любой дифф);
-- `allow_remote_models`, `command_timeout_s`, `output_chars`.
+- `allow_remote_models`, `command_timeout_s`, `narrow_test_timeout_s` (по умолчанию 300), `output_chars`.
 
 ## Параллельные тесты (60.8.6)
 В sa-home-bot `[test] cmd = "python -m pytest -q -n auto"`: `pytest-xdist` стоит в dev-экстре, исполнитель

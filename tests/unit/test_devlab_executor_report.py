@@ -138,15 +138,16 @@ def test_agent_section_defaults_and_spec_from_project():
     assert spec.test_argv == ("pytest", "-q") and spec.test_timeout_s == 90
     assert spec.checks == () and spec.secret_paths == ()
     assert spec.command_timeout_s == DEFAULT_COMMAND_TIMEOUT_S
+    assert spec.narrow_test_timeout_s == 300.0
     assert spec.output_chars == DEFAULT_OUTPUT_CHARS
 
 
 def test_agent_section_fills_agent_spec():
     data = (
-        b"[agent]\nrules = [\"CLAUDE.md\"]\nchecks = [\"ruff check src\", \" \"]\n"
+        b'[agent]\nrules = ["CLAUDE.md"]\nchecks = ["ruff check src", " "]\n'
         b'allowed_commands = ["ruff", "python -m pytest"]\nforbidden_paths = ["tests/"]\n'
         b'secret_paths = [".env"]\ndiff_prefixes = ["src/"]\nallow_remote_models = true\n'
-        b"command_timeout_s = 12\noutput_chars = 100\n"
+        b"command_timeout_s = 12\noutput_chars = 100\nnarrow_test_timeout_s = 45\n"
     )
     project = parse_spec(data)
     assert project.agent.rules == ["CLAUDE.md"] and project.agent.allow_remote_models
@@ -160,9 +161,18 @@ def test_agent_section_fills_agent_spec():
         ("src/",),
     )
     assert (spec.command_timeout_s, spec.output_chars) == (12, 100)
+    assert spec.narrow_test_timeout_s == 45.0
 
 
-@pytest.mark.parametrize("data", [b"[agent]\ncommand_timeout_s = 0\n", b"[agent]\nchecks = 1\n"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"[agent]\ncommand_timeout_s = 0\n",
+        b"[agent]\nchecks = 1\n",
+        b"[agent]\nnarrow_test_timeout_s = 0\n",
+        b"[agent]\nnarrow_test_timeout_s = -1\n",
+    ],
+)
 def test_agent_section_validation(data):
     with pytest.raises(SpecError):
         parse_spec(data)

@@ -489,6 +489,39 @@ async def test_run_tests_paths_narrow_the_run(tmp_path):
     assert narrow.green is True
 
 
+@pytest.mark.parametrize(
+    "xdist",
+    [
+        ("-n", "auto"),
+        ("-n=auto",),
+        ("-nauto",),
+        ("-n4",),
+        ("--numprocesses", "4"),
+        ("--numprocesses=4",),
+    ],
+)
+async def test_run_tests_narrow_strips_xdist(tmp_path, xdist):
+    box = toolbox(
+        tmp_path,
+        test_argv=("echo", "pytest", "-q", *xdist, "-x"),
+        test_timeout_s=3600.0,
+        narrow_test_timeout_s=120.0,
+    )
+    narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py"})
+    assert "pytest -q -x tests/unit/a.py" in narrow.text
+
+
+async def test_run_tests_full_uses_test_timeout_and_keeps_argv(tmp_path):
+    box = toolbox(
+        tmp_path,
+        test_argv=("echo", "pytest", "-q", "-n", "auto"),
+        test_timeout_s=3600.0,
+        narrow_test_timeout_s=120.0,
+    )
+    full = await box.call(TOOL_RUN_TESTS, {})
+    assert "pytest -q -n auto" in full.text
+
+
 async def test_run_tests_paths_outside_root_rejected(tmp_path):
     box = toolbox(tmp_path, test_argv=ECHO_ARGV)
     with pytest.raises(ToolError):

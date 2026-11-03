@@ -145,10 +145,14 @@ usage, таймаут, HTTP-ошибка).
 ### `[agent]` в `.devlab.toml`
 `rules` (файлы правил в системный промпт; читает работник 60.5.4), `checks` (команды-стражи строками), `allowed_commands`
 (префиксы для `run_command`), `forbidden_paths`, `secret_paths`, `diff_prefixes`, `allow_remote_models` (по умолчанию
-`false`; применит 60.5.6), `command_timeout_s`, `output_chars`. Неизвестный ключ в `[agent]` — `SpecError` (опечатка не
+`false`; применит 60.5.6), `command_timeout_s`, `narrow_test_timeout_s` (по умолчанию 300), `output_chars`. Неизвестный ключ в `[agent]` — `SpecError` (опечатка не
 должна молча снимать защиту). Команда тестов и её таймаут — из `[test]`. sa-home-bot: rules = CLAUDE.md, checks =
 `ruff check src tests` и `test_no_comments_in_code`, `diff_prefixes = ["src/", "tests/"]` (с v0.154.0: тесты тоже засчитываются, docs — нет), `forbidden_paths` = `.devlab.toml`,
 CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`, `instances/*`, `*.sqlite`, `data/`.
+
+Находка 2026-11-03: узкие тесты (`run_tests` с `paths`) используют `narrow_test_timeout_s` и из argv
+удаляются аргументы xdist (`-n`, `-n=auto`, `-nauto`), так как на нескольких файлах воркеры только
+мешают; полный прогон (без `paths`) использует `test_timeout_s` из `[test]` и argv без изменений.
 
 ### Ограничения
 - Файлы, созданные в контейнере не-root пользователем, принадлежат subuid и не удаляются `refresh`/`clean` (так же у
