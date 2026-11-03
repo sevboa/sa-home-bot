@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from aiogram.types import InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, vpn_nodes, vpn_notify
+from sa_home_bot.bot import commands, vpn_check_view, vpn_devices, vpn_nodes, vpn_notify
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
@@ -66,6 +66,10 @@ _VERSION_EVENTS = (EVENT_UPDATE_FINISHED, EVENT_RESTART_APPLIED)
 _VPN_CHECK_EVENTS = (
     vpn_protocol.EVENT_VPN_CHECK_FAILED,
     vpn_protocol.EVENT_VPN_CHECK_RECOVERED,
+)
+_VPN_SERIES_EVENTS = (
+    vpn_protocol.EVENT_VPN_SERIES_FAILED,
+    vpn_protocol.EVENT_VPN_SERIES_RECOVERED,
 )
 
 
@@ -437,6 +441,24 @@ def render_vpn_check(name: str, data: dict) -> str | None:
     return "\n".join(lines)
 
 
+def render_vpn_series(name: str, data: dict) -> str | None:
+    node, server, transport = data.get("node"), data.get("server"), data.get("transport")
+    if not node or not server or not transport:
+        return None
+    label = vpn_devices.TECHNICAL_TRANSPORT_NAME.get(str(transport), str(transport))
+    where = (
+        f"Из РФ (<code>{html.escape(str(node))}</code>)",
+        f"{html.escape(label)} → <code>{html.escape(str(server))}</code>",
+    )
+    if name == vpn_protocol.EVENT_VPN_SERIES_RECOVERED:
+        return f"✅ {where[0]} снова работает {where[1]}"
+    problem = vpn_check_view.series_problem(str(data.get("verdict") or ""), data.get("at_bytes"))
+    text = f"⚠️ {where[0]} не работает {where[1]}: {html.escape(problem)}"
+    if data.get("consecutive"):
+        text += f" ({data['consecutive']} замера подряд)"
+    return text
+
+
 _VPN_GUEST_EVENTS = (
     vpn_protocol.EVENT_VPN_QUOTA_WARNING,
     vpn_protocol.EVENT_VPN_QUOTA_EXCEEDED,
@@ -643,8 +665,9 @@ def build_node_event_handler(
         elif name in _VPN_GUEST_EVENTS or name in _VPN_ADMIN_EVENTS:
             node_link = get_node_link() if get_node_link else None
             await _handle_vpn_event(name, data, book, notifier, store, node_link)
-        elif name in _VPN_CHECK_EVENTS:
-            check_text = render_vpn_check(name, data)
+        elif name in _VPN_CHECK_EVENTS or name in _VPN_SERIES_EVENTS:
+            render = render_vpn_check if name in _VPN_CHECK_EVENTS else render_vpn_series
+            check_text = render(name, data)
             if check_text is not None:
                 await _record_and_notify_admins(
                     book, notifier, store, name, data.get("node"), check_text

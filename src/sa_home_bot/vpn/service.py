@@ -44,6 +44,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_PROXY_USAGE,
     ACTION_REISSUE,
     ACTION_REPORT_CHECK,
+    ACTION_REPORT_SERIES,
     ACTION_REQUEST_EXTRA,
     ACTION_RESOLVE_REQUEST,
     ACTION_REVOKE,
@@ -278,6 +279,14 @@ class VpnService(
                     ActionParam(name="results", title="Результаты"),
                 ),
             ),
+            ActionSpec(
+                id=ACTION_REPORT_SERIES,
+                title="📡 Отчёт серии VPN",
+                params=(
+                    ActionParam(name="node", type="string", title="Нода"),
+                    ActionParam(name="results", title="Результаты"),
+                ),
+            ),
             ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
             ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
             ActionSpec(
@@ -389,6 +398,8 @@ class VpnService(
             return await self._apk_set_file_id(args)
         if action == ACTION_REPORT_CHECK:
             return await self._report_check(args)
+        if action == ACTION_REPORT_SERIES:
+            return await self._report_series(args)
         if action == ACTION_CHECK_NOW:
             return await self._dispatch_checks()
         if action == ACTION_CHECK_STATUS:

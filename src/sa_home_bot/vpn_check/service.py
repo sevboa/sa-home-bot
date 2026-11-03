@@ -24,9 +24,23 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.proto.server import undeclared_action
+from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.process import run
 from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
-from sa_home_bot.vpn_check.protocol import ACTION_CHECK, SERVICE_NAME
+from sa_home_bot.vpn.protocol import ACTION_REPORT_CHECK, ACTION_REPORT_SERIES
+from sa_home_bot.vpn_check.protocol import (
+    ACTION_CHECK,
+    ACTION_SERIES,
+    ACTION_SERIES_STATUS,
+    ACTION_SNI_PROBE,
+    SERIES_MODE_BURST,
+    SERIES_MODE_SINGLE,
+    SERVICE_NAME,
+)
+from sa_home_bot.vpn_series.measure import SeriesResult
+from sa_home_bot.vpn_series.raw_probe import RawTarget, RawVerdict, raw_probe, reality_target
+from sa_home_bot.vpn_series.runner import run_burst, run_single
+from sa_home_bot.vpn_series.sni_probe import parse_domains, probe_many
 
 log = logging.getLogger(__name__)
 
@@ -56,21 +70,49 @@ class VpnCheckService:
         slots: list[ProbeSlot] | None = None,
     ) -> None:
         self._cfg = settings.vpn_check
+        self._series_cfg = settings.vpn_series
         self._node_link = node_link
         self._node = socket.gethostname()
         self._slots = vpn_probe_state.load() if slots is None else slots
         self._is_vpn_exit = assignments.has_service(settings.node.assignments, "vpn")
         self._reality_procs: dict[str, asyncio.subprocess.Process] = {}
+        self._slot_locks: dict[str, asyncio.Lock] = {}
+        self._series_last: dict[str, dict] = {}
+
+    def _slot_lock(self, slot: ProbeSlot) -> asyncio.Lock:
+        lock = self._slot_locks.get(slot.netns)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._slot_locks[slot.netns] = lock
+        return lock
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
             info=ServiceInfo(node=self._node, service=SERVICE_NAME, version=__version__),
-            capabilities=(ACTION_CHECK,),
+            capabilities=(ACTION_CHECK, ACTION_SERIES, ACTION_SERIES_STATUS, ACTION_SNI_PROBE),
             actions=(
                 ActionSpec(
                     id=ACTION_CHECK,
                     title="📡 Проверить доступность через VPN",
                     params=(ActionParam(name="targets", title="Цели (список URL)"),),
+                ),
+                ActionSpec(
+                    id=ACTION_SERIES,
+                    title="📈 Серийная проверка пропускной способности",
+                    params=(
+                        ActionParam(name="server", title="Сервер"),
+                        ActionParam(name="mode", title="Режим (single|burst)"),
+                    ),
+                ),
+                ActionSpec(
+                    id=ACTION_SERIES_STATUS,
+                    title="📊 Статус последней серийной проверки",
+                    params=(),
+                ),
+                ActionSpec(
+                    id=ACTION_SNI_PROBE,
+                    title="🔍 Проверить SNI-кандидатов (прямо с хоста)",
+                    params=(ActionParam(name="domains", title="Домены через запятую"),),
                 ),
             ),
         )
@@ -83,12 +125,21 @@ class VpnCheckService:
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
-        if action != ACTION_CHECK:
+        if action == ACTION_SERIES_STATUS:
+            return {"results": self._series_last}
+        if action == ACTION_SNI_PROBE:
+            return await self._sni_probe(args)
+        if action not in (ACTION_CHECK, ACTION_SERIES):
             raise undeclared_action(action)
-        targets = args.get("targets")
-        if not isinstance(targets, list) or not targets:
-            raise ProtoError(ERR_BAD_REQUEST, "targets должен быть непустым списком URL")
-        targets = [str(t) for t in targets]
+        if action == ACTION_CHECK:
+            targets = args.get("targets")
+            if not isinstance(targets, list) or not targets:
+                raise ProtoError(ERR_BAD_REQUEST, "targets должен быть непустым списком URL")
+            targets = [str(t) for t in targets]
+        else:
+            mode = str(args.get("mode", SERIES_MODE_SINGLE)).strip()
+            if mode not in (SERIES_MODE_SINGLE, SERIES_MODE_BURST):
+                raise ProtoError(ERR_BAD_REQUEST, f"неизвестный mode: {mode}")
         server = str(args.get("server", "")).strip()
         if not server:
             raise ProtoError(ERR_BAD_REQUEST, "нужен server — кого проверяем")
@@ -101,8 +152,19 @@ class VpnCheckService:
                 "server": server,
                 "skipped": "нет локально настроенного тоннеля к этому серверу",
             }
+        if action == ACTION_SERIES:
+            asyncio.create_task(self._series_run(slots, mode), name="vpn-series-run")
+            return {"accepted": True, "server": server, "mode": mode}
         asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
         return {"accepted": True, "server": server, "targets": targets}
+
+    async def _sni_probe(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            domains = parse_domains(args.get("domains"))
+        except ValueError as exc:
+            raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
+        results = await probe_many(domains)
+        return {"results": [r.model_dump(mode="json") for r in results]}
 
     async def _run_and_report(
         self, server: str, slots: list[ProbeSlot], targets: list[str]
@@ -110,9 +172,12 @@ class VpnCheckService:
         results: list[dict[str, Any]] = []
         for slot in slots:
             results.extend(await self._check_slot(slot, targets))
+        await self._report_to_vpn(ACTION_REPORT_CHECK, results)
+
+    async def _report_to_vpn(self, action: str, results: list[dict[str, Any]]) -> None:
         try:
             reports = await vpn_nodes.fanout(
-                self._node_link, "report_check", {"node": self._node, "results": results}
+                self._node_link, action, {"node": self._node, "results": results}
             )
             if not reports:
                 log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")
@@ -120,32 +185,106 @@ class VpnCheckService:
             log.warning("vpn_check: не удалось отправить результат в vpn: %s", exc)
 
     async def _check_slot(self, slot: ProbeSlot, targets: list[str]) -> list[dict[str, Any]]:
-        up_err = await self._tunnel_up(slot)
+        lock = self._slot_lock(slot)
+        async with lock:
+            up_err = await self._tunnel_up(slot)
+            try:
+                gate = up_err if up_err is not None else await self._egress_gate(slot)
+                results: list[dict[str, Any]] = []
+                for target in targets:
+                    one = (
+                        {"ok": False, "ms": None, "error": gate}
+                        if gate is not None
+                        else (await self._check_one(slot, target))
+                    )
+                    results.append(
+                        {
+                            "server": slot.server,
+                            "transport": slot.transport,
+                            "target": target,
+                            **one,
+                        }
+                    )
+                failed = [r for r in results if not r["ok"]]
+                if failed:
+                    log.warning(
+                        "vpn_check: %s %s — не прошли %d из %d: %s",
+                        slot.server,
+                        slot.transport,
+                        len(failed),
+                        len(results),
+                        "; ".join(f"{r['target']}: {r.get('error') or '?'}" for r in failed),
+                    )
+                return results
+            finally:
+                await self._tunnel_down(slot)
+
+    def _reality_raw_target(self, slot: ProbeSlot) -> RawTarget | None:
+        if slot.transport != "reality":
+            return None
         try:
-            gate = up_err if up_err is not None else await self._egress_gate(slot)
-            results: list[dict[str, Any]] = []
-            for target in targets:
-                one = (
-                    {"ok": False, "ms": None, "error": gate}
-                    if gate is not None
-                    else (await self._check_one(slot, target))
-                )
-                results.append(
-                    {"server": slot.server, "transport": slot.transport, "target": target, **one}
-                )
-            failed = [r for r in results if not r["ok"]]
-            if failed:
-                log.warning(
-                    "vpn_check: %s %s — не прошли %d из %d: %s",
-                    slot.server,
-                    slot.transport,
-                    len(failed),
-                    len(results),
-                    "; ".join(f"{r['target']}: {r.get('error') or '?'}" for r in failed),
-                )
-            return results
-        finally:
-            await self._tunnel_down(slot)
+            return reality_target(vpn_probe_state.reality_conf_path(slot).read_text())
+        except OSError:
+            return None
+
+    async def _series_slot(self, slot: ProbeSlot, mode: str) -> dict[str, Any]:
+        async with self._slot_lock(slot):
+            attempted = False
+
+            async def do_handshake() -> str | None:
+                nonlocal attempted
+                attempted = True
+                err = await self._tunnel_up(slot)
+                return err if err is not None else await self._egress_gate(slot)
+
+            try:
+                raw_result = await raw_probe(slot, self._reality_raw_target(slot), do_handshake)
+                series: list[SeriesResult] = []
+                if raw_result.verdict == RawVerdict.OK:
+                    series = (
+                        [await run_single(slot, self._series_cfg)]
+                        if mode == SERIES_MODE_SINGLE
+                        else await run_burst(slot, self._series_cfg)
+                    )
+            finally:
+                if attempted:
+                    await self._tunnel_down(slot)
+        return {
+            "server": slot.server,
+            "transport": slot.transport,
+            "mode": mode,
+            "raw": raw_result.model_dump(mode="json"),
+            "series": [r.model_dump(mode="json") for r in series],
+            "at": utc_now().isoformat(),
+        }
+
+    async def _series_run(self, slots: list[ProbeSlot], mode: str) -> None:
+        results: list[dict[str, Any]] = []
+        for slot in slots:
+            try:
+                result = await self._series_slot(slot, mode)
+            except Exception:
+                log.exception("vpn_series: %s %s — ошибка серии", slot.server, slot.transport)
+                continue
+            self._series_last[f"{slot.server}/{slot.transport}"] = result
+            log.info(
+                "vpn_series: %s %s mode=%s raw=%s series=%s",
+                slot.server,
+                slot.transport,
+                mode,
+                result["raw"]["verdict"],
+                [s["verdict"] for s in result["series"]],
+            )
+            results.append(result)
+        if results:
+            await self._report_to_vpn(ACTION_REPORT_SERIES, results)
+
+    async def series_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._series_cfg.interval_s)
+            await self._series_run(
+                [s for s in self._slots if s.server != self._node], SERIES_MODE_SINGLE
+            )
 
     async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
         if slot.transport == "awg":

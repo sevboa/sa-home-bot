@@ -29,3 +29,103 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 ## mtg_probe (vpn_series)
 
 `src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
+
+## Серийная проверка: действие series (63.1.4, 2026-11-03)
+
+Действие `series` живёт **внутри** службы `vpn_check` (не отдельная служба). Причина: тот же netns пробника, иначе `vpn_check` и серия гасят друг другу туннель. Существующее поведение `check` (формат, тексты, отчёт `report_check`, события) **не меняется** — только добавляется действие и замок на слот.
+
+### Замок слота
+`self._slot_locks: dict[str, asyncio.Lock]` (ключ — `slot.netns`). Метод `_check_slot` целиком выполняется под этим замком (единственная правка существующего пути — обернуть тело в `async with`). `_series_slot` тоже берёт тот же замок. Это гарантирует, что `check` и `series` по одному слоту не пересекаются.
+
+### Лёгкий режим по умолчанию
+- Серия 30 с, файл 20 МБ (`url = "https://speed.cloudflare.com/__down?bytes=20000000"`, `duration_s = 30.0`).
+- По расписанию — одиночная серия раз в 3 ч (`interval_s = 10800.0`).
+- Залп (`burst`) — только по команде.
+- Расписание выключено по умолчанию (`enabled = false`), включается только в конфиге zakhar:
+  ```toml
+  [vpn_series]
+  enabled = true
+  ```
+
+### Действия
+- `series` — параметры `server`, `mode` = `single`|`burst`. Проверки `server` как у `check` (self-check и «нет слота» — `accepted` + `skipped`), неизвестный `mode` → `ProtoError(ERR_BAD_REQUEST, ...)`. Запускает фоновую задачу `_series_run(server, slots, mode)`, сразу возвращает `{"accepted": true, "server": ..., "mode": ...}`.
+- `series_status` — без параметров, возвращает `{"results": self._series_last}` (последний результат по ключу `"<server>/<transport>"`).
+
+### Процесс `_series_slot`
+Под замком слота:
+1. Для reality цель TCP — `reality_target(reality_conf_path(slot).read_text())`, ошибка чтения → `target=None`.
+2. `raw_probe` с `do_handshake`, который поднимает туннель (`_tunnel_up`) и делает `_egress_gate`, **БЕЗ гашения**.
+3. Если вердикт `ok` — `run_single` или `run_burst`; иначе серия не запускается.
+4. `finally` — `_tunnel_down`.
+
+Результат: `{"server","transport","mode","raw": RawProbeResult.model_dump(mode="json"), "series": [SeriesResult.model_dump(mode="json"), ...], "at": utc_now().isoformat()}`.
+
+### Расписание
+Метод `async def series_loop(self)` — бесконечно: `asyncio.sleep(interval_s)`, затем `_series_run` по каждому серверу слотов в режиме `single` (исключения логировать, цикл не падает). Запуск в `vpn_check/app.py`: `asyncio.create_task(service.series_loop())` только при `settings.vpn_series.enabled`, отмена задачи в `finally`.
+
+### Отчёт в vpn (63.1.5, 2026-11-03)
+После прохода по слотам `_series_run` одним вызовом шлёт `report_series {node, results}` во все живые
+инстансы `vpn` (`vpn_nodes.fanout`, общий с `report_check` хелпер `_report_to_vpn`). Если ни один слот
+не дал результата (все упали исключением), отчёт не шлётся.
+
+Приём — `vpn/checks.py::_report_series`. Вердикт пары (сервер, транспорт) —
+`domain/vpn_series.py::series_verdict`: не-`ok` вердикт TCP-части (`tcp_blocked`, `proto_blocked`)
+важнее серии; иначе первый из `freeze`/`cut`/`error`; `slow` считается рабочим (медленно, но живо —
+блокировкой не считаем). Гистерезис тот же `reconcile_band`, пороги отдельные от `check_*`:
+`[vpn] series_fail_threshold = 2`, `series_clear_threshold = 1` — при расписании раз в 3 ч алерт
+приходит не раньше чем через ~6 ч от начала поломки, зато одна случайная заморозка не будит.
+
+Состояние — таблица `vpn_series_states` (ключ node, server, transport; `last_report` — JSON отчёта
+целиком, для строки `/vpn` в 63.1.6). `vpn_check_states` не трогается. События:
+`vpn_series_failed {node, server, transport, verdict, consecutive}` и
+`vpn_series_recovered {node, server, transport}`; `at_bytes` — где встала первая сломанная серия
+(`stalled_at_bytes`, иначе `bytes_total`).
+
+### Показ (63.1.6, 2026-11-03)
+Алерт админам — `bot/node_events.py::render_vpn_series`, отдельно от `render_vpn_check` (его тексты не
+менялись). `check_status` у vpn теперь отдаёт ещё `series` — строки `vpn_series_states`; экран
+«проверка доступности» `/vpn` рисует блок «🇷🇺 Из РФ» только если строки есть: 🔴 — в алерте
+(гистерезис), 🟠 — последний замер плохой, но порог ещё не пройден, 🟢 — работает. Без данных серий
+экран байт в байт прежний. В снапшот бэкапа
+таблица не входит (оперативные данные, как `vpn_check_states`).
+
+## Проверка SNI-кандидатов (63.2.2, 2026-11-03)
+
+### Зачем
+Reality маскируется под чужой домен (SNI). Если ТСПУ режет этот домен или он не отдаёт TLS 1.3 + h2,
+маскировка выдаёт себя. Нужна проверка списка кандидатов прямо с zakhar (РФ), без VPN-туннеля.
+
+### Вердикты
+- `ok` — DNS резолвится, TCP соединяется, TLS 1.3, ALPN h2.
+- `dns_fail` — `getaddrinfo` не нашёл домен.
+- `tcp_fail` — TCP не дошёл (timeout, connection refused, др. OSError до TLS).
+- `tls_fail` — TLS-хендшейк упал (`ssl.SSLError`) или нет `ssl_object`.
+- `no_tls13` — хендшейк прошёл, но версия не TLSv1.3.
+- `no_h2` — TLS 1.3 есть, но ALPN не `h2` (обычно `http/1.1`).
+
+### Действие
+`vpn_check.sni_probe` — параметр `domains` (строка через запятую или список, макс. 30 доменов).
+Валидация: только `[a-z0-9.-]`, есть точка. Туннели и замки слотов **не трогает** — проверка идёт
+с хоста напрямую.
+
+### Пример
+```bash
+nodectl -n zakhar call vpn_check sni_probe domains=www.google.com,dl.google.com
+```
+
+### Ответ
+```json
+{
+  "results": [
+    {"domain": "www.google.com", "verdict": "ok", "ms": 42, "error": null},
+    {"domain": "dl.google.com", "verdict": "no_h2", "ms": 38, "error": "ALPN: http/1.1"}
+  ]
+}
+```
+
+### Ограничение
+Проверка отвечает «домен сам по себе жив из РФ и годится как маска (TLS 1.3 + h2)». Она не
+доказывает, что ТСПУ пропустит Reality на НАШ IP с этим SNI — это видно только серией 63.1 после
+выката нового SNI (63.2.3). Таймаут всего TLS-хендшейка считается `tcp_fail` (DPI часто именно
+молча тянет время), DNS ограничен тем же таймаутом. Домены приводятся к нижнему регистру,
+кириллические (IDN) не принимаются — передавайте punycode.

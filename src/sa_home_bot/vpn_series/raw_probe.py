@@ -10,7 +10,6 @@ from typing import Any
 from pydantic import BaseModel
 
 from sa_home_bot.node.vpn_probe_state import ProbeSlot
-from sa_home_bot.vpn_check.service import VpnCheckService
 
 TCP_TIMEOUT_S = 5.0
 
@@ -60,14 +59,6 @@ async def tcp_connect(host: str, port: int, timeout: float = TCP_TIMEOUT_S) -> s
     with contextlib.suppress(OSError):
         await writer.wait_closed()
     return None
-
-
-async def handshake(service: VpnCheckService, slot: ProbeSlot) -> str | None:
-    err = await service._tunnel_up(slot)
-    try:
-        return err if err is not None else await service._egress_gate(slot)
-    finally:
-        await service._tunnel_down(slot)
 
 
 async def raw_probe(

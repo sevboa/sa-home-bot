@@ -319,7 +319,11 @@ async def _check_status(ctx: Ctx, value: str | None, node_id: str | None) -> Non
         return
     await ctx.callback.answer()
     await ctx.edit(
-        vpn_check_view.status_text(result.get("states") or [], rollup=result.get("rollup") or []),
+        vpn_check_view.status_text(
+            result.get("states") or [],
+            rollup=result.get("rollup") or [],
+            series=result.get("series") or [],
+        ),
         vpn_check_view.status_keyboard(),
     )
 
@@ -336,14 +340,16 @@ async def _check_now(ctx: Ctx, value: str | None, node_id: str | None) -> None:
         f"Запущено на: {', '.join(dispatched)}" if dispatched else "Разослать не удалось",
         show_alert=not dispatched,
     )
-    states: list[dict] = []
-    rollup: list[dict] = []
+    status: dict = {}
     with contextlib.suppress(ProtoError, ServiceUnavailableError):
         status = await ctx.node_link.command(vpn_protocol.ACTION_CHECK_STATUS, {}, dst=dst)
-        states = status.get("states") or []
-        rollup = status.get("rollup") or []
     await ctx.edit(
-        vpn_check_view.status_text(states, rollup=rollup, pending=True),
+        vpn_check_view.status_text(
+            status.get("states") or [],
+            rollup=status.get("rollup") or [],
+            series=status.get("series") or [],
+            pending=True,
+        ),
         vpn_check_view.status_keyboard(),
     )
 
