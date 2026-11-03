@@ -740,6 +740,8 @@ class LlmService:
             return await self._dispatch_command(action, args)
         finally:
             self._cpu_tasks.pop(task_id, None)
+            if self._went_idle_at is not None:
+                self._went_idle_at = utc_now()
             await asyncio.shield(self._emit_cpu_task(EVENT_LLM_CPU_TASK_FINISHED, task_id, kind))
 
     async def _emit_cpu_task(self, event: str, task_id: str, kind: str) -> None:
@@ -1489,7 +1491,8 @@ class LlmService:
         now = utc_now()
         if self._asleep:
             if (
-                self._went_idle_at is not None
+                not self._cpu_tasks
+                and self._went_idle_at is not None
                 and (now - self._went_idle_at).total_seconds() >= WENT_IDLE_REPEAT_S
             ):
                 await self._emit_went_idle(now)

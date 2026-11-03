@@ -1332,3 +1332,31 @@ async def test_went_idle_does_not_repeat_after_quiet_sleep(monkeypatch):
     await svc._maybe_sleep_idle()
 
     assert emitter.events == []
+
+
+async def test_went_idle_not_repeated_during_cpu_task_and_postponed_after(monkeypatch):
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(idle_sleep_after_s=60.0), emit=emitter)
+    svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
+    await svc._maybe_sleep_idle()
+    long_ago = datetime.now(tz=UTC) - timedelta(seconds=10_000)
+    svc._went_idle_at = long_ago
+    svc._cpu_tasks["t"] = "tts"
+
+    await svc._maybe_sleep_idle()
+    assert emitter.events == [("llm_went_idle", {})]
+
+    async def fake_dispatch(action, args):
+        return {}
+
+    del svc._cpu_tasks["t"]
+    monkeypatch.setattr(svc, "_dispatch_command", fake_dispatch)
+    await svc.run_command("synthesize_speech", {})
+    await svc._maybe_sleep_idle()
+
+    assert svc._went_idle_at > long_ago
+    assert [e for e in emitter.events if e[0] == "llm_went_idle"] == [("llm_went_idle", {})]
