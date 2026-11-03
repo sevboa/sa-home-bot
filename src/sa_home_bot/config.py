@@ -162,6 +162,7 @@ class DevlabConfig(BaseModel):
     agent_cpuset: str = Field(default="6-11", pattern=CPUSET_PATTERN)
     agent_cpus: float = Field(default=6.0, gt=0)
     agent_memory: str = Field(default="12g", pattern=r"^[0-9]+[kmg]$")
+    agent_slots: int = Field(default=1, ge=1, le=4)
     build_timeout_s: float = Field(default=1800.0, gt=0)
     agent_max_steps: int = Field(default=60, ge=1)
     agent_max_wall_s: float = Field(default=8 * 3600.0, gt=0)

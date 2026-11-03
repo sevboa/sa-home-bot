@@ -45,6 +45,8 @@ class PodmanSandbox:
         baseline: dict[str, str] | None = None,
         spawn: Spawn = process.run,
         pause: PauseClock | None = None,
+        cpus: float | None = None,
+        memory: str | None = None,
     ) -> None:
         self._cfg = cfg
         self._name = job_name(job_id)
@@ -58,6 +60,8 @@ class PodmanSandbox:
         self._running = False
         self._stale = True
         self._lost = False
+        self._cpus = cpus
+        self._memory = memory
 
     @property
     def name(self) -> str:
@@ -146,11 +150,13 @@ class PodmanSandbox:
         self._stale = False
 
     async def _create(self) -> None:
+        cpus = self._cpus if self._cpus is not None else self._cfg.agent_cpus
+        memory = self._memory if self._memory is not None else self._cfg.agent_memory
         await self._wrapper.create(
             self._name,
             self._tag,
-            self._cfg.agent_cpus,
-            self._cfg.agent_memory,
+            cpus,
+            memory,
             self._cfg.agent_cpuset,
         )
         self._running = True
@@ -217,7 +223,11 @@ SandboxFactory = Callable[[SandboxRequest], ManagedSandbox]
 
 
 def podman_sandbox_factory(
-    cfg: DevlabConfig, spawn: Spawn = process.run, pause: PauseClock | None = None
+    cfg: DevlabConfig,
+    spawn: Spawn = process.run,
+    pause: PauseClock | None = None,
+    cpus: float | None = None,
+    memory: str | None = None,
 ) -> SandboxFactory:
     def make(request: SandboxRequest) -> PodmanSandbox:
         recipe = ImageRecipe.from_section(request.project.test, cfg.test_image)
@@ -230,6 +240,8 @@ def podman_sandbox_factory(
             request.baseline,
             spawn,
             pause,
+            cpus,
+            memory,
         )
 
     return make

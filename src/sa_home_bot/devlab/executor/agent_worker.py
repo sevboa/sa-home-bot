@@ -73,6 +73,27 @@ FAILURE_PREFIX = {
 CATALOG_WINDOW_SHARE = 0.9
 
 
+class SlotRegistry:
+    def __init__(self) -> None:
+        self._occupied: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def try_occupy(self, base_branch: str) -> bool:
+        async with self._lock:
+            if base_branch in self._occupied:
+                return False
+            self._occupied.add(base_branch)
+            return True
+
+    async def release(self, base_branch: str) -> None:
+        async with self._lock:
+            self._occupied.discard(base_branch)
+
+    async def is_occupied(self, base_branch: str) -> bool:
+        async with self._lock:
+            return base_branch in self._occupied
+
+
 def rules_hint(rules: list[tuple[str, str]]) -> str:
     if not rules:
         return ""
@@ -127,6 +148,8 @@ class AgentSettings(WorkerSettings):
     limits: AgentLimits = AgentLimits()
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
+    slot_index: int = 0
+    slot_registry: SlotRegistry | None = None
 
 
 @dataclass
@@ -345,6 +368,15 @@ class AgentWorker(WorkerLoops):
         job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], available)
         if job is None:
             return False
+        if self._settings.slot_registry is not None:
+            occupied = await self._settings.slot_registry.try_occupy(job.base_branch)
+            if not occupied:
+                await self._hub.post(
+                    job.id,
+                    protocol.MSG_REQUEUE,
+                    {protocol.PAYLOAD_TEXT: f"база {job.base_branch} занята другим слотом"},
+                )
+                return False
         await self.handle(job, resumed=resumed is not None)
         return True
 
@@ -369,6 +401,8 @@ class AgentWorker(WorkerLoops):
             self._busy.finished(job.id)
             shutil.rmtree(root, ignore_errors=True)
             self._drop_spend(job.id)
+        if self._settings.slot_registry is not None:
+            await self._settings.slot_registry.release(job.base_branch)
         self._stopped.discard(job.id)
         self._current = None
         self._save(job=None)
