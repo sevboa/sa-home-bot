@@ -1300,3 +1300,35 @@ async def test_night_mode_rejects_non_bool():
     with pytest.raises(ProtoError) as excinfo:
         await LlmService(_settings()).run_command("set_night_mode", {"night": "yes"})
     assert excinfo.value.code == ERR_BAD_REQUEST
+
+
+@pytest.mark.parametrize(("since_idle_s", "repeats"), [(601.0, 1), (30.0, 0)])
+async def test_went_idle_repeats_while_asleep(monkeypatch, since_idle_s, repeats):
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(idle_sleep_after_s=60.0), emit=emitter)
+    svc._last_activity = datetime.now(tz=UTC) - timedelta(seconds=61)
+    await svc._maybe_sleep_idle()
+    svc._went_idle_at = datetime.now(tz=UTC) - timedelta(seconds=since_idle_s)
+
+    await svc._maybe_sleep_idle()
+
+    assert emitter.events == [("llm_went_idle", {})] * (1 + repeats)
+
+
+async def test_went_idle_does_not_repeat_after_quiet_sleep(monkeypatch):
+    async def fake_stop(cfg):
+        pass
+
+    monkeypatch.setattr(llm_service.ollama, "stop", fake_stop)
+    emitter = FakeEmitter()
+    svc = LlmService(_settings(idle_sleep_after_s=60.0), emit=emitter)
+    svc._went_idle_at = datetime.now(tz=UTC) - timedelta(seconds=10_000)
+    await svc._sleep_now(quiet=True)
+
+    await svc._maybe_sleep_idle()
+
+    assert emitter.events == []

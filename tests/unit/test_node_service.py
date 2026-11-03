@@ -874,6 +874,7 @@ async def test_maybe_auto_poweroff_idle_blocked_by_ssh_session(monkeypatch):
         emit=emit,
     )
     await svc.maybe_auto_poweroff_idle()
+    await svc.maybe_auto_poweroff_idle()
     assert ran == []
     assert len(emitted) == 1
     event_type, data = emitted[0]

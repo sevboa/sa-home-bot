@@ -168,6 +168,7 @@ class NodeService:
         self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
         self._idle_poweroff = idle_poweroff and controllable
+        self._idle_blocked_by: list[str] = []
         self._restart_node = restart_node
         self._restart_wait_task: asyncio.Task[None] | None = None
         self._state = state if state is not None else NodeState()
@@ -803,6 +804,7 @@ class NodeService:
             return
         ssh, tmux = await self._blocking_sessions()
         if not ssh and not tmux:
+            self._idle_blocked_by = []
             self._schedule_power(ACTION_POWEROFF)
             return
         descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
@@ -811,6 +813,9 @@ class NodeService:
             self._node,
             ", ".join(descriptions),
         )
+        if descriptions == self._idle_blocked_by:
+            return
+        self._idle_blocked_by = descriptions
         if self._emit is not None:
             await self._emit(
                 EVENT_IDLE_POWER_BLOCKED,

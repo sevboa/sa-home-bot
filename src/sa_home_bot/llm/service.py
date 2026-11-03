@@ -10,6 +10,7 @@ import socket
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
 
 from PIL import Image
@@ -148,6 +149,7 @@ PHOTO_PROCESS_FAILED_TEXT = (
 PHOTO_NOT_FOUND_TEXT = "Не нахожу это фото — похоже, сохранённая копия уже устарела."
 
 _IDLE_CHECK_INTERVAL_S = 60.0
+WENT_IDLE_REPEAT_S = 600.0
 _STREAMING_ENTRY_TTL_S = 120.0
 _STT_UPLOAD_TTL_S = 300.0
 _INLINE_TTS_B64_BYTES = 800_000
@@ -333,6 +335,7 @@ class LlmService:
         self._emit = emit
         self._last_activity = utc_now()
         self._asleep = False
+        self._went_idle_at: datetime | None = None
         self._warmup_confirmed = False
         self._active_chat_ids: set[int] = set()
         self._keepalive = ollama.WslKeepalive(
@@ -1460,6 +1463,7 @@ class LlmService:
         if self._cfg.container_backend == "wsl-docker":
             await self._keepalive.stop()
         self._asleep = True
+        self._went_idle_at = None
         self._warmup_confirmed = False
         if quiet:
             self._active_chat_ids.clear()
@@ -1482,15 +1486,24 @@ class LlmService:
             log.exception("llm: не удалось эмитить %s", EVENT_LLM_SERVICE_RESTART)
 
     async def _maybe_sleep_idle(self) -> None:
+        now = utc_now()
         if self._asleep:
+            if (
+                self._went_idle_at is not None
+                and (now - self._went_idle_at).total_seconds() >= WENT_IDLE_REPEAT_S
+            ):
+                await self._emit_went_idle(now)
             return
-        idle_for = (utc_now() - self._last_activity).total_seconds()
-        if idle_for >= self._cfg.idle_sleep_after_s:
+        if (now - self._last_activity).total_seconds() >= self._cfg.idle_sleep_after_s:
             await self._sleep_now()
-            try:
-                await self._emit(EVENT_LLM_WENT_IDLE, {})
-            except Exception:
-                log.exception("llm: не удалось эмитить %s", EVENT_LLM_WENT_IDLE)
+            await self._emit_went_idle(now)
+
+    async def _emit_went_idle(self, now: datetime) -> None:
+        self._went_idle_at = now
+        try:
+            await self._emit(EVENT_LLM_WENT_IDLE, {})
+        except Exception:
+            log.exception("llm: не удалось эмитить %s", EVENT_LLM_WENT_IDLE)
 
     async def idle_loop(self) -> None:
         while True:
