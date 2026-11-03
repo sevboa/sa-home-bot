@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from typing import Any
 
 import pytest
 from aiohttp import web
@@ -108,7 +109,7 @@ class Rig:
 
         return Sandbox(request.workdir, request.baseline)
 
-    async def start_executor(self, monkeypatch) -> FakeTestRunner:
+    async def start_executor(self, monkeypatch, **devlab: Any) -> FakeTestRunner:
         stop = self.stop
 
         class StopLifespan:
@@ -129,6 +130,7 @@ class Rig:
                 work_dir=str(env.tmp_path / "exec"),
                 poll_interval_s=0.02,
                 heartbeat_interval_s=0.05,
+                **devlab,
             )
         )
         self.executor = asyncio.create_task(
@@ -219,13 +221,13 @@ async def test_executor_sweeps_orphans_before_loops_keeping_parked(env, rig, mon
     (env.tmp_path / "exec" / AGENT_STATE_FILE).write_text(state.model_dump_json())
     calls = []
 
-    async def record(wrapper, work_dir, keep):
-        calls.append((work_dir, list(keep)))
+    async def record(wrapper, work_dirs, keep):
+        calls.append((list(work_dirs), list(keep)))
 
     monkeypatch.setattr(executor_app, "sweep_orphans", record)
     await rig.start_executor(monkeypatch)
     await wait_until(lambda: calls, timeout=DONE_TIMEOUT_S)
-    assert calls == [(env.tmp_path / "exec", ["p-1"])]
+    assert calls == [([env.tmp_path / "exec"], ["p-1"])]
 
 
 async def test_task_survives_gateway_loss_mid_job(env, rig, monkeypatch):
@@ -243,3 +245,25 @@ async def test_task_survives_gateway_loss_mid_job(env, rig, monkeypatch):
     assert await env.inbox_kinds() == STARTED_DONE
     assert await hub_branch(env, agent_of(job_id))
     assert await rig.requests_by_gateway(job_id) == {GATEWAYS[0]: 1, GATEWAYS[1]: 1}
+
+
+async def test_executor_sweeps_every_agent_slot_dir(env, rig, monkeypatch):
+    calls = []
+
+    async def record(wrapper, work_dirs, keep):
+        calls.append(list(work_dirs))
+
+    monkeypatch.setattr(executor_app, "sweep_orphans", record)
+    await rig.start_executor(monkeypatch, agent_slots=2)
+    await wait_until(lambda: calls, timeout=DONE_TIMEOUT_S)
+    exec_dir = env.tmp_path / "exec"
+    assert calls == [[exec_dir, exec_dir / "agent-1"]]
+    assert (exec_dir / "agent-1").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("memory", "slots", "expected"),
+    [("12g", 1, "12g"), ("12g", 2, "6144m"), ("3g", 2, "2048m"), ("8192m", 4, "2048m")],
+)
+def test_split_memory(memory, slots, expected):
+    assert executor_app.split_memory(memory, slots) == expected

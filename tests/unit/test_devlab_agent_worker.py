@@ -20,6 +20,7 @@ from sa_home_bot.devlab.executor.agent_worker import (
     AgentState,
     AgentWorker,
     ParkedEntry,
+    SlotRegistry,
     rules_hint,
 )
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
@@ -78,6 +79,8 @@ def make_worker(
     limits=None,
     catalog=None,
     busy=None,
+    work_dir="exec",
+    slots=None,
 ) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
@@ -88,26 +91,28 @@ def make_worker(
         AgentSettings(
             hub_url=env.hub_url,
             token=env.executor_token,
-            work_dir=env.tmp_path / "exec",
+            work_dir=env.tmp_path / work_dir,
             poll_interval_s=0.01,
             heartbeat_interval_s=0.01,
             **({"limits": limits} if limits else {}),
             push_interval_s=0.0,
             retry_interval_s=0.01,
+            **({"slots": slots} if slots else {}),
         ),
         catalog or StaticCatalog(*(local_entry(name) for name in models)),
         busy,
     )
 
 
-async def submit(env) -> str:
-    await env.push(BASE, BASE_FILES)
+async def submit(env, base=BASE, push=True) -> str:
+    if push:
+        await env.push(base, BASE_FILES)
     data = await env.mcp.call(
         protocol.TOOL_SUBMIT,
         project=PROJECT,
         model=MODEL,
         task="# сделай out.txt",
-        base_branch=BASE,
+        base_branch=base,
     )
     return data["job"]["id"]
 
@@ -412,3 +417,51 @@ async def test_repeat_crane_does_not_extend_budget_and_resumes_cleanly(env):
     assert await worker.claim_once()
 
     assert await env.status(job_id) == protocol.STATUS_DONE
+
+
+async def stop_running(env, worker: AgentWorker, job_id: str, running: asyncio.Task) -> None:
+    await env.mcp.call(protocol.TOOL_STOP, id=job_id)
+    await worker.poll_once()
+    assert await running
+
+
+async def test_second_slot_skips_job_on_busy_base_until_released(env):
+    slots = SlotRegistry()
+    first_model = BlockingModel(WRITE_DONE)
+    first = make_worker(env, first_model, slots=slots)
+    second = make_worker(env, ScriptedChatModel(WRITE_DONE, FINISH), work_dir="exec-1", slots=slots)
+    first_id = await submit(env)
+    second_id = await submit(env, push=False)
+    running = await start_blocked(first, first_model)
+    assert slots.busy_bases == [BASE]
+    assert await second.claim_once() is False
+    assert await env.status(second_id) == protocol.STATUS_QUEUED
+    await stop_running(env, first, first_id, running)
+    assert slots.busy_bases == []
+    assert await second.claim_once()
+    assert await env.status(second_id) == protocol.STATUS_DONE
+
+
+async def test_second_slot_takes_job_on_other_base(env):
+    slots = SlotRegistry()
+    first_model, second_model = BlockingModel(WRITE_DONE), BlockingModel(WRITE_DONE)
+    first = make_worker(env, first_model, slots=slots)
+    second = make_worker(env, second_model, work_dir="exec-1", slots=slots)
+    first_id = await submit(env)
+    second_id = await submit(env, base="base/other")
+    first_run = await start_blocked(first, first_model)
+    second_run = await start_blocked(second, second_model)
+    assert slots.busy_bases == sorted([BASE, "base/other"])
+    await stop_running(env, first, first_id, first_run)
+    await stop_running(env, second, second_id, second_run)
+    assert slots.busy_bases == []
+
+
+def test_slot_registry_counts_same_base_twice():
+    slots = SlotRegistry()
+    slots.occupy("b")
+    slots.occupy("b")
+    slots.release("b")
+    assert slots.busy_bases == ["b"]
+    slots.release("b")
+    assert slots.busy_bases == []

@@ -56,11 +56,13 @@ class ExecutorHub(HubHttp):
         data = await self._post(protocol.HTTP_HEARTBEAT_PATH, body)
         return int(data.get(protocol.FIELD_QUEUED, 0))
 
-    async def claim(self, kinds: list[str], models: Sequence[str] = ()) -> Job | None:
-        data = await self._post(
-            protocol.HTTP_CLAIM_PATH,
-            {protocol.FIELD_MODELS: list(models), protocol.FIELD_KINDS: kinds},
-        )
+    async def claim(
+        self, kinds: list[str], models: Sequence[str] = (), busy_bases: Sequence[str] = ()
+    ) -> Job | None:
+        body: dict[str, Any] = {protocol.FIELD_MODELS: list(models), protocol.FIELD_KINDS: kinds}
+        if busy_bases:
+            body[protocol.FIELD_BUSY_BASES] = list(busy_bases)
+        data = await self._post(protocol.HTTP_CLAIM_PATH, body)
         job = data.get(protocol.FIELD_JOB)
         return Job(**job) if job else None
 

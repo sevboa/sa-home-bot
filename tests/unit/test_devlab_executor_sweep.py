@@ -49,7 +49,7 @@ async def test_sweep_orphans_cleans_dirs_and_calls_wrapper(tmp_path):
     populate(tmp_path)
     spawn = FakeSpawn()
     wrapper = WrapperClient(DevlabConfig(), spawn)
-    await sweep_orphans(wrapper, tmp_path, ["J-keep", "a-parked", "bad id!"])
+    await sweep_orphans(wrapper, [tmp_path], ["J-keep", "a-parked", "bad id!"])
     assert not (tmp_path / "jobs" / "j-old").exists()
     assert spawn.calls[0][5:] == ["sweep", "a-parked", "j-keep"]
 
@@ -57,7 +57,7 @@ async def test_sweep_orphans_cleans_dirs_and_calls_wrapper(tmp_path):
 async def test_sweep_orphans_survives_old_wrapper(tmp_path):
     spawn = FakeSpawn(code=2)
     wrapper = WrapperClient(DevlabConfig(), spawn)
-    await sweep_orphans(wrapper, tmp_path, [])
+    await sweep_orphans(wrapper, [tmp_path], [])
     assert spawn.calls[0][5:] == ["sweep"]
 
 
@@ -89,3 +89,12 @@ def test_failure_on_one_entry_does_not_stop_the_rest(tmp_path, monkeypatch):
     assert removed == 2
     assert (tmp_path / "jobs" / "j-old").exists()
     assert not (tmp_path / "agent" / "a-old").exists()
+
+
+async def test_sweep_orphans_cleans_every_slot_dir(tmp_path):
+    slot = tmp_path / "agent-1"
+    populate(tmp_path)
+    populate(slot)
+    await sweep_orphans(WrapperClient(DevlabConfig(), FakeSpawn()), [tmp_path, slot], ["a-parked"])
+    for root in (tmp_path, slot):
+        assert sorted(p.name for p in (root / "agent").iterdir()) == ["a-parked"]

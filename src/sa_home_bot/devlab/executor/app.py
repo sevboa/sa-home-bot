@@ -55,19 +55,19 @@ def agent_limits(cfg: DevlabConfig) -> AgentLimits:
     )
 
 
-def _parse_memory_gb(memory: str) -> int:
-    memory = memory.lower().strip()
-    if memory.endswith("g"):
-        return int(memory[:-1])
-    if memory.endswith("m"):
-        return max(1, int(memory[:-1]) // 1024)
-    if memory.endswith("k"):
-        return max(1, int(memory[:-1]) // (1024 * 1024))
-    return int(memory)
+MEMORY_UNITS_MB = {"k": 1 / 1024, "m": 1, "g": 1024}
+MIN_SLOT_MEMORY_MB = 2048
 
 
-def _format_memory_gb(gb: int) -> str:
-    return f"{gb}g"
+def split_memory(memory: str, slots: int) -> str:
+    if slots == 1:
+        return memory
+    total_mb = int(memory[:-1]) * MEMORY_UNITS_MB[memory[-1]]
+    return f"{max(MIN_SLOT_MEMORY_MB, int(total_mb // slots))}m"
+
+
+def slot_dir(work_dir: Path, index: int) -> Path:
+    return work_dir if index == 0 else work_dir / f"agent-{index}"
 
 
 async def run_executor(
@@ -90,80 +90,58 @@ async def run_executor(
     catalog = ModelCatalog(hub)
     gateways = GatewayModels(catalog, cfg.hub_token)
     busy = BusyTracker(cfg.owner_wait_s)
-    tester = TestWorker(hub, runner, WorkerSettings(
+    worker_settings = WorkerSettings(
         hub_url=cfg.hub_url,
         token=cfg.hub_token,
         work_dir=work_dir,
         poll_interval_s=cfg.poll_interval_s,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
-    ), busy)
-
-    slot_registry = SlotRegistry()
-    agent_workers: list[AgentWorker] = []
-    agent_slots = cfg.agent_slots
-    base_cpus = cfg.agent_cpus
-    base_memory_gb = _parse_memory_gb(cfg.agent_memory)
-    per_slot_cpus = base_cpus / agent_slots
-    per_slot_memory_gb = max(2, base_memory_gb // agent_slots)
-
-    for i in range(agent_slots):
-        if i == 0:
-            slot_work_dir = work_dir
-        else:
-            slot_work_dir = work_dir / f"agent-{i}"
-            slot_work_dir.mkdir(parents=True, exist_ok=True)
-
-        worker_settings = WorkerSettings(
-            hub_url=cfg.hub_url,
-            token=cfg.hub_token,
-            work_dir=slot_work_dir,
-            poll_interval_s=cfg.poll_interval_s,
-            heartbeat_interval_s=cfg.heartbeat_interval_s,
+    )
+    tester = TestWorker(hub, runner, worker_settings, busy)
+    slots = SlotRegistry()
+    slot_dirs = [slot_dir(work_dir, i) for i in range(cfg.agent_slots)]
+    sandbox_factory = sandboxes or podman_sandbox_factory(
+        cfg,
+        pause=gate,
+        cpus=cfg.agent_cpus / cfg.agent_slots,
+        memory=split_memory(cfg.agent_memory, cfg.agent_slots),
+    )
+    agents: list[AgentWorker] = []
+    for directory in slot_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+        agents.append(
+            AgentWorker(
+                hub,
+                models or gateways,
+                sandbox_factory,
+                AgentSettings(
+                    **{**vars(worker_settings), "work_dir": directory},
+                    limits=agent_limits(cfg),
+                    slots=slots,
+                ),
+                catalog,
+                busy,
+            )
         )
-        agent_settings = AgentSettings(
-            **vars(worker_settings),
-            limits=agent_limits(cfg),
-            slot_index=i,
-            slot_registry=slot_registry,
-        )
-        agent = AgentWorker(
-            hub,
-            models or gateways,
-            sandboxes
-            or podman_sandbox_factory(
-                cfg, pause=gate, cpus=per_slot_cpus, memory=_format_memory_gb(per_slot_memory_gb)
-            ),
-            agent_settings,
-            catalog,
-            busy,
-        )
-        agent_workers.append(agent)
-
     service = ExecutorService(settings.node.id or socket.gethostname(), busy)
     server = ProtoServer(cfg.socket, service, token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
     log.info(
-        "Служба devlab (исполнитель) запущена: хаб %s, каталог %s, слотов агентов %d",
+        "Служба devlab (исполнитель) запущена: хаб %s, каталог %s, агентских слотов %d",
         hub.url,
         work_dir,
-        agent_slots,
+        cfg.agent_slots,
     )
     neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
 
-    def all_held_jobs() -> list[str]:
-        jobs: list[str] = []
-        for aw in agent_workers:
-            jobs.extend(aw.held_jobs)
-        return jobs
-
-    await sweep_orphans(containers, work_dir, all_held_jobs())
+    await sweep_orphans(containers, slot_dirs, [job for agent in agents for job in agent.held_jobs])
     tasks = [
         asyncio.create_task(tester.run(heartbeat=False)),
-        *[asyncio.create_task(aw.run(heartbeat=False)) for aw in agent_workers],
+        *(asyncio.create_task(agent.run(heartbeat=False)) for agent in agents),
         asyncio.create_task(
-            beat_forever(hub, busy, (tester, *agent_workers), cfg.heartbeat_interval_s, tester)
+            beat_forever(hub, busy, (tester, *agents), cfg.heartbeat_interval_s, agents[0])
         ),
     ]
     try:

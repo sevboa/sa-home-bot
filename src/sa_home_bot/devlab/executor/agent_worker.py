@@ -5,8 +5,9 @@ import contextlib
 import logging
 import shutil
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -75,23 +76,27 @@ CATALOG_WINDOW_SHARE = 0.9
 
 class SlotRegistry:
     def __init__(self) -> None:
-        self._occupied: set[str] = set()
+        self._bases: Counter[str] = Counter()
         self._lock = asyncio.Lock()
 
-    async def try_occupy(self, base_branch: str) -> bool:
-        async with self._lock:
-            if base_branch in self._occupied:
-                return False
-            self._occupied.add(base_branch)
-            return True
+    @property
+    def busy_bases(self) -> list[str]:
+        return sorted(self._bases)
 
-    async def release(self, base_branch: str) -> None:
+    async def claim(self, take: Callable[[list[str]], Awaitable[Job | None]]) -> Job | None:
         async with self._lock:
-            self._occupied.discard(base_branch)
+            job = await take(self.busy_bases)
+            if job is not None:
+                self.occupy(job.base_branch)
+            return job
 
-    async def is_occupied(self, base_branch: str) -> bool:
-        async with self._lock:
-            return base_branch in self._occupied
+    def occupy(self, base: str) -> None:
+        self._bases[base] += 1
+
+    def release(self, base: str) -> None:
+        self._bases[base] -= 1
+        if self._bases[base] <= 0:
+            del self._bases[base]
 
 
 def rules_hint(rules: list[tuple[str, str]]) -> str:
@@ -148,8 +153,7 @@ class AgentSettings(WorkerSettings):
     limits: AgentLimits = AgentLimits()
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
-    slot_index: int = 0
-    slot_registry: SlotRegistry | None = None
+    slots: SlotRegistry = field(default_factory=SlotRegistry)
 
 
 @dataclass
@@ -301,9 +305,7 @@ class AgentWorker(WorkerLoops):
     @property
     def progress(self) -> dict[str, int]:
         return {
-            job_id: self._spends[job_id].replies()
-            for job_id in self.jobs
-            if job_id in self._spends
+            job_id: self._spends[job_id].replies() for job_id in self.jobs if job_id in self._spends
         }
 
     def _spend_of(self, job: Job) -> JobSpend:
@@ -365,18 +367,15 @@ class AgentWorker(WorkerLoops):
             except HubRequestError as exc:
                 log.info("Каталог моделей недоступен: %s", self.scrub(str(exc)))
                 return False
-        job = resumed or await self._hub.claim([protocol.JOB_KIND_AGENT], available)
+        if resumed is not None:
+            self._settings.slots.occupy(resumed.base_branch)
+            job = resumed
+        else:
+            job = await self._settings.slots.claim(
+                lambda busy: self._hub.claim([protocol.JOB_KIND_AGENT], available, busy)
+            )
         if job is None:
             return False
-        if self._settings.slot_registry is not None:
-            occupied = await self._settings.slot_registry.try_occupy(job.base_branch)
-            if not occupied:
-                await self._hub.post(
-                    job.id,
-                    protocol.MSG_REQUEUE,
-                    {protocol.PAYLOAD_TEXT: f"база {job.base_branch} занята другим слотом"},
-                )
-                return False
         await self.handle(job, resumed=resumed is not None)
         return True
 
@@ -389,20 +388,21 @@ class AgentWorker(WorkerLoops):
         self._busy.started(job.id)
         if not resumed:
             await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
-        if job.id in self._stopped:
-            await self.send(job.id, protocol.MSG_STOPPED, {})
-        else:
-            self._task = asyncio.create_task(self._work(job, root))
-            try:
-                await self._task
-            finally:
-                self._task = None
+        try:
+            if job.id in self._stopped:
+                await self.send(job.id, protocol.MSG_STOPPED, {})
+            else:
+                self._task = asyncio.create_task(self._work(job, root))
+                try:
+                    await self._task
+                finally:
+                    self._task = None
+        finally:
+            self._settings.slots.release(job.base_branch)
         if job.id not in self._state.parked:
             self._busy.finished(job.id)
             shutil.rmtree(root, ignore_errors=True)
             self._drop_spend(job.id)
-        if self._settings.slot_registry is not None:
-            await self._settings.slot_registry.release(job.base_branch)
         self._stopped.discard(job.id)
         self._current = None
         self._save(job=None)
