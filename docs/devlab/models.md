@@ -71,6 +71,12 @@ remote = true
   запросы других шлюзов с этой моделью, которые сообщил хаб через heartbeat. Без флага поведение
   прежнее — каждый шлюз считает только свои. При недоступном хабе шлюз считает только свои запросы;
   расхождение не больше расхода за интервал heartbeat.
+- `provider_quota = true` (в таблице модели, только для OpenRouter): раз в час шлюз запрашивает
+  `GET <base_url>/key` с заголовком `Authorization: Bearer <api_key>` и читает
+  `data.free_model_daily_requests.{remaining,limit}`. Значения попадают в heartbeat как
+  `provider_left` и `provider_limit` (даже если `rpd = 0`). OpenRouter: 50 запросов/сутки без
+  покупки 10 кредитов, 1000 — после; сброс 00:00 UTC. Наш `rpd` держим чуть ниже настоящего
+  (например 950 вместо 1000), чтобы не упираться в 429 провайдера.
 
 ## Учёт
 `usage(day, model, job, requests, tokens_in, tokens_out, cost_usd)` — только агрегаты по

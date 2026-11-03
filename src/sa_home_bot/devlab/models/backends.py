@@ -55,6 +55,9 @@ class ModelBackend(abc.ABC):
     async def close(self) -> None:
         return None
 
+    async def provider_quota(self) -> tuple[int, int] | None:
+        return None
+
 
 class HttpBackend(ModelBackend):
     def __init__(self, name: str, spec: DevlabModelConfig) -> None:
@@ -82,6 +85,32 @@ class OpenAiBackend(HttpBackend):
         return await self._post(
             url, {**body, "model": self.spec.model}, headers, self.spec.proxy or None
         )
+
+    async def provider_quota(self) -> tuple[int, int] | None:
+        if not self.spec.api_key:
+            return None
+        url = self.spec.base_url.rstrip("/") + "/key"
+        headers = {"Authorization": BEARER + self.spec.api_key}
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with self._session.get(
+                url, headers=headers, timeout=timeout, proxy=self.spec.proxy or None
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("provider_quota: HTTP %s для %s", resp.status, self.name)
+                    return None
+                data = await resp.json()
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            log.warning("provider_quota: ошибка для %s: %s", self.name, type(exc).__name__)
+            return None
+        try:
+            free = data["data"]["free_model_daily_requests"]
+            remaining = int(free["remaining"])
+            limit = int(free["limit"])
+            return remaining, limit
+        except (KeyError, TypeError, ValueError):
+            log.warning("provider_quota: неожиданный ответ для %s", self.name)
+            return None
 
 
 def model_unit(name: str) -> str:
