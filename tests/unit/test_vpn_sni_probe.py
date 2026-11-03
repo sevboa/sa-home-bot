@@ -118,7 +118,7 @@ async def test_probe_sni_no_ssl_object(monkeypatch):
     result = await probe_sni("example.com", timeout=5.0)
 
     assert result.verdict == SniVerdict.tls_fail
-    assert "нет ssl_object" in result.error
+    assert result.error == "нет TLS-сессии"
 
 
 async def test_probe_many_preserves_order(monkeypatch):

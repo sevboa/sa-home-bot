@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import socket
 import ssl
 import time
 from enum import StrEnum
 
 from pydantic import BaseModel
+
+SNI_PORT = 443
+SNI_TIMEOUT_S = 5.0
+SNI_CONCURRENCY = 4
+SNI_MAX_DOMAINS = 30
+DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 
 
 class SniVerdict(StrEnum):
@@ -26,100 +33,79 @@ class SniResult(BaseModel):
     error: str | None
 
 
-async def probe_sni(domain: str, port: int = 443, timeout: float = 5.0) -> SniResult:
-    start = time.monotonic()
-    loop = asyncio.get_running_loop()
+def parse_domains(raw: object) -> list[str]:
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif isinstance(raw, list):
+        items = [str(item) for item in raw]
+    else:
+        raise ValueError("domains — строка через запятую или список")
+    domains = [item.strip().lower() for item in items if item.strip()]
+    if not domains:
+        raise ValueError("domains пуст")
+    if len(domains) > SNI_MAX_DOMAINS:
+        raise ValueError(f"не больше {SNI_MAX_DOMAINS} доменов за раз")
+    bad = [domain for domain in domains if not DOMAIN_RE.match(domain)]
+    if bad:
+        raise ValueError(f"некорректный домен: {bad[0]}")
+    return domains
 
-    try:
-        await loop.getaddrinfo(domain, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        return SniResult(
-            domain=domain,
-            verdict=SniVerdict.dns_fail,
-            ms=None,
-            error=f"{type(exc).__name__}: {exc}",
-        )
 
+def _tls_context() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.set_alpn_protocols(["h2", "http/1.1"])
+    return ctx
 
-    writer = None
+
+def _error(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+async def probe_sni(domain: str, port: int = SNI_PORT, timeout: float = SNI_TIMEOUT_S) -> SniResult:
+    def result(verdict: SniVerdict, error: str | None = None, ms: int | None = None) -> SniResult:
+        return SniResult(domain=domain, verdict=verdict, ms=ms, error=error)
+
+    started = time.monotonic()
+    loop = asyncio.get_running_loop()
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(domain, port, ssl=ctx, server_hostname=domain),
+        await asyncio.wait_for(loop.getaddrinfo(domain, port, type=socket.SOCK_STREAM), timeout)
+    except (socket.gaierror, TimeoutError) as exc:
+        return result(SniVerdict.dns_fail, _error(exc))
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(domain, port, ssl=_tls_context(), server_hostname=domain),
             timeout,
         )
     except TimeoutError:
-        return SniResult(
-            domain=domain,
-            verdict=SniVerdict.tcp_fail,
-            ms=None,
-            error="таймаут TCP",
-        )
+        return result(SniVerdict.tcp_fail, "таймаут")
     except ssl.SSLError as exc:
-        return SniResult(
-            domain=domain,
-            verdict=SniVerdict.tls_fail,
-            ms=None,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        return result(SniVerdict.tls_fail, _error(exc))
     except OSError as exc:
-        return SniResult(
-            domain=domain,
-            verdict=SniVerdict.tcp_fail,
-            ms=None,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-
+        return result(SniVerdict.tcp_fail, _error(exc))
     try:
-        ssl_object = writer.get_extra_info("ssl_object")
-        if ssl_object is None:
-            return SniResult(
-                domain=domain,
-                verdict=SniVerdict.tls_fail,
-                ms=None,
-                error="нет ssl_object",
-            )
-
-        version = ssl_object.version()
-        if version != "TLSv1.3":
-            return SniResult(
-                domain=domain,
-                verdict=SniVerdict.no_tls13,
-                ms=int((time.monotonic() - start) * 1000),
-                error=f"версия TLS: {version}",
-            )
-
-        alpn = ssl_object.selected_alpn_protocol()
-        if alpn != "h2":
-            return SniResult(
-                domain=domain,
-                verdict=SniVerdict.no_h2,
-                ms=int((time.monotonic() - start) * 1000),
-                error=f"ALPN: {alpn}",
-            )
-
-        return SniResult(
-            domain=domain,
-            verdict=SniVerdict.ok,
-            ms=int((time.monotonic() - start) * 1000),
-            error=None,
-        )
+        ms = int((time.monotonic() - started) * 1000)
+        tls = writer.get_extra_info("ssl_object")
+        if tls is None:
+            return result(SniVerdict.tls_fail, "нет TLS-сессии")
+        if tls.version() != "TLSv1.3":
+            return result(SniVerdict.no_tls13, f"версия TLS: {tls.version()}", ms)
+        if tls.selected_alpn_protocol() != "h2":
+            return result(SniVerdict.no_h2, f"ALPN: {tls.selected_alpn_protocol()}", ms)
+        return result(SniVerdict.ok, ms=ms)
     finally:
-        if writer is not None:
-            writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
 
 
 async def probe_many(
-    domains: list[str], *, concurrency: int = 4, timeout: float = 5.0
+    domains: list[str], *, concurrency: int = SNI_CONCURRENCY, timeout: float = SNI_TIMEOUT_S
 ) -> list[SniResult]:
-    semaphore = asyncio.Semaphore(concurrency)
+    gate = asyncio.Semaphore(concurrency)
 
-    async def _probe(domain: str) -> SniResult:
-        async with semaphore:
+    async def one(domain: str) -> SniResult:
+        async with gate:
             return await probe_sni(domain, timeout=timeout)
 
-    return await asyncio.gather(*[_probe(d) for d in domains])
+    return list(await asyncio.gather(*(one(domain) for domain in domains)))

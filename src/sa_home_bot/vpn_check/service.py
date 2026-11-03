@@ -40,7 +40,7 @@ from sa_home_bot.vpn_check.protocol import (
 from sa_home_bot.vpn_series.measure import SeriesResult
 from sa_home_bot.vpn_series.raw_probe import RawTarget, RawVerdict, raw_probe, reality_target
 from sa_home_bot.vpn_series.runner import run_burst, run_single
-from sa_home_bot.vpn_series.sni_probe import probe_many
+from sa_home_bot.vpn_series.sni_probe import parse_domains, probe_many
 
 log = logging.getLogger(__name__)
 
@@ -159,22 +159,10 @@ class VpnCheckService:
         return {"accepted": True, "server": server, "targets": targets}
 
     async def _sni_probe(self, args: dict[str, Any]) -> dict[str, Any]:
-        domains_raw = args.get("domains")
-        if domains_raw is None:
-            raise ProtoError(ERR_BAD_REQUEST, "нужен параметр domains")
-        if isinstance(domains_raw, str):
-            domains = [d.strip() for d in domains_raw.split(",") if d.strip()]
-        elif isinstance(domains_raw, list):
-            domains = [str(d).strip() for d in domains_raw if str(d).strip()]
-        else:
-            raise ProtoError(ERR_BAD_REQUEST, "domains должен быть строкой или списком")
-        if not domains:
-            raise ProtoError(ERR_BAD_REQUEST, "domains не может быть пустым")
-        if len(domains) > 30:
-            raise ProtoError(ERR_BAD_REQUEST, "максимум 30 доменов за раз")
-        for d in domains:
-            if not d or "." not in d or not all(c.isalnum() or c in ".-" for c in d):
-                raise ProtoError(ERR_BAD_REQUEST, f"некорректный домен: {d}")
+        try:
+            domains = parse_domains(args.get("domains"))
+        except ValueError as exc:
+            raise ProtoError(ERR_BAD_REQUEST, str(exc)) from exc
         results = await probe_many(domains)
         return {"results": [r.model_dump(mode="json") for r in results]}
 

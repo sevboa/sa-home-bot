@@ -598,37 +598,22 @@ async def test_describe_declares_sni_probe_action():
     assert any(p.name == "domains" for p in action.params)
 
 
-async def test_sni_probe_without_domains_is_bad_request():
-    service = _service(_FakeNodeLink())
-    with pytest.raises(ProtoError) as excinfo:
-        await service.run_command("sni_probe", {})
-    assert excinfo.value.code == ERR_BAD_REQUEST
-    assert "нужен параметр domains" in str(excinfo.value)
-
-
-async def test_sni_probe_empty_domains_is_bad_request():
-    service = _service(_FakeNodeLink())
-    with pytest.raises(ProtoError) as excinfo:
-        await service.run_command("sni_probe", {"domains": ""})
-    assert excinfo.value.code == ERR_BAD_REQUEST
-    assert "domains не может быть пустым" in str(excinfo.value)
-
-
-async def test_sni_probe_too_many_domains_is_bad_request():
-    service = _service(_FakeNodeLink())
-    domains = ",".join([f"d{i}.example.com" for i in range(31)])
-    with pytest.raises(ProtoError) as excinfo:
-        await service.run_command("sni_probe", {"domains": domains})
-    assert excinfo.value.code == ERR_BAD_REQUEST
-    assert "максимум 30 доменов" in str(excinfo.value)
-
-
-async def test_sni_probe_invalid_domain_is_bad_request():
-    service = _service(_FakeNodeLink())
-    with pytest.raises(ProtoError) as excinfo:
-        await service.run_command("sni_probe", {"domains": "invalid_domain"})
-    assert excinfo.value.code == ERR_BAD_REQUEST
-    assert "некорректный домен" in str(excinfo.value)
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"domains": 5},
+        {"domains": " , "},
+        {"domains": ",".join(f"d{i}.example.com" for i in range(31))},
+        {"domains": "bad_domain"},
+        {"domains": "пример.рф"},
+        {"domains": ["ok.example.com", "nodot"]},
+    ],
+)
+async def test_sni_probe_bad_domains_are_bad_request(args):
+    with pytest.raises(ProtoError) as exc:
+        await _service(_FakeNodeLink()).run_command("sni_probe", args)
+    assert exc.value.code == ERR_BAD_REQUEST
 
 
 async def test_sni_probe_list_input(monkeypatch):
