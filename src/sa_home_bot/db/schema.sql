@@ -748,7 +748,7 @@ CREATE TABLE IF NOT EXISTS person_profiles (
     seen_at     TEXT NOT NULL
 );
 
--- Этап 64 (2026-10-04): переписка групп с мгновенной подрезкой до keep реплик.
+-- Этап 64 (2026-11-04): переписка групп с мгновенной подрезкой до keep реплик.
 -- PRIMARY KEY (chat_id, message_id) — message_id уникален в рамках чата.
 -- from_alfred: 1 — сообщение от бота, 0 — от пользователя.
 CREATE TABLE IF NOT EXISTS group_messages (
@@ -763,7 +763,7 @@ CREATE TABLE IF NOT EXISTS group_messages (
     PRIMARY KEY (chat_id, message_id)
 );
 
--- Этап 64 (2026-10-04): сводка дня по группе.
+-- Этап 64 (2026-11-04): сводка дня по группе.
 -- upto_message_id — максимальный message_id, охваченный сводкой.
 -- updated_at — когда строка обновлена (UTC ISO).
 CREATE TABLE IF NOT EXISTS group_day_summaries (
