@@ -40,8 +40,19 @@ from tests.unit.support.dispatch import prod_dispatcher
 BASE_TIME = datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC)
 
 
-def _book(*, admin_chat: int = 1, group_log_chat: int | None = None) -> SubscriptionBook:
+def _book(
+    *,
+    admin_chat: int = 1,
+    group_log_chat: int | None = None,
+    other_group_chat: int | None = None,
+) -> SubscriptionBook:
     configs = [SubscriptionConfig(name="admin", chat_id=admin_chat, allowed_commands=["*"])]
+    if other_group_chat is not None:
+        configs.append(
+            SubscriptionConfig(
+                name="other", chat_id=other_group_chat, allowed_commands=["chat@llm"]
+            )
+        )
     if group_log_chat is not None:
         configs.append(
             SubscriptionConfig(
@@ -121,6 +132,21 @@ class TestMessageContent:
                 STICKER_MARKER,
             ),
             ({"voice": Voice(file_id="f", file_unique_id="u", duration=1)}, "[голосовое]"),
+            (
+                {"voice": Voice(file_id="f", file_unique_id="u", duration=1), "caption": "слушай"},
+                "[голосовое] слушай",
+            ),
+            (
+                {
+                    "video": Video(file_id="f", file_unique_id="u", width=1, height=1, duration=1),
+                    "caption": "смотри",
+                },
+                "[видео] смотри",
+            ),
+            (
+                {"document": Document(file_id="f", file_unique_id="u"), "caption": "отчёт"},
+                "[документ] отчёт",
+            ),
             (
                 {"video_note": VideoNote(file_id="f", file_unique_id="u", length=1, duration=1)},
                 "[кружочек]",
@@ -244,7 +270,7 @@ class TestAuthorOf:
         assert user_name is None
 
 
-def _dispatcher(book, store, tmp_path):
+def _dispatcher(book, store, tmp_path, *, with_spy: bool = True):
     gate = _gate(store, tmp_path, book)
     dp = Dispatcher()
     dp.update.outer_middleware(SilenceGate(book, gate))
@@ -252,6 +278,8 @@ def _dispatcher(book, store, tmp_path):
     dp.edited_message.register(edited_message_handler(book, store))
 
     seen: list[str] = []
+    if not with_spy:
+        return dp, seen, gate
     spy = Router(name="spy")
 
     @spy.message()
@@ -286,36 +314,49 @@ class TestGroupLogCapture:
         assert rows[0]["from_alfred"] == 0
 
     @pytest.mark.asyncio
-    async def test_message_in_group_without_group_log_not_recorded(self, store, tmp_path):
+    async def test_message_without_any_handler_recorded(self, store, tmp_path):
         book = _book(admin_chat=1, group_log_chat=-100)
-        dp, _, _ = _dispatcher(book, store, tmp_path)
+        dp, _, _ = _dispatcher(book, store, tmp_path, with_spy=False)
         bot = Bot("123456:fake-token-for-tests")
 
         try:
-            msg = _msg(text="hello other group", chat=Chat(id=200, type="group"))
-            update = Update(update_id=1, message=msg)
-            await dp.feed_update(bot, update)
-        finally:
-            await bot.session.close()
-
-        rows = await store.recent_group_messages(200, limit=10)
-        assert len(rows) == 0
-
-    @pytest.mark.asyncio
-    async def test_private_message_not_recorded(self, store, tmp_path):
-        book = _book(admin_chat=1, group_log_chat=-100)
-        dp, _, _ = _dispatcher(book, store, tmp_path)
-        bot = Bot("123456:fake-token-for-tests")
-
-        try:
-            msg = _msg(text="hello private", chat=Chat(id=100, type="private"))
-            update = Update(update_id=1, message=msg)
-            await dp.feed_update(bot, update)
+            msg = _msg(text="nobody handles", chat=Chat(id=-100, type="group"))
+            await dp.feed_update(bot, Update(update_id=1, message=msg))
         finally:
             await bot.session.close()
 
         rows = await store.recent_group_messages(-100, limit=10)
-        assert len(rows) == 0
+        assert [row["content"] for row in rows] == ["nobody handles"]
+
+    @pytest.mark.asyncio
+    async def test_message_in_group_without_group_log_not_recorded(self, store, tmp_path):
+        book = _book(admin_chat=1, group_log_chat=-100, other_group_chat=-200)
+        dp, seen, _ = _dispatcher(book, store, tmp_path)
+        bot = Bot("123456:fake-token-for-tests")
+
+        try:
+            msg = _msg(text="hello other group", chat=Chat(id=-200, type="group"))
+            await dp.feed_update(bot, Update(update_id=1, message=msg))
+        finally:
+            await bot.session.close()
+
+        assert seen == ["hello other group"]
+        assert await store.recent_group_messages(-200, limit=10) == []
+
+    @pytest.mark.asyncio
+    async def test_private_message_not_recorded(self, store, tmp_path):
+        book = _book(admin_chat=1, group_log_chat=-100)
+        dp, seen, _ = _dispatcher(book, store, tmp_path)
+        bot = Bot("123456:fake-token-for-tests")
+
+        try:
+            msg = _msg(text="hello private", chat=Chat(id=1, type="private"))
+            await dp.feed_update(bot, Update(update_id=1, message=msg))
+        finally:
+            await bot.session.close()
+
+        assert seen == ["hello private"]
+        assert await store.recent_group_messages(1, limit=10) == []
 
     @pytest.mark.asyncio
     async def test_chat_without_subscription_not_recorded(self, store, tmp_path):
@@ -411,7 +452,7 @@ class TestGroupLogCapture:
 
 class TestDispatcherWiring:
     def test_group_log_middleware_and_edited_message_registered(self, store, tmp_path):
-        book = _book(admin_chat=1, group_log_chat=100)
+        book = _book(admin_chat=1, group_log_chat=-100)
         gate = _gate(store, tmp_path, book)
 
         with prod_dispatcher(book, gate, store) as dp:

@@ -15,42 +15,34 @@ log = logging.getLogger(__name__)
 
 GROUP_LOG_KEEP = 1000
 GROUP_TYPES = ("group", "supergroup")
+MEDIA_MARKERS = {
+    "photo": PHOTO_MARKER,
+    "voice": "[голосовое]",
+    "video_note": "[кружочек]",
+    "audio": "[аудио]",
+    "video": "[видео]",
+    "animation": "[гифка]",
+    "document": "[документ]",
+    "location": "[геолокация]",
+    "contact": "[контакт]",
+}
 
 
 def message_content(message: Message) -> str | None:
-    text = message.text
-    if text:
-        return text
-
+    if message.text:
+        return message.text
     content_type = message.content_type
-    caption = (message.caption or "").strip()
-
-    if content_type == "photo":
-        return f"{PHOTO_MARKER} {caption}".strip() if caption else PHOTO_MARKER
     if content_type == "sticker":
         emoji = message.sticker.emoji if message.sticker else ""
-        return f"{STICKER_MARKER} {emoji}".strip() if emoji else STICKER_MARKER
-    if content_type == "voice":
-        return "[голосовое]"
-    if content_type == "video_note":
-        return "[кружочек]"
-    if content_type == "audio":
-        return "[аудио]"
-    if content_type == "video":
-        return "[видео]"
-    if content_type == "animation":
-        return "[гифка]"
-    if content_type == "document":
-        return "[документ]"
+        return f"{STICKER_MARKER} {emoji}" if emoji else STICKER_MARKER
     if content_type == "poll":
         question = message.poll.question if message.poll else ""
         return f"[опрос: {question}]" if question else "[опрос]"
-    if content_type == "location":
-        return "[геолокация]"
-    if content_type == "contact":
-        return "[контакт]"
-
-    return None
+    marker = MEDIA_MARKERS.get(content_type)
+    if marker is None:
+        return None
+    caption = (message.caption or "").strip()
+    return f"{marker} {caption}" if caption else marker
 
 
 def reply_target(message: Message) -> int | None:
