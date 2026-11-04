@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SECONDS_PER_MINUTE = 60
@@ -58,3 +58,7 @@ def zone_or_none(name: str | None) -> ZoneInfo | None:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
         return None
+
+
+def local_day_start(now: datetime, tz: tzinfo) -> datetime:
+    return now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
