@@ -4,12 +4,20 @@ from datetime import UTC, datetime
 
 import pytest
 from aiogram import Bot, Dispatcher, Router
+from aiogram.methods import (
+    DeleteMessage,
+    EditMessageText,
+    SendMediaGroup,
+    SendMessage,
+    SendPhoto,
+)
 from aiogram.types import (
     Animation,
     Audio,
     Chat,
     Contact,
     Document,
+    InputMediaPhoto,
     Location,
     Message,
     PhotoSize,
@@ -486,8 +494,6 @@ async def _call(store, method, result):
 class TestGroupLogOutgoing:
     @pytest.mark.asyncio
     async def test_send_message_records_without_prefix(self, store):
-        from aiogram.methods import SendMessage
-
         method = SendMessage(chat_id=-100, text="x")
         result = _bot_message(text="Альфред: привет")
         returned = await _call(store, method, result)
@@ -501,9 +507,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_send_photo_records_without_prefix(self, store):
-        from aiogram.methods import SendPhoto
-        from aiogram.types import PhotoSize
-
         method = SendPhoto(chat_id=-100, photo="f")
         result = _bot_message(
             photo=[PhotoSize(file_id="f", file_unique_id="u", width=1, height=1)],
@@ -516,9 +519,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_send_media_group_records_multiple(self, store):
-        from aiogram.methods import SendMediaGroup
-        from aiogram.types import InputMediaPhoto
-
         method = SendMediaGroup(chat_id=-100, media=[InputMediaPhoto(media="f")])
         result = [
             _bot_message(
@@ -536,8 +536,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_send_message_other_chat_not_recorded(self, store):
-        from aiogram.methods import SendMessage
-
         method = SendMessage(chat_id=-200, text="x")
         result = _bot_message(chat_id=-200, text="Альфред: привет")
         await _call(store, method, result)
@@ -546,8 +544,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_edit_message_text_updates_content(self, store):
-        from aiogram.methods import EditMessageText
-
         await store.record_group_message(
             -100,
             5,
@@ -568,8 +564,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_edit_message_text_result_true_no_change(self, store):
-        from aiogram.methods import EditMessageText
-
         await store.record_group_message(
             -100,
             5,
@@ -590,8 +584,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_delete_message_removes_row(self, store):
-        from aiogram.methods import DeleteMessage
-
         await store.record_group_message(
             -100,
             5,
@@ -611,8 +603,6 @@ class TestGroupLogOutgoing:
 
     @pytest.mark.asyncio
     async def test_failure_does_not_break_sending(self, store, monkeypatch):
-        from aiogram.methods import SendMessage
-
         async def failing_record(*args, **kwargs):
             raise RuntimeError("db error")
 

@@ -185,7 +185,8 @@ class GroupLogOutgoing(BaseRequestMiddleware):
 
         if isinstance(method, EDIT_METHODS) and isinstance(result, Message):
             content = message_content(result, strip_prefix=True)
-            if content:
+            sub = self._book.for_chat(result.chat.id)
+            if content and sub is not None and sub.group_log:
                 await self._store.edit_group_message(result.chat.id, result.message_id, content)
             return
 
