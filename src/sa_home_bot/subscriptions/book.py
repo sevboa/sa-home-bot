@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.config import GuestSubscriptionConfig, SubscriptionConfig
@@ -35,15 +35,24 @@ def guest_subscription(cfg: GuestSubscriptionConfig) -> Subscription:
 
 
 class SubscriptionBook:
-    def __init__(self, subscriptions: list[Subscription]) -> None:
-        self._subs = list(subscriptions)
+    def __init__(
+        self, subscriptions: list[Subscription], group_log_chat_ids: Sequence[int] = ()
+    ) -> None:
+        self._group_log_chat_ids = frozenset(
+            cid for cid in group_log_chat_ids if cid < 0
+        )
+        self._subs = [self._with_group_log_flag(s) for s in subscriptions]
         self._by_chat = {s.chat_id: s for s in self._subs}
+
+    def _with_group_log_flag(self, sub: Subscription) -> Subscription:
+        return replace(sub, group_log=sub.chat_id in self._group_log_chat_ids)
 
     @classmethod
     def from_config(
         cls,
         configs: list[SubscriptionConfig],
         guests: Sequence[GuestSubscriptionConfig] = (),
+        group_log_chat_ids: Sequence[int] = (),
     ) -> SubscriptionBook:
         subs = [
             Subscription(
@@ -63,7 +72,7 @@ class SubscriptionBook:
                 )
                 continue
             subs.append(guest_subscription(g))
-        return cls(subs)
+        return cls(subs, group_log_chat_ids)
 
     def all(self) -> list[Subscription]:
         return list(self._subs)
@@ -76,6 +85,7 @@ class SubscriptionBook:
 
     def add(self, sub: Subscription) -> None:
         self.remove(sub.chat_id)
+        sub = self._with_group_log_flag(sub)
         self._subs.append(sub)
         self._by_chat[sub.chat_id] = sub
 
@@ -118,3 +128,27 @@ class SubscriptionBook:
                     exc,
                 )
         return issues
+
+
+def warn_group_log_config(book: SubscriptionBook, chat_ids: Sequence[int]) -> None:
+    for cid in chat_ids:
+        if cid > 0:
+            log.warning(
+                "group_log.chat_ids: %s — положительный id, флаг group_log не устанавливается",
+                cid,
+            )
+            continue
+        sub = book.for_chat(cid)
+        if sub is None:
+            log.warning(
+                "group_log.chat_ids: %s — нет в подписках, SilenceGate его не пропустит",
+                cid,
+            )
+            continue
+        if "*" in sub.allowed_commands:
+            log.warning(
+                "group_log.chat_ids: подписка %s (chat_id=%s) имеет право '*' — "
+                "в заметке будут чужие реплики, а у модели все инструменты подписки",
+                sub.name,
+                cid,
+            )

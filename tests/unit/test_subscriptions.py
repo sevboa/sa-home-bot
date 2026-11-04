@@ -1,8 +1,13 @@
+import logging
+from dataclasses import replace
+
+import pytest
 from aiogram.exceptions import TelegramNetworkError
 
-from sa_home_bot.config import SubscriptionConfig
-from sa_home_bot.subscriptions.book import SubscriptionBook
-from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.config import GuestSubscriptionConfig, SubscriptionConfig
+from sa_home_bot.subscriptions.book import SubscriptionBook, warn_group_log_config
+from sa_home_bot.subscriptions.guests import render
+from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
 
 def _book() -> SubscriptionBook:
@@ -154,3 +159,148 @@ def test_guest_package_bytes_are_stable():
         'invited_user = "тест\\tи\\nперенос"\n'
     )
     assert render([guest]).decode("utf-8") == expected
+
+
+def test_group_log_flag_false_without_list():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=["*"]),
+            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+        ],
+        group_log_chat_ids=[],
+    )
+    assert book.for_chat(1).group_log is False
+    assert book.for_chat(-1001).group_log is False
+
+
+def test_group_log_flag_true_for_group_in_list():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=["*"]),
+            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+        ],
+        group_log_chat_ids=[-1001],
+    )
+    assert book.for_chat(1).group_log is False
+    assert book.for_chat(-1001).group_log is True
+
+
+def test_group_log_flag_false_for_group_not_in_list():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="room1", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+            SubscriptionConfig(name="room2", chat_id=-1002, event_types=["*"], allowed_commands=[]),
+        ],
+        group_log_chat_ids=[-1001],
+    )
+    assert book.for_chat(-1001).group_log is True
+    assert book.for_chat(-1002).group_log is False
+
+
+def test_group_log_positive_id_never_gets_flag():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=["*"]),
+        ],
+        group_log_chat_ids=[1],
+    )
+    assert book.for_chat(1).group_log is False
+
+
+def test_guest_keeps_group_log_after_rights_change():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+        ],
+        guests=[
+            GuestSubscriptionConfig(
+                name="guest",
+                chat_id=-1002,
+                event_types=["*"],
+                allowed_commands=["status"],
+                invited_by_chat_id=1,
+                invited_at="2026-01-01T00:00:00+00:00",
+                invited_user="test",
+            ),
+        ],
+        group_log_chat_ids=[-1001, -1002],
+    )
+    guest = book.for_chat(-1002)
+    assert guest.group_log is True
+    assert guest.is_guest
+
+    updated = guest.with_allowed_commands(frozenset({"status", "scan_now"}))
+    book.add(updated)
+    assert book.for_chat(-1002).group_log is True
+
+
+def test_new_guest_gets_group_log_on_add():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+        ],
+        group_log_chat_ids=[-1001, -1002],
+    )
+    guest = Subscription(
+        name="new_guest",
+        chat_id=-1002,
+        event_types=frozenset(["*"]),
+        allowed_commands=frozenset(["status"]),
+        source="guest",
+        invited_by_chat_id=1,
+        invited_at="2026-01-01T00:00:00+00:00",
+        invited_user="test",
+    )
+    book.add(guest)
+    assert book.for_chat(-1002).group_log is True
+
+
+def test_subscription_loses_group_log_when_chat_id_not_in_list():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
+        ],
+        group_log_chat_ids=[-1001],
+    )
+    sub = Subscription(
+        name="other",
+        chat_id=-1002,
+        event_types=frozenset(["*"]),
+        allowed_commands=frozenset(["*"]),
+        group_log=True,
+    )
+    book.add(sub)
+    assert book.for_chat(-1002).group_log is False
+
+
+@pytest.mark.parametrize(
+    ("chat_id", "allowed", "chat_ids", "expected"),
+    [
+        (1, ["*"], [1], "положительный id"),
+        (-1001, [], [-1001, -9999], "нет в подписках"),
+        (-1001, ["*"], [-1001], "имеет право '*'"),
+    ],
+)
+def test_warn_group_log_config_reports(caplog, chat_id, allowed, chat_ids, expected):
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="x", chat_id=chat_id, allowed_commands=allowed)],
+        group_log_chat_ids=chat_ids,
+    )
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
+        warn_group_log_config(book, chat_ids)
+    assert any(expected in r.message for r in caplog.records)
+
+
+def test_warn_group_log_config_silent_on_correct_list(caplog):
+    book = SubscriptionBook.from_config(
+        [SubscriptionConfig(name="room", chat_id=-1001, allowed_commands=["status"])],
+        group_log_chat_ids=[-1001],
+    )
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
+        warn_group_log_config(book, [-1001])
+    assert not caplog.records
+
+
+def test_guest_package_ignores_group_log():
+    guest = Subscription(name="g", chat_id=-1, source=SOURCE_GUEST)
+    assert render([replace(guest, group_log=True)]) == render([guest])

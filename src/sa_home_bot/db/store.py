@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from math import sqrt
@@ -496,6 +496,130 @@ class Store:
             "SELECT * FROM ai_turns WHERE chat_id=? AND dialogue_id=? ORDER BY message_id",
             (chat_id, dialogue_id),
         )
+
+    async def record_group_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        created_at: datetime,
+        user_id: int | None,
+        user_name: str | None,
+        content: str,
+        reply_to: int | None,
+        from_alfred: bool,
+        keep: int,
+    ) -> None:
+        created_at_iso = created_at.astimezone(UTC).replace(microsecond=0).isoformat()
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO group_messages(chat_id, message_id, created_at, user_id, user_name, "
+                "content, reply_to, from_alfred) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(chat_id, message_id) DO UPDATE SET content=excluded.content",
+                (
+                    chat_id,
+                    message_id,
+                    created_at_iso,
+                    user_id,
+                    user_name,
+                    content,
+                    reply_to,
+                    1 if from_alfred else 0,
+                ),
+            )
+            await conn.execute(
+                "DELETE FROM group_messages WHERE chat_id=? AND message_id <= ("
+                "SELECT message_id FROM group_messages WHERE chat_id=? "
+                "ORDER BY message_id DESC LIMIT 1 OFFSET ?)",
+                (chat_id, chat_id, keep),
+            )
+
+    async def edit_group_message(self, chat_id: int, message_id: int, content: str) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE group_messages SET content=? WHERE chat_id=? AND message_id=?",
+                (content, chat_id, message_id),
+            )
+
+    async def delete_group_message(self, chat_id: int, message_id: int) -> None:
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "DELETE FROM group_messages WHERE chat_id=? AND message_id=?",
+                (chat_id, message_id),
+            )
+
+    async def recent_group_messages(
+        self, chat_id: int, limit: int, before_message_id: int | None = None
+    ) -> list[dict]:
+        if before_message_id is not None:
+            return await self._fetch_all(
+                "SELECT * FROM ("
+                "SELECT * FROM group_messages WHERE chat_id=? "
+                "AND message_id < ? ORDER BY message_id DESC LIMIT ?"
+                ") ORDER BY message_id ASC",
+                (chat_id, before_message_id, limit),
+            )
+        return await self._fetch_all(
+            "SELECT * FROM ("
+            "SELECT * FROM group_messages WHERE chat_id=? "
+            "ORDER BY message_id DESC LIMIT ?"
+            ") ORDER BY message_id ASC",
+            (chat_id, limit),
+        )
+
+    async def group_messages_since(
+        self,
+        chat_id: int,
+        since: datetime,
+        *,
+        after_message_id: int | None = None,
+        before_message_id: int | None = None,
+    ) -> list[dict]:
+        since_iso = since.astimezone(UTC).replace(microsecond=0).isoformat()
+        sql = "SELECT * FROM group_messages WHERE chat_id=? AND created_at >= ?"
+        params: list[Any] = [chat_id, since_iso]
+        if after_message_id is not None:
+            sql += " AND message_id > ?"
+            params.append(after_message_id)
+        if before_message_id is not None:
+            sql += " AND message_id < ?"
+            params.append(before_message_id)
+        sql += " ORDER BY message_id ASC"
+        return await self._fetch_all(sql, tuple(params))
+
+    async def purge_group_messages_except(self, chat_ids: Collection[int]) -> None:
+        async with self.db.transaction() as conn:
+            if chat_ids:
+                placeholders = ",".join("?" for _ in chat_ids)
+                await conn.execute(
+                    f"DELETE FROM group_messages WHERE chat_id NOT IN ({placeholders})",
+                    tuple(chat_ids),
+                )
+                await conn.execute(
+                    f"DELETE FROM group_day_summaries WHERE chat_id NOT IN ({placeholders})",
+                    tuple(chat_ids),
+                )
+            else:
+                await conn.execute("DELETE FROM group_messages")
+                await conn.execute("DELETE FROM group_day_summaries")
+
+    async def group_day_summary(self, chat_id: int) -> dict | None:
+        return await self._fetch_one(
+            "SELECT * FROM group_day_summaries WHERE chat_id=?", (chat_id,)
+        )
+
+    async def save_group_day_summary(
+        self, chat_id: int, day: str, upto_message_id: int, summary: str, at: datetime
+    ) -> None:
+        updated_at_iso = at.astimezone(UTC).replace(microsecond=0).isoformat()
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "INSERT INTO group_day_summaries(chat_id, day, upto_message_id, "
+                "summary, updated_at) VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET day=excluded.day, "
+                "upto_message_id=excluded.upto_message_id, "
+                "summary=excluded.summary, updated_at=excluded.updated_at",
+                (chat_id, day, upto_message_id, summary, updated_at_iso),
+            )
 
     async def set_ai_turn_content(self, chat_id: int, message_id: int, content: str) -> None:
         async with self.db.transaction() as conn:

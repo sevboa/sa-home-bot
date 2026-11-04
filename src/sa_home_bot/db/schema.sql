@@ -747,3 +747,29 @@ CREATE TABLE IF NOT EXISTS person_profiles (
     username    TEXT NOT NULL DEFAULT '',
     seen_at     TEXT NOT NULL
 );
+
+-- Этап 64 (2026-11-04): переписка групп с мгновенной подрезкой до keep реплик.
+-- PRIMARY KEY (chat_id, message_id) — message_id уникален в рамках чата.
+-- from_alfred: 1 — сообщение от бота, 0 — от пользователя.
+CREATE TABLE IF NOT EXISTS group_messages (
+    chat_id       INTEGER NOT NULL,
+    message_id    INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    user_id       INTEGER,
+    user_name     TEXT,
+    content       TEXT NOT NULL,
+    reply_to      INTEGER,
+    from_alfred   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, message_id)
+);
+
+-- Этап 64 (2026-11-04): сводка дня по группе.
+-- upto_message_id — максимальный message_id, охваченный сводкой.
+-- updated_at — когда строка обновлена (UTC ISO).
+CREATE TABLE IF NOT EXISTS group_day_summaries (
+    chat_id           INTEGER PRIMARY KEY,
+    day               TEXT NOT NULL,
+    upto_message_id   INTEGER NOT NULL,
+    summary           TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);

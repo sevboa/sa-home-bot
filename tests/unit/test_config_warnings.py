@@ -77,3 +77,21 @@ def test_load_inline_persona_prompt_still_works_without_sibling_file(tmp_path, c
         settings = Settings.load(config)
     assert settings.llm.persona_prompt == "Инлайновый текст"
     assert not caplog.records
+
+
+def test_group_log_config_loads_chat_ids(tmp_path, caplog):
+    config = tmp_path / "config.toml"
+    config.write_text('[group_log]\nchat_ids = [-100123, -100456]\n', encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.config"):
+        settings = Settings.load(config)
+    assert settings.group_log.chat_ids == [-100123, -100456]
+    assert not caplog.records
+
+
+def test_group_log_config_empty_without_section(tmp_path, caplog):
+    config = tmp_path / "config.toml"
+    config.write_text('[node]\nid = "test"\n', encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="sa_home_bot.config"):
+        settings = Settings.load(config)
+    assert settings.group_log.chat_ids == []
+    assert not caplog.records

@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
+from sa_home_bot.bot.group_log_capture import GroupLogMiddleware, edited_message_handler
 from sa_home_bot.bot.handlers import (
     ai,
     apps,
@@ -58,6 +59,8 @@ def build_dispatcher(
         profiles = ProfileMiddleware(store)
         dp.message.outer_middleware(profiles)
         dp.callback_query.outer_middleware(profiles)
+        dp.message.outer_middleware(GroupLogMiddleware(book, store))
+        dp.edited_message.register(edited_message_handler(book, store))
     dp.message.middleware(AuthorizationMiddleware(book))
     dp.callback_query.middleware(CallbackAuthorizationMiddleware(book))
     dp.include_router(invites.router)
