@@ -24,7 +24,9 @@ from aiogram.types import (
 
 from sa_home_bot.bot.ai_turns import PHOTO_MARKER, STICKER_MARKER
 from sa_home_bot.bot.group_log_capture import (
+    GROUP_LOG_KEEP,
     GroupLogMiddleware,
+    GroupLogOutgoing,
     author_of,
     edited_message_handler,
     message_content,
@@ -35,7 +37,7 @@ from sa_home_bot.bot.middlewares import SilenceGate
 from sa_home_bot.config import SubscriptionConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.guests import GuestStore
-from tests.unit.support.dispatch import prod_dispatcher
+from tests.unit.support.dispatch import prod_dispatcher, recording_bot
 
 BASE_TIME = datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC)
 
@@ -458,3 +460,174 @@ class TestDispatcherWiring:
         with prod_dispatcher(book, gate, store) as dp:
             assert any(isinstance(m, GroupLogMiddleware) for m in dp.message.outer_middleware)
             assert "edited_message" in dp.resolve_used_update_types()
+
+
+def _book_with_log():
+    return _book(admin_chat=1, group_log_chat=-100, other_group_chat=-200)
+
+
+def _bot_message(chat_id=-100, message_id=5, **fields):
+    return Message(
+        message_id=message_id,
+        date=BASE_TIME,
+        chat=Chat(id=chat_id, type="supergroup"),
+        from_user=User(id=4242, is_bot=True, first_name="Альфред"),
+        **fields,
+    )
+
+
+async def _call(store, method, result):
+    async def make_request(bot, m):
+        return result
+
+    return await GroupLogOutgoing(_book_with_log(), store)(make_request, None, method)
+
+
+class TestGroupLogOutgoing:
+    @pytest.mark.asyncio
+    async def test_send_message_records_without_prefix(self, store):
+        from aiogram.methods import SendMessage
+
+        method = SendMessage(chat_id=-100, text="x")
+        result = _bot_message(text="Альфред: привет")
+        returned = await _call(store, method, result)
+        assert returned is result
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["content"] == "привет"
+        assert rows[0]["user_name"] == "Альфред"
+        assert rows[0]["from_alfred"] == 1
+        assert rows[0]["user_id"] == 4242
+
+    @pytest.mark.asyncio
+    async def test_send_photo_records_without_prefix(self, store):
+        from aiogram.methods import SendPhoto
+        from aiogram.types import PhotoSize
+
+        method = SendPhoto(chat_id=-100, photo="f")
+        result = _bot_message(
+            photo=[PhotoSize(file_id="f", file_unique_id="u", width=1, height=1)],
+            caption="Альфред: кадр",
+        )
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["content"] == "[фото] кадр"
+
+    @pytest.mark.asyncio
+    async def test_send_media_group_records_multiple(self, store):
+        from aiogram.methods import SendMediaGroup
+        from aiogram.types import InputMediaPhoto
+
+        method = SendMediaGroup(chat_id=-100, media=[InputMediaPhoto(media="f")])
+        result = [
+            _bot_message(
+                message_id=10,
+                photo=[PhotoSize(file_id="f", file_unique_id="u", width=1, height=1)],
+            ),
+            _bot_message(
+                message_id=11,
+                photo=[PhotoSize(file_id="f", file_unique_id="u", width=1, height=1)],
+            ),
+        ]
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_send_message_other_chat_not_recorded(self, store):
+        from aiogram.methods import SendMessage
+
+        method = SendMessage(chat_id=-200, text="x")
+        result = _bot_message(chat_id=-200, text="Альфред: привет")
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-200, limit=10)
+        assert len(rows) == 0
+
+    @pytest.mark.asyncio
+    async def test_edit_message_text_updates_content(self, store):
+        from aiogram.methods import EditMessageText
+
+        await store.record_group_message(
+            -100,
+            5,
+            created_at=BASE_TIME,
+            user_id=4242,
+            user_name="Альфред",
+            content="старое",
+            reply_to=None,
+            from_alfred=True,
+            keep=GROUP_LOG_KEEP,
+        )
+        method = EditMessageText(chat_id=-100, message_id=5, text="x")
+        result = _bot_message(message_id=5, text="Альфред: новое")
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["content"] == "новое"
+
+    @pytest.mark.asyncio
+    async def test_edit_message_text_result_true_no_change(self, store):
+        from aiogram.methods import EditMessageText
+
+        await store.record_group_message(
+            -100,
+            5,
+            created_at=BASE_TIME,
+            user_id=4242,
+            user_name="Альфред",
+            content="старое",
+            reply_to=None,
+            from_alfred=True,
+            keep=GROUP_LOG_KEEP,
+        )
+        method = EditMessageText(chat_id=-100, message_id=5, text="x")
+        result = True
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["content"] == "старое"
+
+    @pytest.mark.asyncio
+    async def test_delete_message_removes_row(self, store):
+        from aiogram.methods import DeleteMessage
+
+        await store.record_group_message(
+            -100,
+            5,
+            created_at=BASE_TIME,
+            user_id=4242,
+            user_name="Альфред",
+            content="удалить",
+            reply_to=None,
+            from_alfred=True,
+            keep=GROUP_LOG_KEEP,
+        )
+        method = DeleteMessage(chat_id=-100, message_id=5)
+        result = True
+        await _call(store, method, result)
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 0
+
+    @pytest.mark.asyncio
+    async def test_failure_does_not_break_sending(self, store, monkeypatch):
+        from aiogram.methods import SendMessage
+
+        async def failing_record(*args, **kwargs):
+            raise RuntimeError("db error")
+
+        monkeypatch.setattr(store, "record_group_message", failing_record)
+        method = SendMessage(chat_id=-100, text="x")
+        result = _bot_message(text="Альфред: привет")
+        returned = await _call(store, method, result)
+        assert returned is result
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_with_recording_bot(self, store):
+        bot, session = recording_bot()
+        bot.session.middleware(GroupLogOutgoing(_book_with_log(), store))
+        await bot.send_message(-100, "Альфред: сквозь")
+        await bot.session.close()
+        rows = await store.recent_group_messages(-100, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["content"] == "сквозь"

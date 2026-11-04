@@ -21,6 +21,7 @@ from sa_home_bot.bot.egress_app import (
     pick_startup_route,
     startup_routes,
 )
+from sa_home_bot.bot.group_log_capture import GroupLogOutgoing
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.invites import Gatekeeper
 from sa_home_bot.bot.lifecycle import (
@@ -93,10 +94,13 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         )
     ).username
 
+    await store.purge_group_messages_except(settings.group_log.chat_ids)
+
     async def on_reconnect(downtime: float) -> None:
         await broadcast_system(book, notifier, render_link_restored(downtime))
 
     bot.session.middleware(LinkWatchMiddleware(on_reconnect))
+    bot.session.middleware(GroupLogOutgoing(book, store))
     gate = Gatekeeper(
         settings.invites, store, book, GuestStore(settings.guests_path), notifier
     )

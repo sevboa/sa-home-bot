@@ -5,10 +5,23 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.client.session.middlewares.base import (
+    BaseRequestMiddleware,
+    NextRequestMiddlewareType,
+)
+from aiogram.methods import (
+    DeleteMessage,
+    EditMessageCaption,
+    EditMessageMedia,
+    EditMessageReplyMarkup,
+    EditMessageText,
+    TelegramMethod,
+)
 from aiogram.types import Message
 
 from sa_home_bot.bot.ai_context import display_name
 from sa_home_bot.bot.ai_turns import PHOTO_MARKER, STICKER_MARKER
+from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_PLAIN
 from sa_home_bot.subscriptions.book import SubscriptionBook
 
 log = logging.getLogger(__name__)
@@ -27,10 +40,20 @@ MEDIA_MARKERS = {
     "contact": "[контакт]",
 }
 
+EDIT_METHODS = (
+    EditMessageText,
+    EditMessageCaption,
+    EditMessageMedia,
+    EditMessageReplyMarkup,
+)
 
-def message_content(message: Message) -> str | None:
+
+def message_content(message: Message, *, strip_prefix: bool = False) -> str | None:
     if message.text:
-        return message.text
+        text = message.text
+        if strip_prefix:
+            text = text.removeprefix(ALFRED_PREFIX_PLAIN)
+        return text
     content_type = message.content_type
     if content_type == "sticker":
         emoji = message.sticker.emoji if message.sticker else ""
@@ -42,6 +65,8 @@ def message_content(message: Message) -> str | None:
     if marker is None:
         return None
     caption = (message.caption or "").strip()
+    if strip_prefix:
+        caption = caption.removeprefix(ALFRED_PREFIX_PLAIN)
     return f"{marker} {caption}" if caption else marker
 
 
@@ -130,3 +155,64 @@ def edited_message_handler(
                         )
 
     return on_edited_message
+
+
+class GroupLogOutgoing(BaseRequestMiddleware):
+    def __init__(self, book: SubscriptionBook, store: Any) -> None:
+        self._book = book
+        self._store = store
+
+    async def __call__(
+        self,
+        make_request: NextRequestMiddlewareType[Any],
+        bot: Any,
+        method: TelegramMethod[Any],
+    ) -> Any:
+        result = await make_request(bot, method)
+        try:
+            await self._remember(method, result)
+        except Exception:
+            log.warning("Не удалось записать реплику бота в журнал группы", exc_info=True)
+        return result
+
+    async def _remember(self, method: TelegramMethod[Any], result: Any) -> None:
+        if isinstance(method, DeleteMessage) and result:
+            chat_id = int(method.chat_id)
+            sub = self._book.for_chat(chat_id)
+            if sub is not None and sub.group_log:
+                await self._store.delete_group_message(chat_id, method.message_id)
+            return
+
+        if isinstance(method, EDIT_METHODS) and isinstance(result, Message):
+            content = message_content(result, strip_prefix=True)
+            if content:
+                await self._store.edit_group_message(result.chat.id, result.message_id, content)
+            return
+
+        messages: list[Message] = []
+        if isinstance(result, Message):
+            messages = [result]
+        elif isinstance(result, list):
+            messages = [m for m in result if isinstance(m, Message)]
+
+        for message in messages:
+            content = message_content(message, strip_prefix=True)
+            if content is None:
+                continue
+            chat_id = message.chat.id
+            sub = self._book.for_chat(chat_id)
+            if sub is None or not sub.group_log:
+                continue
+            user_id = message.from_user.id if message.from_user else None
+            reply_to = reply_target(message)
+            await self._store.record_group_message(
+                chat_id,
+                message.message_id,
+                created_at=message.date,
+                user_id=user_id,
+                user_name="Альфред",
+                content=content,
+                reply_to=reply_to,
+                from_alfred=True,
+                keep=GROUP_LOG_KEEP,
+            )
