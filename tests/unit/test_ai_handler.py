@@ -542,6 +542,34 @@ async def test_ai_reply_continuation_filter_matches_known_turn(store):
     assert result == {"ai_dialogue_id": 500}
 
 
+@pytest.mark.parametrize(
+    ("chat_type", "role", "matches"),
+    [
+        ("group", "assistant", True),
+        ("supergroup", "assistant", True),
+        ("group", "user", False),
+        ("supergroup", "user", False),
+        ("private", "user", True),
+        ("private", "assistant", True),
+    ],
+)
+async def test_ai_reply_continuation_filter_by_chat_type_and_role(store, chat_type, role, matches):
+    await store.record_ai_turn(1, 500, 500, role, "реплика", _now())
+    filt = ai_handler.AiReplyContinuation()
+    reply = FakeMessage(1, text="продолжение", chat_type=chat_type, reply_to=FakeMessage(1))
+    reply.reply_to_message.message_id = 500
+    expected = {"ai_dialogue_id": 500} if matches else False
+    assert await filt(reply, store) == expected
+
+
+@pytest.mark.parametrize("chat_type", ["private", "group", "supergroup"])
+async def test_ai_reply_continuation_filter_ignores_unknown_message(store, chat_type):
+    filt = ai_handler.AiReplyContinuation()
+    reply = FakeMessage(1, text="ответ", chat_type=chat_type, reply_to=FakeMessage(1))
+    reply.reply_to_message.message_id = 999
+    assert await filt(reply, store) is False
+
+
 async def test_ai_reply_continuation_filter_ignores_unrelated_reply(store):
     filt = ai_handler.AiReplyContinuation()
     other = FakeMessage(1, text="просто ответ на что-то ещё", reply_to=FakeMessage(1))

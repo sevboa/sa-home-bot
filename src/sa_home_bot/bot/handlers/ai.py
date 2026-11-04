@@ -57,6 +57,8 @@ class AiReplyContinuation(Filter):
         row = await store.ai_turn(message.chat.id, message.reply_to_message.message_id)
         if row is None:
             return False
+        if message.chat.type in GROUP_TYPES and row["role"] != "assistant":
+            return False
         return {"ai_dialogue_id": row["dialogue_id"]}
 
 
