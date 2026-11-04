@@ -232,6 +232,8 @@ class PeerLink:
             try:
                 info = await asyncio.wait_for(client.hello(), timeout=self._heartbeat_timeout)
                 self.note_probe((time.monotonic() - started) * 1000)
+                if info.endpoints:
+                    self.learn_endpoints(info.endpoints)
                 self._learn_links(info)
                 self.busy = info.busy
                 self.working = info.working

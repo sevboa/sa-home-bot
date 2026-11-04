@@ -474,3 +474,32 @@ async def test_линк_не_учит_loopback_соседа(sock_dir):
     finally:
         await link.stop()
         await server.stop()
+
+
+async def test_heartbeat_подхватывает_адрес_поднявшийся_после_подключения(sock_dir, monkeypatch):
+    monkeypatch.setattr(peers_mod, "HEARTBEAT_INTERVAL_S", 0.02)
+    lan = "tcp://192.168.0.169:8710"
+    tailnet = "tcp://100.107.178.91:8710"
+    service = StubService("mycraft", endpoints=(lan,))
+    endpoint = f"unix://{sock_dir / 'peer.sock'}"
+    server = ProtoServer(endpoint, service)
+    await server.start()
+    learned: list[list[str]] = []
+
+    link = PeerLink(
+        "mycraft",
+        endpoint,
+        reconnect_delay=60.0,
+        on_endpoints=lambda name, endpoints: learned.append(endpoints),
+    )
+    await link.start()
+    try:
+        assert await wait_for(lambda: link.alive)
+        assert lan in link.endpoints and tailnet not in link.endpoints
+        service.endpoints = (lan, tailnet)
+        assert await wait_for(lambda: tailnet in link.endpoints), "heartbeat не обновил адреса"
+        assert tailnet in learned[-1]
+        assert link.alive
+    finally:
+        await link.stop()
+        await server.stop()
