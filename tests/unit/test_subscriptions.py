@@ -1,8 +1,13 @@
+import logging
+from dataclasses import replace
+
+import pytest
 from aiogram.exceptions import TelegramNetworkError
 
-from sa_home_bot.config import SubscriptionConfig
+from sa_home_bot.config import GuestSubscriptionConfig, SubscriptionConfig
 from sa_home_bot.subscriptions.book import SubscriptionBook, warn_group_log_config
-from sa_home_bot.subscriptions.models import Subscription
+from sa_home_bot.subscriptions.guests import render
+from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
 
 def _book() -> SubscriptionBook:
@@ -203,8 +208,6 @@ def test_group_log_positive_id_never_gets_flag():
 
 
 def test_guest_keeps_group_log_after_rights_change():
-    from sa_home_bot.config import GuestSubscriptionConfig
-
     book = SubscriptionBook.from_config(
         [
             SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
@@ -270,61 +273,34 @@ def test_subscription_loses_group_log_when_chat_id_not_in_list():
     assert book.for_chat(-1002).group_log is False
 
 
-def test_warn_group_log_config_positive_id(caplog):
-    import logging
-
+@pytest.mark.parametrize(
+    ("chat_id", "allowed", "chat_ids", "expected"),
+    [
+        (1, ["*"], [1], "положительный id"),
+        (-1001, [], [-1001, -9999], "нет в подписках"),
+        (-1001, ["*"], [-1001], "имеет право '*'"),
+    ],
+)
+def test_warn_group_log_config_reports(caplog, chat_id, allowed, chat_ids, expected):
     book = SubscriptionBook.from_config(
-        [
-            SubscriptionConfig(name="me", chat_id=1, event_types=["*"], allowed_commands=["*"]),
-        ],
-        group_log_chat_ids=[1],
+        [SubscriptionConfig(name="x", chat_id=chat_id, allowed_commands=allowed)],
+        group_log_chat_ids=chat_ids,
     )
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
-        warn_group_log_config(book, [1])
-    assert any("положительный id" in r.message for r in caplog.records)
-
-
-def test_warn_group_log_config_missing_subscription(caplog):
-    import logging
-
-    book = SubscriptionBook.from_config(
-        [
-            SubscriptionConfig(name="room", chat_id=-1001, event_types=["*"], allowed_commands=[]),
-        ],
-        group_log_chat_ids=[-1001, -9999],
-    )
-    with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
-        warn_group_log_config(book, [-1001, -9999])
-    assert any("нет в подписках" in r.message for r in caplog.records)
-
-
-def test_warn_group_log_config_wildcard_allowed_commands(caplog):
-    import logging
-
-    book = SubscriptionBook.from_config(
-        [
-            SubscriptionConfig(
-                name="owner", chat_id=-1001, event_types=["*"], allowed_commands=["*"]
-            ),
-        ],
-        group_log_chat_ids=[-1001],
-    )
-    with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
-        warn_group_log_config(book, [-1001])
-    assert any("имеет право '*'" in r.message for r in caplog.records)
+        warn_group_log_config(book, chat_ids)
+    assert any(expected in r.message for r in caplog.records)
 
 
 def test_warn_group_log_config_silent_on_correct_list(caplog):
-    import logging
-
     book = SubscriptionBook.from_config(
-        [
-            SubscriptionConfig(
-                name="room", chat_id=-1001, event_types=["*"], allowed_commands=["status"]
-            ),
-        ],
+        [SubscriptionConfig(name="room", chat_id=-1001, allowed_commands=["status"])],
         group_log_chat_ids=[-1001],
     )
     with caplog.at_level(logging.WARNING, logger="sa_home_bot.subscriptions.book"):
         warn_group_log_config(book, [-1001])
     assert not caplog.records
+
+
+def test_guest_package_ignores_group_log():
+    guest = Subscription(name="g", chat_id=-1, source=SOURCE_GUEST)
+    assert render([replace(guest, group_log=True)]) == render([guest])

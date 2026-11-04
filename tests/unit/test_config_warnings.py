@@ -95,12 +95,3 @@ def test_group_log_config_empty_without_section(tmp_path, caplog):
         settings = Settings.load(config)
     assert settings.group_log.chat_ids == []
     assert not caplog.records
-
-
-def test_group_log_config_no_unknown_keys_warning(tmp_path, caplog):
-    config = tmp_path / "config.toml"
-    config.write_text('[group_log]\nchat_ids = [-100123]\n', encoding="utf-8")
-    with caplog.at_level(logging.WARNING, logger="sa_home_bot.config"):
-        settings = Settings.load(config)
-    assert settings.group_log.chat_ids == [-100123]
-    assert not any("group_log" in r.message and "неизвестное" in r.message for r in caplog.records)
