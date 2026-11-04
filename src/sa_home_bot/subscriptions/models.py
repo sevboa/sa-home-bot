@@ -19,6 +19,7 @@ class Subscription:
     invited_by_chat_id: int = 0
     invited_at: str = ""
     invited_user: str = ""
+    group_log: bool = False
 
     @property
     def is_guest(self) -> bool:

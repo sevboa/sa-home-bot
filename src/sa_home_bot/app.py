@@ -51,7 +51,7 @@ from sa_home_bot.people import seed as people_seed
 from sa_home_bot.proto.addresses import LLM_ADDRESS
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
-from sa_home_bot.subscriptions.book import SubscriptionBook
+from sa_home_bot.subscriptions.book import SubscriptionBook, warn_group_log_config
 from sa_home_bot.subscriptions.guests import GuestStore
 from sa_home_bot.utils.lifespan import Lifespan
 
@@ -72,7 +72,10 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     started_clean = prev in (None, "1")
     await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
 
-    book = SubscriptionBook.from_config(settings.subscriptions, settings.guest_subscriptions)
+    book = SubscriptionBook.from_config(
+        settings.subscriptions, settings.guest_subscriptions, settings.group_log.chat_ids
+    )
+    warn_group_log_config(book, settings.group_log.chat_ids)
     try:
         await people_seed.seed_local(store, settings, book)
     except Exception:

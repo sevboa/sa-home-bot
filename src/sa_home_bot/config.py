@@ -646,6 +646,10 @@ class GuestSubscriptionConfig(SubscriptionConfig):
     invited_user: str = ""
 
 
+class GroupLogConfig(BaseModel):
+    chat_ids: list[int] = Field(default_factory=list)
+
+
 class InvitesConfig(BaseModel):
     enabled: bool = True
     ttl_s: float = Field(default=3600.0, gt=0)
@@ -739,6 +743,7 @@ class Settings(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)
+    group_log: GroupLogConfig = Field(default_factory=GroupLogConfig)
     subscriptions: list[SubscriptionConfig] = Field(default_factory=list)
     guest_subscriptions: list[GuestSubscriptionConfig] = Field(default_factory=list)
     people: list[PersonConfig] = Field(default_factory=list)
