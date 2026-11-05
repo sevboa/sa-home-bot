@@ -116,4 +116,5 @@ def test_telegram_only_flag_marks_expected_tools():
         "search",
         "walk",
         "go",
+        "chat_recap",
     }

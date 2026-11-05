@@ -66,6 +66,7 @@ GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("tell@llm", "📨 Написать владельцу"),
     GuestRight("search@net", "🔎 Веб-поиск"),
     GuestRight("generate_image@llm", "🎨 Рисовать картинки"),
+    GuestRight("chat_recap@llm", "🗂 Память о переписке группы"),
     GuestRight("nodes", "🕸 Сводка роя"),
     GuestRight("status", "📟 Карточка ноды"),
     GuestRight("stats", "📈 Статистика сканера"),

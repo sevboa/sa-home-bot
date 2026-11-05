@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import guest_rights, invites
+from sa_home_bot.bot.handlers.invites import CodeFromInsider
 from sa_home_bot.bot.middlewares import SilenceGate, invite_candidate
 from sa_home_bot.config import (
     GuestSubscriptionConfig,
@@ -628,3 +629,25 @@ async def test_cmd_invite_rejects_bad_hours_without_issuing_code(store, tmp_path
 
     assert message.answers == [invite_handlers.BAD_INVITE_HOURS_TEXT]
     assert await gate.open_codes() == []
+
+
+async def test_code_from_insider_returns_false_in_supergroup():
+    class FakeGate:
+        async def known_code(self, text):
+            raise AssertionError("known_code should not be called in group")
+
+    filt = CodeFromInsider()
+    message = SimpleNamespace(chat=SimpleNamespace(type="supergroup"), text="ABCD1234")
+    result = await filt(message, gate=FakeGate())
+    assert result is False
+
+
+async def test_code_from_insider_works_in_private_with_known_code(store, tmp_path):
+    gate = _gate(store, tmp_path)
+    code, _ = await gate.issue(chat_id=1, user_id=10)
+
+    filt = CodeFromInsider()
+    message = SimpleNamespace(chat=SimpleNamespace(type="private"), text=code)
+    result = await filt(message, gate=gate)
+    assert result is not False
+    assert result["insider_code"] == code

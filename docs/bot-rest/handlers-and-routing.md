@@ -11,7 +11,7 @@
 7. `status`, `control` (`/stats`, `/downtime`, `/scan_now`; бывшие модули stats/power/control слиты), `node`.
 8. `node_links` до `apps`: фиксированные префиксы `/node_*` и `/svc_*`.
 9. `torrents` (документы и magnet, с командами не пересекается), `vpn` (его кнопки идут по общей `act:`-схеме и разбираются в `node.on_dynamic_action`), `apps` — последним из «точных»: ловит динамические команды-скилы, остальное игнорирует. Приложения из `apps_view.HIDDEN_MENU_APP_IDS` (сейчас qbittorrent) голой командой не открываются — у них панель `/torrents`.
-10. `ai.catchall_router` — самый широкий фильтр (любой текст в личке, @упоминание в группе), строго последним.
+10. `ai.catchall_router` — самый широкий фильтр (любой текст в личке, @упоминание в группе), строго последним. `GroupMention` читает и `caption`/`caption_entities`: фото с тегом идёт через `photo_history`, подпись без тега (Этап 64.10).
 
 `setup.py` реэкспортирует `set_bot_commands` из `menu` ради `app.py` (чужая зона).
 

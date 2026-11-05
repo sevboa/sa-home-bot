@@ -478,3 +478,70 @@ async def test_rescue_falls_back_to_trim_when_still_overflowing(store):
         FakeMessage(), link, store, settings, history, DIALOGUE, _book(), FakeNotifier()
     )
     assert raw == "Коротко, но ответ."
+
+
+async def test_rescue_includes_group_note_then_drops_it(store, monkeypatch):
+    await _long_dialogue(store, 10)
+    await _turn(store, 21, "user", "а что дальше?")
+    settings = _settings(context_keep_recent_turns=6)
+    history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
+    truncated = {
+        "response": "Обрыв на полу",
+        "prompt_eval_count": 31800,
+        "done_reason": "length",
+        "num_ctx": 32768,
+    }
+    link = AlfredLink(
+        [_ok(ROUTE_OK), truncated, _ok(ROUTE_OK), _ok("Полный ответ.")]
+    )
+    message = FakeMessage()
+
+    async def fake_note(self):
+        return "ЗАМЕТКА ГРУППЫ"
+
+    monkeypatch.setattr(ai_flow._AlfredTurn, "_load_group_note", fake_note)
+    raw = await ai_flow.request_alfred(
+        message, link, store, settings, history, DIALOGUE, _book(), FakeNotifier()
+    )
+    assert raw == "Полный ответ."
+    first_call_messages = link.chat_calls[1]["messages"]
+    retry_messages = link.chat_calls[3]["messages"]
+    first_contents = "\n".join(str(m.get("content", "")) for m in first_call_messages)
+    retry_contents = "\n".join(str(m.get("content", "")) for m in retry_messages)
+    assert "ЗАМЕТКА ГРУППЫ" in first_contents
+    assert "ЗАМЕТКА ГРУППЫ" not in retry_contents
+
+
+async def test_rescue_keeps_opinion_note(store):
+    await _long_dialogue(store, 10)
+    await _turn(store, 21, "user", "а что дальше?")
+    settings = _settings(context_keep_recent_turns=6)
+    history = await dialogue_context.load_history(store, settings, CHAT, DIALOGUE)
+    truncated = {
+        "response": "Обрыв на полу",
+        "prompt_eval_count": 31800,
+        "done_reason": "length",
+        "num_ctx": 32768,
+    }
+    link = AlfredLink(
+        [_ok(ROUTE_OK), truncated, _ok(ROUTE_OK), _ok("Полный ответ.")]
+    )
+    message = FakeMessage()
+    raw = await ai_flow.request_alfred(
+        message,
+        link,
+        store,
+        settings,
+        history,
+        DIALOGUE,
+        _book(),
+        FakeNotifier(),
+        opinion_note="ЗАМЕТКА МНЕНИЯ",
+    )
+    assert raw == "Полный ответ."
+    first_call_messages = link.chat_calls[1]["messages"]
+    retry_messages = link.chat_calls[3]["messages"]
+    first_contents = "\n".join(str(m.get("content", "")) for m in first_call_messages)
+    retry_contents = "\n".join(str(m.get("content", "")) for m in retry_messages)
+    assert "ЗАМЕТКА МНЕНИЯ" in first_contents
+    assert "ЗАМЕТКА МНЕНИЯ" in retry_contents

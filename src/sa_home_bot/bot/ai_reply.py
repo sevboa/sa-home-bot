@@ -8,7 +8,14 @@ from typing import Any
 
 from aiogram.types import Message
 
-from sa_home_bot.bot import ai_flow, ai_lines, dialogue_context, voice_mode, voice_tts
+from sa_home_bot.bot import (
+    ai_flow,
+    ai_lines,
+    dialogue_context,
+    group_context,
+    voice_mode,
+    voice_tts,
+)
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives.engine import Interactives
@@ -40,6 +47,7 @@ class TurnServices:
     tool_calls: ToolCalls
     pending_actions: PendingActions | None = None
     interactives: Interactives | None = None
+    opinion_note: str | None = None
 
 
 def format_answer(raw: str) -> str:
@@ -112,6 +120,8 @@ def _request_extras(services: TurnServices, turn_plan: Any | None) -> dict[str, 
     if services.interactives is not None:
         extras["interactive_turn"] = turn_plan
         extras["interactives"] = services.interactives
+    if services.opinion_note is not None:
+        extras["opinion_note"] = services.opinion_note
     return extras
 
 
@@ -332,8 +342,9 @@ async def _after_delivery(
     raw: str,
 ) -> None:
     store, config, node_link = services.store, services.config, services.node_link
+    reads_group = group_context.reads_group(services.book.for_chat(message.chat.id))
     user_turn = await store.ai_turn(message.chat.id, message.message_id)
-    if user_turn is not None:
+    if user_turn is not None and not reads_group:
         await ai_flow.piggyback_dialogue_episode(
             node_link, message.chat.id, str(user_turn["content"]), raw
         )
@@ -346,6 +357,10 @@ async def _after_delivery(
             dialogue_id,
             ai_flow.llm_address(),
             num_ctx=await ai_flow.resolve_num_ctx(config, store, ai_flow.llm_address()),
+        )
+    if reads_group and dismissal.mode is None:
+        group_context.DAY_SUMMARY.schedule(
+            node_link, store, config, message.chat.id, active_chats=services.active_ai_chats
         )
     if speech_remark.text is not None:
         await message.answer(speech_remark.text)

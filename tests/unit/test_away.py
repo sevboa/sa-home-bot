@@ -12,7 +12,6 @@ import pytest_asyncio
 from sa_home_bot import wake_core
 from sa_home_bot.bot import ai_flow, ai_reply, ai_turns, away, away_return, voice_stt
 from sa_home_bot.bot.away import (
-    ALFRED_AWAY_KEY,
     MAX_AWAY,
     AwayError,
     AwayService,
@@ -34,7 +33,7 @@ from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
+from sa_home_bot.db.store import ALFRED_AWAY_KEY, Store
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from tests.unit.support.fakes import Clock as FloatClock

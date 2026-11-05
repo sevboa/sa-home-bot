@@ -16,14 +16,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sa_home_bot.bot import ai_turns
 from sa_home_bot.bot.ai_context import ALFRED_TIMEZONE, display_name
 from sa_home_bot.config import Settings
-from sa_home_bot.db.store import Store
+from sa_home_bot.db.store import ALFRED_AWAY_KEY, Store
 
 if TYPE_CHECKING:
     from aiogram.types import Message
 
 log = logging.getLogger(__name__)
 
-ALFRED_AWAY_KEY = "alfred_away"
 ALFRED_AWAY_NOTICES_KEY = "alfred_away_notices"
 
 PHASE_AWAY = "away"

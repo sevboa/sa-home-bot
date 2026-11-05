@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 from sa_home_bot.bot import ai_flow, commands, guest_rights, guests_view, invites
 from sa_home_bot.bot.ai_context import recall_facts
 from sa_home_bot.bot.away import KIND_SUMMON, AwayService
+from sa_home_bot.bot.group_log_capture import GROUP_TYPES
 from sa_home_bot.bot.handlers import ai as ai_handlers
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.basic import build_help
@@ -299,6 +300,8 @@ async def _redraw_perms(callback: CallbackQuery, sub: Subscription, offset: int)
 
 class CodeFromInsider(Filter):
     async def __call__(self, message: Message, gate: Gatekeeper) -> bool | dict:
+        if message.chat.type in GROUP_TYPES:
+            return False
         known = await gate.known_code(message.text)
         if known is None:
             return False

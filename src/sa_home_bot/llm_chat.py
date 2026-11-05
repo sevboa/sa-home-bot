@@ -230,7 +230,10 @@ async def run_chat_loop(
             )
             if on_tool_call is not None:
                 await on_tool_call(name, call_args, tool_result)
-            inline_result = _inline_or_cache(tool_ctx, tool_result)
+            if name in ai_tools.FULL_RESULT_TOOLS:
+                inline_result = tool_result
+            else:
+                inline_result = _inline_or_cache(tool_ctx, tool_result)
             messages.append({"role": "tool", "content": inline_result, "name": name})
         if tool_ctx.end_turn:
             return ""

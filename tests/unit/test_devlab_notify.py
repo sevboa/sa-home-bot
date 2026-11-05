@@ -5,9 +5,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from sa_home_bot.bot import ai_lines, devlab_notify
-from sa_home_bot.bot.away import ALFRED_AWAY_KEY, AwayState
+from sa_home_bot.bot.away import AwayState
 from sa_home_bot.bot.devlab_notify import DevlabNotifier
 from sa_home_bot.config import Settings
+from sa_home_bot.db.store import ALFRED_AWAY_KEY
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ProtoError

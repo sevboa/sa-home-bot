@@ -9,6 +9,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from sa_home_bot.bot import commands
+from sa_home_bot.bot.group_log_capture import GROUP_TYPES
 from sa_home_bot.bot.middlewares import DENIED_TEXT
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.torrent_pending import PendingTorrent, PendingTorrents
@@ -93,7 +94,8 @@ async def cmd_torrent_file(
     if not _is_torrent_document(message):
         return
     if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
-        await message.answer(DENIED_TEXT)
+        if message.chat.type not in GROUP_TYPES:
+            await message.answer(DENIED_TEXT)
         return
     buf = await message.bot.download(message.document)
     source = base64.b64encode(buf.read()).decode()
@@ -109,7 +111,8 @@ async def cmd_torrent_magnet(
     subscription: Subscription | None = None,
 ) -> None:
     if not commands.can_run_action(subscription, ACTION_ADD, SERVICE):
-        await message.answer(DENIED_TEXT)
+        if message.chat.type not in GROUP_TYPES:
+            await message.answer(DENIED_TEXT)
         return
     magnet = message.text.strip()
     await _ask_directory(message, torrents_link, pending_torrents, magnet, _magnet_name(magnet))

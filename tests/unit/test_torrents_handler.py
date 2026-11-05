@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from sa_home_bot.bot.handlers import torrents as torrents_handler
+from sa_home_bot.bot.middlewares import DENIED_TEXT
 from sa_home_bot.proto.messages import ActionParam, ActionSpec
 
 SAVE_DIRS = ("/mnt/data/torrents/complete", "/mnt/scratch/pr")
@@ -69,3 +70,35 @@ def test_dir_keyboard_strips_mnt_prefix_and_encodes_index():
     buttons = [b for row in keyboard.inline_keyboard for b in row]
     assert [b.text for b in buttons] == ["data/torrents/complete", "scratch/pr"]
     assert [b.callback_data for b in buttons] == ["tor:tok1234:0", "tor:tok1234:1"]
+
+
+@pytest.mark.parametrize(
+    ("chat_type", "expected"),
+    [("supergroup", []), ("group", []), ("private", [DENIED_TEXT])],
+)
+@pytest.mark.parametrize(
+    ("handler", "fields"),
+    [
+        (torrents_handler.cmd_torrent_magnet, {"text": "magnet:?xt=urn:btih:abc"}),
+        (
+            torrents_handler.cmd_torrent_file,
+            {"document": SimpleNamespace(file_name="a.torrent", mime_type=None)},
+        ),
+    ],
+)
+async def test_torrent_input_denied_is_silent_only_in_groups(handler, fields, chat_type, expected):
+    sent = []
+
+    async def answer(text, **kwargs):
+        sent.append(text)
+
+    message = SimpleNamespace(chat=SimpleNamespace(type=chat_type), answer=answer, **fields)
+
+    await handler(
+        message,
+        torrents_link=SimpleNamespace(connected=True),
+        pending_torrents=None,
+        subscription=SimpleNamespace(allows_action=lambda *_: False),
+    )
+
+    assert sent == expected

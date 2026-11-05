@@ -10,7 +10,7 @@ from typing import Any
 from aiogram.types import Message
 
 from sa_home_bot import wake_core
-from sa_home_bot.bot import dialogue_context
+from sa_home_bot.bot import dialogue_context, group_context
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_context import (
     LENGTH_NOTE,
@@ -209,7 +209,12 @@ async def perform_dismissal(
 
 
 def _tools_done_note(executed: list[tuple[str, dict[str, Any], str]]) -> str:
-    lines = [f"- {name}({args}) → {result[:600]}" for name, args, result in executed]
+    lines = []
+    for name, args, result in executed:
+        if name in ai_tools.FULL_RESULT_TOOLS:
+            lines.append(f"- {name}({args}) → {result}")
+        else:
+            lines.append(f"- {name}({args}) → {result[:600]}")
     return (
         "В этом ходе ты уже вызвал инструменты, повторно их не вызывай — вот "
         "результаты:\n" + "\n".join(lines)
@@ -243,6 +248,7 @@ class _AlfredTurn:
         pending_actions: Any | None,
         interactive_turn: Any | None,
         interactives: Any | None,
+        opinion_note: str | None = None,
     ) -> None:
         self.message = message
         self.node_link = node_link
@@ -259,6 +265,7 @@ class _AlfredTurn:
         self.pending_actions = pending_actions
         self.interactive_turn = interactive_turn
         self.interactives = interactives
+        self.opinion_note = opinion_note
 
         self.dst = LLM_ADDRESS
         self.timeout = settings.llm.request_timeout_s
@@ -280,6 +287,7 @@ class _AlfredTurn:
         self.dhistory = history if isinstance(history, dialogue_context.DialogueHistory) else None
         self.managed = compression.context_compression and self.chat_key is not None
         self.recall_note: str | None = None
+        self.group_note: str | None = None
         self.step_away = False
         self.num_ctx = compression.num_ctx
         self.sent_chars = 0
@@ -360,6 +368,27 @@ class _AlfredTurn:
             if extra:
                 note = f"{note}{separator}{extra}" if note else extra
         self.context_note = f"{note}\n\n{LENGTH_NOTE}" if note else LENGTH_NOTE
+        self.group_note = await self._load_group_note()
+
+    async def _load_group_note(self) -> str | None:
+        if self.opinion_note is not None:
+            return self.opinion_note
+        if self.chat_key is None or not group_context.reads_group(self.subscription):
+            return None
+        try:
+            return await group_context.build_note(
+                self.store,
+                self.chat_key,
+                trigger_message_id=self.message.message_id,
+                dialogue_id=self.dialogue_id,
+            )
+        except Exception:
+            log.warning(
+                "ai_flow: заметка о переписке не собралась (chat=%s)",
+                self.log_chat_id,
+                exc_info=True,
+            )
+            return None
 
     async def _open_forms_note(self) -> str | None:
         if self.pending_actions is None or self.message.chat is None:
@@ -411,7 +440,11 @@ class _AlfredTurn:
                     self.log_chat_id,
                 )
             self.num_ctx = await resolve_num_ctx(self.settings, self.store, self.dst)
-        extra_chars = len(self.context_note) + len(self.recall_note or "")
+        extra_chars = (
+            len(self.context_note)
+            + len(self.recall_note or "")
+            + len(self.group_note or "")
+        )
         self.sent_chars = dialogue_context.content_chars(list(self.history)) + extra_chars
         if not (self.managed and self.dhistory is not None):
             return
@@ -446,7 +479,7 @@ class _AlfredTurn:
             )
 
     def _notes(self, extra: tuple[str, ...] = ()) -> list[str]:
-        notes = [n for n in (self.recall_note, self.context_note) if n]
+        notes = [n for n in (self.recall_note, self.context_note, self.group_note) if n]
         return notes + [n for n in extra if n]
 
     async def _save_stats(self, stats: ChatStats, chars: int) -> None:
@@ -689,11 +722,14 @@ class _AlfredTurn:
             await _current_turn_text(self.store, self.message),
             retry_hist,
         )
+        if self.opinion_note is None:
+            self.group_note = None
         tools_ran = list(self.executed_tools)
         extra = (_tools_done_note(tools_ran),) if tools_ran else ()
         notes = self._notes(extra)
         retry_stats = ChatStats()
-        raw = await self._ask_once(retry_hist, retry_stats, notes, allow_tools=not tools_ran)
+        allow_tools = not tools_ran and self.opinion_note is None
+        raw = await self._ask_once(retry_hist, retry_stats, notes, allow_tools=allow_tools)
         if raw == SILENT_REPLY:
             return raw
         await self._save_stats(
@@ -732,7 +768,8 @@ class _AlfredTurn:
             self.log_chat_id,
         )
         last_stats = ChatStats()
-        raw = await self._ask_once(trimmed, last_stats, notes, allow_tools=not tools_ran)
+        allow_tools = not tools_ran and self.opinion_note is None
+        raw = await self._ask_once(trimmed, last_stats, notes, allow_tools=allow_tools)
         if raw == SILENT_REPLY:
             return raw
         await self._save_stats(last_stats, dialogue_context.content_chars(trimmed))
@@ -744,7 +781,10 @@ class _AlfredTurn:
         extra = (dialogue_context.STEP_AWAY_INSTRUCTION,) if self.step_away else ()
         stats = ChatStats()
         try:
-            raw = await self._ask_once(self.history, stats, self._notes(extra))
+            allow_tools = self.opinion_note is None
+            raw = await self._ask_once(
+                self.history, stats, self._notes(extra), allow_tools=allow_tools
+            )
         except ProtoError:
             await self._save_stats(stats, self.sent_chars)
             if not (self.managed and stats.truncated):
@@ -790,6 +830,7 @@ async def request_alfred(
     pending_actions: Any | None = None,
     interactive_turn: Any | None = None,
     interactives: Any | None = None,
+    opinion_note: str | None = None,
 ) -> str | None:
     turn = _AlfredTurn(
         message,
@@ -807,5 +848,6 @@ async def request_alfred(
         pending_actions,
         interactive_turn,
         interactives,
+        opinion_note,
     )
     return await turn.run()

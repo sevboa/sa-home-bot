@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import logging
 from typing import Any
 
 from aiogram.types import Message
 
-from sa_home_bot.bot import dialogue_context, voice_stt
+from sa_home_bot.bot import dialogue_context, group_context, voice_stt
 from sa_home_bot.bot.ai_context import display_name
 from sa_home_bot.bot.ai_flow import photo_key_for
 from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
@@ -13,11 +14,20 @@ from sa_home_bot.bot.rich_stream import RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
+from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.utils.clock import utc_now
+
+log = logging.getLogger(__name__)
 
 OPENING_PROMPT = (
     "Тебя только что позвали, без конкретного вопроса. Поприветствуй "
     "коротко, в характере — дай понять, что ты здесь и готов слушать."
+)
+GROUP_OPINION_PROMPT = (
+    "Тебя позвали без вопроса. Выскажи коротко, в характере, своё мнение о сегодняшней "
+    "переписке этой группы: с чем согласен, с кем споришь, что тебя удивило. Опирайся "
+    "только на блок переписки выше: не выдумывай реплик и не приписывай людям чужих "
+    "слов. Если людей мало или сказано мало, так и скажи."
 )
 EMPTY_REPLY_PROMPT = (
     "Пользователь ответил в этом треде, не написав никакого текста "
@@ -99,6 +109,7 @@ async def photo_history(
     config: Settings,
     dialogue_id: int,
     rich_session: RichStreamSession | None,
+    caption: str | None = None,
 ) -> list[dict[str, Any]] | None:
     if rich_session is not None:
         await rich_session.push_status(PHOTO_LOOKING_TEXT_PLAIN)
@@ -106,7 +117,7 @@ async def photo_history(
     if len(photo_b64) > MAX_RAW_IMAGE_B64_BYTES:
         return None
 
-    caption = (message.caption or "").strip()
+    caption = ((message.caption or "") if caption is None else caption).strip()
     persisted = f"{PHOTO_MARKER} {caption}".strip() if caption else PHOTO_MARKER
     await record_user_turn(
         store, message, dialogue_id, persisted, photo_path=photo_key_for(message)
@@ -182,3 +193,13 @@ async def history_with_directive(
     history = await load_thread_history(store, config, message, dialogue_id)
     history.append({"role": "user", "content": directive})
     return history
+
+
+async def group_opinion_note(store: Store, book: SubscriptionBook, message: Message) -> str | None:
+    if not group_context.reads_group(book.for_chat(message.chat.id)):
+        return None
+    try:
+        return await group_context.build_opinion_note(store, message.chat.id, message.message_id)
+    except Exception:
+        log.warning("ai: заметка для мнения не собралась (chat=%s)", message.chat.id, exc_info=True)
+        return None

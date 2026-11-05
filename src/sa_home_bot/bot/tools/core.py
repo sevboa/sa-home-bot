@@ -43,6 +43,7 @@ class ToolContext:
     is_private: bool = False
     end_turn: bool = False
     reply_to_message_id: int | None = None
+    recap_digest: str | None = None
 
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], Awaitable[str]]
@@ -65,7 +66,16 @@ class ActionRight:
         return subscription.allows_action(self.action, self.service)
 
 
-ToolRight = CommandRight | ActionRight
+@dataclass(frozen=True)
+class RecordedChatRight:
+    action: str
+    service: str
+
+    def granted(self, subscription: Subscription) -> bool:
+        return subscription.group_log and subscription.allows_action(self.action, self.service)
+
+
+ToolRight = CommandRight | ActionRight | RecordedChatRight
 
 
 @dataclass(frozen=True)
@@ -119,6 +129,8 @@ SERIAL_DEFERRED = (
     "Не выполнено: такие действия идут строго по одному. Сначала дождись итога "
     "предыдущего действия, потом повтори это отдельным вызовом."
 )
+
+FULL_RESULT_TOOLS = frozenset({"chat_recap"})
 
 
 def for_context(toolkit: ToolKit, ctx: ToolContext) -> ToolKit:

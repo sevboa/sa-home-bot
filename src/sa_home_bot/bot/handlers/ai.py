@@ -15,6 +15,7 @@ from sa_home_bot.bot.ai_reply import (
     rich_session_for,
 )
 from sa_home_bot.bot.away import KIND_SUMMON, KIND_TEXT, AwayService
+from sa_home_bot.bot.group_log_capture import GROUP_TYPES
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
@@ -31,7 +32,6 @@ catchall_router = Router(name="ai_catchall")
 log = logging.getLogger(__name__)
 
 PRIVATE = "private"
-GROUP_TYPES = ("group", "supergroup")
 
 
 def _may_talk_to_alfred(subscription: Subscription | None) -> bool:
@@ -108,15 +108,17 @@ class GroupMention(Filter):
     async def __call__(self, message: Message, bot_username: str) -> bool | dict:
         if message.chat is None or message.chat.type not in GROUP_TYPES:
             return False
-        if not message.text or not message.entities:
+        text = message.text or message.caption
+        entities = message.entities or message.caption_entities
+        if not text or not entities:
             return False
         mention = f"@{bot_username}".lower()
-        for entity in message.entities:
+        for entity in entities:
             if entity.type != "mention":
                 continue
-            piece = message.text[entity.offset : entity.offset + entity.length]
+            piece = text[entity.offset : entity.offset + entity.length]
             if piece.lower() == mention:
-                rest = message.text[: entity.offset] + message.text[entity.offset + entity.length :]
+                rest = text[: entity.offset] + text[entity.offset + entity.length :]
                 return {"mention_prompt": rest.strip()}
         return False
 
@@ -136,6 +138,7 @@ async def _ask_and_reply(
     *,
     pending_actions: PendingActions | None = None,
     interactives: Interactives | None = None,
+    opinion_note: str | None = None,
 ) -> str | None:
     services = TurnServices(
         node_link=node_link,
@@ -147,8 +150,19 @@ async def _ask_and_reply(
         tool_calls=tool_calls,
         pending_actions=pending_actions,
         interactives=interactives,
+        opinion_note=opinion_note,
     )
     return await ask_and_reply(message, services, dialogue_id, history, rich_session)
+
+
+async def _opening_turn(
+    message: Message, store: Store, book: SubscriptionBook, interactives: Interactives | None
+) -> tuple[str, str | None]:
+    note = await ai_turns.group_opinion_note(store, book, message)
+    if note is not None:
+        return ai_turns.GROUP_OPINION_PROMPT, note
+    _greeting_portrait(message, interactives)
+    return ai_turns.OPENING_PROMPT, None
 
 
 @router.message(Command(commands.ALFRED.name, commands.AI.name))
@@ -181,13 +195,16 @@ async def cmd_ai(
     if in_topic:
         history = await ai_turns.load_thread_history(store, config, message, dialogue_id)
         if not prompt:
-            history.append({"role": "user", "content": ai_turns.OPENING_PROMPT})
+            opening, opinion_note = await _opening_turn(message, store, book, interactives)
+            history.append({"role": "user", "content": opening})
+        else:
+            opinion_note = None
     elif prompt:
         history = [{"role": "user", "content": prompt}]
+        opinion_note = None
     else:
-        history = [{"role": "user", "content": ai_turns.OPENING_PROMPT}]
-    if not prompt:
-        _greeting_portrait(message, interactives)
+        opening, opinion_note = await _opening_turn(message, store, book, interactives)
+        history = [{"role": "user", "content": opening}]
 
     await _ask_and_reply(
         message,
@@ -203,6 +220,7 @@ async def cmd_ai(
         rich_session_for(message, config),
         pending_actions=pending_actions,
         interactives=interactives,
+        opinion_note=opinion_note,
     )
 
 
@@ -466,19 +484,34 @@ async def on_group_mention(
     if not _may_talk_to_alfred(subscription):
         return
     dialogue_id = dialogue_id_of(message)
-    if away is not None and await away.intercept(
-        message,
-        kind=KIND_TEXT if mention_prompt else KIND_SUMMON,
-        text=mention_prompt,
-        dialogue_id=dialogue_id,
-    ):
-        return
-    if mention_prompt:
+    if away is not None:
+        if message.photo:
+            intercepted = await away.intercept(message, dialogue_id=dialogue_id)
+        else:
+            intercepted = await away.intercept(
+                message,
+                kind=KIND_TEXT if mention_prompt else KIND_SUMMON,
+                text=mention_prompt,
+                dialogue_id=dialogue_id,
+            )
+        if intercepted:
+            return
+    rich_session = rich_session_for(message, config)
+    opinion_note: str | None = None
+    history: list[dict[str, Any]] | None
+    if message.photo:
+        history = await ai_turns.photo_history(
+            message, store, config, dialogue_id, rich_session, caption=mention_prompt
+        )
+        if history is None:
+            await message.answer(ai_turns.PHOTO_TOO_LARGE_TEXT)
+            return
+    elif mention_prompt:
         await ai_turns.record_user_turn(store, message, dialogue_id, mention_prompt)
-        history: list[dict[str, Any]] = [{"role": "user", "content": mention_prompt}]
+        history = [{"role": "user", "content": mention_prompt}]
     else:
-        history = [{"role": "user", "content": ai_turns.OPENING_PROMPT}]
-        _greeting_portrait(message, interactives)
+        opening, opinion_note = await _opening_turn(message, store, book, interactives)
+        history = [{"role": "user", "content": opening}]
 
     await _ask_and_reply(
         message,
@@ -491,9 +524,10 @@ async def on_group_mention(
         history,
         active_ai_chats,
         tool_calls,
-        rich_session_for(message, config),
+        rich_session,
         pending_actions=pending_actions,
         interactives=interactives,
+        opinion_note=opinion_note,
     )
 
 

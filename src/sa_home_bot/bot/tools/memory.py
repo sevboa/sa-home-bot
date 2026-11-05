@@ -29,6 +29,8 @@ async def tool_memory(ctx: ToolContext, args: dict[str, Any]) -> str:
     refusal = _MEMORY_VARIANTS.refusal_for(ctx.subscription, action)
     if refusal is not None:
         return refusal
+    if action == memory_protocol.ACTION_REMEMBER and ctx.recap_digest is not None:
+        return "не запоминаю: в этом ходе ты читал чужую переписку"
 
     payload: dict[str, Any] = {"chat_id": ctx.chat_id}
     if action == memory_protocol.ACTION_REMEMBER:

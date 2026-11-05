@@ -62,6 +62,7 @@ class FakeMessage:
     def __init__(
         self, chat_id, text=None, reply_to=None, chat_type="private", entities=None,
         message_thread_id=None, photo=None, caption=None, voice=None, sticker=None,
+        caption_entities=None,
     ):
         self.chat = FakeChat(chat_id, type=chat_type)
         self.message_id = FakeMessage._next_id
@@ -73,6 +74,7 @@ class FakeMessage:
         self.sticker = sticker
         self.reply_to_message = reply_to
         self.entities = entities
+        self.caption_entities = caption_entities
         self.message_thread_id = message_thread_id
         self.bot = FakeBot()
         self.sent: list[str] = []
@@ -681,6 +683,35 @@ async def test_group_mention_filter_ignores_private_chat():
     assert await filt(msg, bot_username="alfredbot") is False
 
 
+async def test_group_mention_filter_caption_entities_with_photo():
+    filt = ai_handler.GroupMention()
+    caption = "@alfredbot что тут?"
+    entities = [FakeEntity(type="mention", offset=0, length=len("@alfredbot"))]
+    msg = FakeMessage(
+        1,
+        caption=caption,
+        chat_type="group",
+        caption_entities=entities,
+        photo=[object()],
+    )
+    result = await filt(msg, bot_username="alfredbot")
+    assert result == {"mention_prompt": "что тут?"}
+
+
+async def test_group_mention_filter_caption_entities_wrong_mention():
+    filt = ai_handler.GroupMention()
+    caption = "@someone_else привет"
+    entities = [FakeEntity(type="mention", offset=0, length=len("@someone_else"))]
+    msg = FakeMessage(
+        1,
+        caption=caption,
+        chat_type="group",
+        caption_entities=entities,
+        photo=[object()],
+    )
+    assert await filt(msg, bot_username="alfredbot") is False
+
+
 async def test_on_private_message_starts_new_dialogue_when_none_exists(store, monkeypatch):
     seen_history = []
 
@@ -826,6 +857,24 @@ async def test_handle_photo_message_pushes_looking_status_when_rich(store):
     await ai_turns.photo_history(message, store, _plain_settings(), 999, rich_session)
 
     assert rich_session.statuses == [ai_turns.PHOTO_LOOKING_TEXT_PLAIN]
+
+
+async def test_photo_history_caption_param_overrides_message_caption(store, monkeypatch):
+    async def fake_download(message, file):
+        return "QQ=="
+
+    async def fake_load_history(store_, config, chat_id, dialogue_id):
+        return [{"role": "user", "content": "x"}]
+
+    monkeypatch.setattr(ai_turns, "_download_base64", fake_download)
+    monkeypatch.setattr(ai_turns, "load_thread_history", fake_load_history)
+
+    message = FakeMessage(1, caption="@alfredbot", photo=["size1"], chat_type="private")
+    history = await ai_turns.photo_history(
+        message, store, _plain_settings(), 999, None, caption=""
+    )
+
+    assert history[-1]["content"] == ai_turns.PHOTO_NO_CAPTION_PROMPT
 
 
 async def test_on_private_sticker_with_emoji_sends_raw_image_and_persists_photo_path(
@@ -1190,6 +1239,62 @@ async def test_on_group_mention_without_text_asks_model_for_greeting(store, monk
     rows = await store.ai_turns_for_dialogue(1, message.message_id)
     assert len(rows) == 1
     assert rows[0]["role"] == "assistant"
+
+
+async def test_on_group_mention_with_photo_calls_photo_history_and_requests_alfred(
+    store, monkeypatch
+):
+    seen_photo_history = []
+    seen_request = []
+
+    async def fake_photo_history(message, store_, config, dialogue_id, rich_session, caption=None):
+        seen_photo_history.append((message, caption))
+        return [{"role": "user", "content": caption or ai_turns.PHOTO_NO_CAPTION_PROMPT}]
+
+    async def fake_request(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        seen_request.append(history)
+        return "Вижу фото, сэ"
+
+    monkeypatch.setattr(ai_turns, "photo_history", fake_photo_history)
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+
+    message = FakeMessage(1, caption="@alfredbot что тут?", chat_type="group", photo=[object()])
+
+    await ai_handler.on_group_mention(
+        message, mention_prompt="что тут?", node_link=None, store=store,
+        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert seen_photo_history == [(message, "что тут?")]
+    assert seen_request == [[{"role": "user", "content": "что тут?"}]]
+    assert message.sent == [ai_reply.format_answer("Вижу фото, сэ")]
+
+
+async def test_on_group_mention_with_photo_too_large_sends_error(store, monkeypatch):
+    async def fake_photo_history(message, store_, config, dialogue_id, rich_session, caption=None):
+        return None
+
+    async def fake_request(*args, **kwargs):
+        raise AssertionError("request_alfred should not be called")
+
+    monkeypatch.setattr(ai_turns, "photo_history", fake_photo_history)
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
+
+    message = FakeMessage(1, caption="@alfredbot что тут?", chat_type="group", photo=[object()])
+
+    await ai_handler.on_group_mention(
+        message, mention_prompt="что тут?", node_link=None, store=store,
+        config=_plain_settings(), book=_admin_book(), notifier=FakeNotifier(),
+        active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(), subscription=_sub("chat@llm"),
+    )
+
+    assert ai_turns.PHOTO_TOO_LARGE_TEXT in message.sent[0]
 
 
 async def test_dismissal_runs_after_the_farewell_is_sent(store, monkeypatch):

@@ -692,6 +692,15 @@ def test_tool_status_covers_every_registered_tool():
     assert missing == set()
 
 
+def test_tool_status_covers_tools_of_recorded_group():
+    group = Subscription(
+        chat_id=-100, name="g", allowed_commands=frozenset({"*"}), group_log=True
+    )
+    toolkit = ai_tools.tools_for(group)
+    assert "chat_recap" in toolkit.handlers
+    assert set(toolkit.handlers) - set(ai_lines.TOOL_STATUS_TEXT) == set()
+
+
 def _note_msg(messages) -> str:
     return next(m["content"] for m in messages if m["role"] == "system")
 

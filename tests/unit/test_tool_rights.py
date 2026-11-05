@@ -4,6 +4,7 @@ import pytest
 
 from sa_home_bot.bot import tools
 from sa_home_bot.bot.tools import DismissalBox
+from sa_home_bot.subscriptions.models import Subscription
 from tests.unit.tools_support import (
     ADMIN,
     declared_enum,
@@ -30,7 +31,8 @@ ALL_VPN_ACTIONS = [
 
 
 def test_tools_for_admin_gets_everything():
-    assert set(tool_names(ADMIN)) == {spec.name for spec in tools.TOOLS}
+    expected = {spec.name for spec in tools.TOOLS if spec.name != "chat_recap"}
+    assert set(tool_names(ADMIN)) == expected
 
 
 def test_tools_for_without_subscription_is_fail_closed():
@@ -95,6 +97,23 @@ def test_web_search_appears_with_search_right():
 
 def test_recall_tool_result_needs_no_rights():
     assert "recall_tool_result" in tool_names(make_sub())
+
+
+@pytest.mark.parametrize(
+    ("rights", "group_log", "expected"),
+    [
+        (["chat_recap@llm"], True, True),
+        (["chat_recap@llm"], False, False),
+        (["*"], False, False),
+        (["*"], True, True),
+    ],
+)
+def test_chat_recap_requires_group_log_and_right(rights, group_log, expected):
+    sub = Subscription(
+        chat_id=-100, name="g", allowed_commands=frozenset(rights), group_log=group_log
+    )
+    has_tool = "chat_recap" in tool_names(sub)
+    assert has_tool == expected
 
 
 def test_filtering_does_not_mutate_shared_declaration():

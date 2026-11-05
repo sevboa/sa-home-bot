@@ -37,6 +37,7 @@ NOTIF_CLEARED = "cleared"
 ACTION_TICKS_PREFIX = "action_ticks:"
 
 DISK_SUMMARIES_KEY = "disk_summaries_cache"
+ALFRED_AWAY_KEY = "alfred_away"
 
 
 def _item(row: Any) -> dict:
