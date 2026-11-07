@@ -335,7 +335,11 @@ class VpnService(
             "label": self._cfg.location,
             "server_public_key": server_pubkey,
             "transports": list(self._transports),
-            "check": await self._check_rollup(server=self._node),
+            "check": [
+                row
+                for row in await self._check_rollup(server=self._node)
+                if row.get("transport") != PROBE_TRANSPORT_REALITY_ALT
+            ],
             "access_control": True,
         }
         if self._reality_cfg is not None and self._reality_alt_params() is not None:

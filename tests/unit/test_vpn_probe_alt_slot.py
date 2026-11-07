@@ -438,7 +438,16 @@ def test_vpn_service_state_probe_transports_only_with_alt():
             svc_with_alt = VpnService(
             Settings(vpn=cfg_with_alt), db, backend, emit, reality_backend=xray
         )
+
+            async def rollup(*, server=None):
+                return [
+                    {"transport": "reality", "status": "ok"},
+                    {"transport": "reality_alt", "status": "alerting"},
+                ]
+
+            svc_with_alt._check_rollup = rollup
             state_with_alt = await svc_with_alt.get_state()
+            assert [r["transport"] for r in state_with_alt["check"]] == ["reality"]
             assert "probe_transports" in state_with_alt
             assert state_with_alt["probe_transports"] == ["awg", "reality", "reality_alt"]
             assert state_with_alt["transports"] == ["awg", "reality"]
@@ -557,6 +566,7 @@ def test_vpn_check_service_tunnel_up_down_reality_alt(monkeypatch):
     async def instant_sleep(_delay):
         return None
 
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.shutil.which", lambda _name: None)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(asyncio, "sleep", instant_sleep)
 
@@ -637,3 +647,49 @@ def test_vpn_check_service_curl_argv_reality_alt():
     argv = service._curl_argv(slot, ["-s", "https://example.com"])
     assert "--socks5-hostname" in argv
     assert "127.0.0.1:11112" in argv
+
+
+def _capture_fetch(monkeypatch, reply):
+    sent = {}
+
+    class FakeClient:
+        async def command(self, action, args, dst, timeout):
+            sent.update(args)
+            return reply
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    async def fake_resolve_vpn_dst(client, server):
+        return type("Dst", (), {"node": server})()
+
+    monkeypatch.setattr(probe_tunnel, "_node_client", lambda settings: FakeClient())
+    monkeypatch.setattr(probe_tunnel.vpn_nodes, "resolve_vpn_dst", fake_resolve_vpn_dst)
+    return sent
+
+
+_OLD_URL = "vless://uuid-a@1.2.3.4:8443?security=reality&sni=www.google.com&fp=chrome&pbk=key&sid=ab#p"
+_ALT_URL = "vless://uuid-a@1.2.3.4:2083?security=reality&sni=feedwonk.com&fp=chrome&pbk=key&sid=ab#p"
+
+
+def test_fetch_probe_config_alt_issues_reality_and_targets_alt_entry(monkeypatch):
+    slot = make_reality_slot()
+    slot.transport = "reality_alt"
+    sent = _capture_fetch(monkeypatch, {"share_url": _OLD_URL, "alt_share_url": _ALT_URL})
+    text = asyncio.run(probe_tunnel._fetch_probe_config(make_settings(["vpn_check"]), slot))
+    assert sent["transport"] == "reality"
+    assert sent["chat_id"] == vpn_protocol.PROBE_CHAT_ID
+    assert "2083" in text and "feedwonk.com" in text
+    assert "8443" not in text
+
+
+def test_fetch_probe_config_reality_keeps_old_entry(monkeypatch):
+    slot = make_reality_slot()
+    sent = _capture_fetch(monkeypatch, {"share_url": _OLD_URL, "alt_share_url": _ALT_URL})
+    text = asyncio.run(probe_tunnel._fetch_probe_config(make_settings(["vpn_check"]), slot))
+    assert sent["transport"] == "reality"
+    assert "8443" in text and "www.google.com" in text
+    assert "feedwonk.com" not in text
