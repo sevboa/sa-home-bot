@@ -328,63 +328,31 @@ async def test_active_problems_excludes_stale_records(env):
 
 async def test_active_problems_partial_group_whole_false(env):
     svc, events, _ = env
-    await svc.run_command(
-        vpn_protocol.ACTION_REPORT_CHECK,
+    results = [
         {
-            "node": "alfred",
-            "results": [
-                {
-                    "server": "wooster",
-                    "transport": "awg",
-                    "target": "https://a.example",
-                    "ok": False,
-                    "ms": 12,
-                    "error": "timeout",
-                },
-                {
-                    "server": "wooster",
-                    "transport": "awg",
-                    "target": "https://b.example",
-                    "ok": True,
-                    "ms": 10,
-                    "error": None,
-                },
-            ],
-        },
-    )
-    await svc.run_command(
-        vpn_protocol.ACTION_REPORT_CHECK,
-        {
-            "node": "alfred",
-            "results": [
-                {
-                    "server": "wooster",
-                    "transport": "awg",
-                    "target": "https://a.example",
-                    "ok": False,
-                    "ms": 12,
-                    "error": "timeout",
-                },
-                {
-                    "server": "wooster",
-                    "transport": "awg",
-                    "target": "https://b.example",
-                    "ok": True,
-                    "ms": 10,
-                    "error": None,
-                },
-            ],
-        },
-    )
+            "server": "wooster",
+            "transport": "awg",
+            "target": target,
+            "ok": ok,
+            "ms": 12,
+            "error": None if ok else "timeout",
+        }
+        for target, ok in (("https://a.example", False), ("https://b.example", True))
+    ]
+    for _ in range(2):
+        await svc.run_command(
+            vpn_protocol.ACTION_REPORT_CHECK, {"node": "alfred", "results": results}
+        )
     await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
     await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
     await _report(svc, "jeeves", True, server="jeeves", transport="awg")
     recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
-    assert len(recovered) == 1
-    active = recovered[0]["active"]
-    assert len(active) == 1
-    assert active[0]["node"] == "alfred"
-    assert active[0]["server"] == "wooster"
-    assert active[0]["transport"] == "awg"
-    assert active[0]["targets"] == ["https://a.example"]
-    assert active[0]["whole"] is False
+    assert recovered[0]["active"] == [
+        {
+            "node": "alfred",
+            "server": "wooster",
+            "transport": "awg",
+            "targets": ["https://a.example"],
+            "whole": False,
+        }
+    ]

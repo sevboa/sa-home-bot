@@ -970,134 +970,67 @@ async def test_task_result_closes_and_forgets_session_even_if_delivery_fails():
     assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "Готово"
 
 
-async def test_vpn_check_dedup_same_event_once():
-    book = _admin_book()
+VPN_CHECK_BASE = {"node": "jeeves", "server": "wooster", "transport": "awg", "total": 6}
+VPN_FAILED_A = {**VPN_CHECK_BASE, "targets": [{"target": "https://a.example", "error": "t"}]}
+VPN_FAILED_B = {**VPN_CHECK_BASE, "targets": [{"target": "https://b.example", "error": "t"}]}
+VPN_RECOVERED = {**VPN_CHECK_BASE, "targets": ["https://a.example"], "all_ok": False}
+VPN_ACTIVE = [
+    {
+        "node": "alfred",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": ["https://b.example"],
+        "whole": False,
+    }
+]
+
+
+def _vpn_handler():
     notifier = FakeNotifier()
     store = FakeStore()
-    handler = build_node_event_handler(book, notifier, store)
-
-    data = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": [{"target": "https://a.example", "error": "timeout"}],
-        "total": 1,
-        "all_failed": True,
-    }
-    env = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_FAILED, data, src=Address(node="alfred", service="vpn")
-    )
-    await handler(env)
-    await handler(env)
-
-    assert len(notifier.sent) == 1
-    assert len(store.recorded_events) == 1
+    return build_node_event_handler(_admin_book(), notifier, store), notifier, store
 
 
-async def test_vpn_check_recovered_dedup_ignores_active_diff():
-    book = _admin_book()
-    notifier = FakeNotifier()
-    store = FakeStore()
-    handler = build_node_event_handler(book, notifier, store)
-
-    data1 = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": ["https://a.example"],
-        "total": 1,
-        "all_ok": True,
-        "active": [],
-    }
-    data2 = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": ["https://a.example"],
-        "total": 1,
-        "all_ok": True,
-        "active": [
-            {
-                "node": "alfred",
-                "server": "wooster",
-                "transport": "awg",
-                "targets": ["https://b.example"],
-                "whole": True,
-            }
-        ],
-    }
-    env1 = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_RECOVERED, data1, src=Address(node="alfred", service="vpn")
-    )
-    env2 = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_RECOVERED, data2, src=Address(node="alfred", service="vpn")
-    )
-    await handler(env1)
-    await handler(env2)
-
-    assert len(notifier.sent) == 1
-    assert len(store.recorded_events) == 1
+def _vpn_event(name: str, data: dict):
+    return make_event(name, data, src=Address(node="jeeves", service="vpn"))
 
 
-async def test_vpn_check_dedup_different_targets_two_messages():
-    book = _admin_book()
-    notifier = FakeNotifier()
-    store = FakeStore()
-    handler = build_node_event_handler(book, notifier, store)
+@pytest.mark.parametrize(
+    ("name", "first", "second", "shown"),
+    [
+        (vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A, VPN_FAILED_A, 1),
+        (vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A, VPN_FAILED_B, 2),
+        (
+            vpn_protocol.EVENT_VPN_CHECK_RECOVERED,
+            {**VPN_RECOVERED, "active": []},
+            {**VPN_RECOVERED, "active": VPN_ACTIVE},
+            1,
+        ),
+    ],
+)
+async def test_vpn_check_event_from_second_server_shown_once(name, first, second, shown):
+    handler, notifier, store = _vpn_handler()
+    await handler(_vpn_event(name, first))
+    await handler(_vpn_event(name, second))
+    assert len(notifier.sent) == shown
+    assert len(store.recorded_events) == shown
 
-    data1 = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": [{"target": "https://a.example", "error": "timeout"}],
-        "total": 1,
-        "all_failed": True,
-    }
-    data2 = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": [{"target": "https://b.example", "error": "timeout"}],
-        "total": 1,
-        "all_failed": True,
-    }
-    env1 = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_FAILED, data1, src=Address(node="alfred", service="vpn")
-    )
-    env2 = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_FAILED, data2, src=Address(node="alfred", service="vpn")
-    )
-    await handler(env1)
-    await handler(env2)
 
+async def test_vpn_failed_and_recovered_with_same_targets_are_different_events():
+    handler, notifier, _ = _vpn_handler()
+    await handler(_vpn_event(vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A))
+    await handler(_vpn_event(vpn_protocol.EVENT_VPN_CHECK_RECOVERED, VPN_FAILED_A))
     assert len(notifier.sent) == 2
-    assert len(store.recorded_events) == 2
 
 
-async def test_vpn_check_dedup_expires_after_window(monkeypatch):
+async def test_vpn_check_repeat_after_window_shown_again(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(node_events.time, "monotonic", lambda: clock[0])
-
-    book = _admin_book()
-    notifier = FakeNotifier()
-    store = FakeStore()
-    handler = build_node_event_handler(book, notifier, store)
-
-    data = {
-        "node": "jeeves",
-        "server": "wooster",
-        "transport": "awg",
-        "targets": [{"target": "https://a.example", "error": "timeout"}],
-        "total": 1,
-        "all_failed": True,
-    }
-    env = make_event(
-        vpn_protocol.EVENT_VPN_CHECK_FAILED, data, src=Address(node="alfred", service="vpn")
-    )
-    await handler(env)
-    await handler(env)
+    handler, notifier, _ = _vpn_handler()
+    event = _vpn_event(vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A)
+    await handler(event)
+    await handler(event)
     assert len(notifier.sent) == 1
-
     clock[0] = node_events.VPN_EVENT_DEDUP_S + 1.0
-    await handler(env)
+    await handler(event)
     assert len(notifier.sent) == 2

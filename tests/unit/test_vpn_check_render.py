@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from sa_home_bot.bot.node_events import render_vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -68,93 +70,58 @@ def test_series_recovered_and_incomplete():
     assert render_vpn_series(vpn_protocol.EVENT_VPN_SERIES_FAILED, {"node": "zakhar"}) is None
 
 
-def test_recovered_active_removes_https_and_www_prefix():
-    active = [
-        {
-            "node": "alfred",
-            "server": "wooster",
-            "transport": "awg",
-            "targets": ["https://www.instagram.com"],
-            "whole": False,
-        }
-    ]
-    data = {**BASE, "targets": ["https://b.example"], "total": 1, "all_ok": True, "active": active}
-    text = render_vpn_check(RECOVERED, data)
-    assert "instagram.com" in text
-    assert "https://" not in text
-    assert "www." not in text
+RECOVERED_DATA = {**BASE, "targets": ["https://a.example"], "total": 6, "all_ok": False}
+RECOVERED_TEXT = (
+    "✅ VPN: пробник <code>jeeves</code> → <code>wooster</code> awg — снова доступны сайты:\n"
+    "<code>a.example</code>"
+)
 
 
-def test_recovered_active_whole_true_shows_all_sites():
-    active = [
-        {
-            "node": "alfred",
-            "server": "wooster",
-            "transport": "awg",
-            "targets": ["https://a.example"],
-            "whole": True,
-        }
-    ]
-    data = {**BASE, "targets": ["https://b.example"], "total": 1, "all_ok": True, "active": active}
-    text = render_vpn_check(RECOVERED, data)
-    assert "все сайты" in text
-
-
-def test_recovered_active_two_groups_two_lines():
-    active = [
-        {
-            "node": "alfred",
-            "server": "wooster",
-            "transport": "awg",
-            "targets": ["https://a.example"],
-            "whole": False,
-        },
-        {
-            "node": "jeeves",
-            "server": "jeeves",
-            "transport": "reality",
-            "targets": ["https://b.example"],
-            "whole": False,
-        },
-    ]
-    data = {**BASE, "targets": ["https://c.example"], "total": 1, "all_ok": True, "active": active}
-    text = render_vpn_check(RECOVERED, data)
-    assert "alfred → wooster awg: a.example" in text
-    assert "jeeves → jeeves reality: b.example" in text
-
-
-def test_recovered_active_empty_shows_no_other_problems():
-    data = {**BASE, "targets": ["https://a.example"], "total": 1, "all_ok": True, "active": []}
-    text = render_vpn_check(RECOVERED, data)
-    assert "Других проблем нет." in text
-
-
-def test_recovered_without_active_key_unchanged():
-    data = {**BASE, "targets": ["https://a.example"], "total": 1, "all_ok": True}
-    text_without = render_vpn_check(RECOVERED, data)
-    data_with_empty = {**data, "active": []}
-    text_with_empty = render_vpn_check(RECOVERED, data_with_empty)
-    assert text_without != text_with_empty
-    assert "Других проблем нет." not in text_without
-
-
-def test_failed_no_active_block_even_if_passed():
-    active = [
-        {
-            "node": "alfred",
-            "server": "wooster",
-            "transport": "awg",
-            "targets": ["https://a.example"],
-            "whole": True,
-        }
-    ]
-    data = {
-        **BASE,
-        "targets": [{"target": "https://b.example", "error": "timeout"}],
-        "total": 1,
-        "all_failed": True,
-        "active": active,
+def _problem(node: str, targets: list[str], *, whole: bool = False) -> dict:
+    return {
+        "node": node,
+        "server": "jeeves",
+        "transport": "reality",
+        "targets": targets,
+        "whole": whole,
     }
-    text = render_vpn_check(FAILED, data)
-    assert "Других проблем нет." not in text
-    assert "⚠️ Ещё не работает:" not in text
+
+
+@pytest.mark.parametrize(
+    ("active", "block"),
+    [
+        ([], "\n\nДругих проблем нет."),
+        (
+            [_problem("zakhar", ["https://www.instagram.com", "https://api.telegram.org"])],
+            "\n\n⚠️ Ещё не работает:\nzakhar → jeeves reality: instagram.com, api.telegram.org",
+        ),
+        (
+            [_problem("zakhar", ["https://1.1.1.1"], whole=True)],
+            "\n\n⚠️ Ещё не работает:\nzakhar → jeeves reality: все сайты",
+        ),
+        (
+            [_problem("alfred", ["https://a.example"]), _problem("zakhar", ["https://b.example"])],
+            "\n\n⚠️ Ещё не работает:\n"
+            "alfred → jeeves reality: a.example\n"
+            "zakhar → jeeves reality: b.example",
+        ),
+        (
+            [_problem("a<b", ["https://x&y.example"])],
+            "\n\n⚠️ Ещё не работает:\na&lt;b → jeeves reality: x&amp;y.example",
+        ),
+    ],
+)
+def test_recovered_shows_active_problems(active, block):
+    text = render_vpn_check(RECOVERED, {**RECOVERED_DATA, "active": active})
+    assert text == RECOVERED_TEXT + block
+
+
+def test_recovered_without_active_key_keeps_old_text():
+    assert render_vpn_check(RECOVERED, RECOVERED_DATA) == RECOVERED_TEXT
+
+
+def test_failed_never_shows_active_block():
+    targets = [{"target": "https://b.example", "error": "timeout"}]
+    data = {**BASE, "targets": targets, "total": 6, "all_failed": False}
+    active = [_problem("zakhar", ["https://a.example"])]
+    assert render_vpn_check(FAILED, {**data, "active": active}) == render_vpn_check(FAILED, data)

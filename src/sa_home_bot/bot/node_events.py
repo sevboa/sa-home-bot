@@ -408,24 +408,20 @@ def _site(target: str) -> str:
     return f"<code>{html.escape(target.removeprefix('https://'))}</code>"
 
 
+def _short_site(target: str) -> str:
+    return html.escape(target.removeprefix("https://").removeprefix("www."))
+
+
 def _active_problems_block(active: list[dict]) -> str:
     if not active:
         return "\nДругих проблем нет."
     lines = ["\n⚠️ Ещё не работает:"]
     for item in active:
-        node = item["node"]
-        server = item["server"]
-        transport = item["transport"]
-        if item["whole"]:
-            sites = "все сайты"
-        else:
-            sites = ", ".join(
-                html.escape(
-                    t.removeprefix("https://").removeprefix("www.")
-                )
-                for t in item["targets"]
-            )
-        lines.append(f"{node} → {server} {transport}: {sites}")
+        direction = html.escape(f"{item['node']} → {item['server']} {item['transport']}")
+        sites = (
+            "все сайты" if item["whole"] else ", ".join(_short_site(t) for t in item["targets"])
+        )
+        lines.append(f"{direction}: {sites}")
     return "\n".join(lines)
 
 
