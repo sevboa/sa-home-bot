@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from sa_home_bot.node.vpn_probe_state import ProbeSlot
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 TCP_TIMEOUT_S = 5.0
 
@@ -70,7 +71,7 @@ async def raw_probe(
 ) -> RawProbeResult:
     tcp_ok: bool | None = None
     tcp_error: str | None = None
-    if slot.transport == TRANSPORT_REALITY and target is not None:
+    if slot.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS and target is not None:
         tcp_error = await tcp_connect(target.host, target.port, tcp_timeout)
         tcp_ok = tcp_error is None
         if not tcp_ok:

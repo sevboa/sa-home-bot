@@ -7,13 +7,14 @@ from collections.abc import Callable
 
 from sa_home_bot.config import VpnSeriesConfig
 from sa_home_bot.node.vpn_probe_state import ProbeSlot
+from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn_series.measure import Sample, SeriesResult, classify
 
 
 def build_curl_argv(slot: ProbeSlot, url: str, duration_s: float) -> list[str]:
     ip_path = shutil.which("ip") or "ip"
     curl = ["curl", "-s", "-o", "-", "-m", str(int(duration_s))]
-    if slot.transport == "reality":
+    if slot.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS:
         curl += ["--socks5-hostname", f"127.0.0.1:{slot.socks_port}"]
     curl.append(url)
     return ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]

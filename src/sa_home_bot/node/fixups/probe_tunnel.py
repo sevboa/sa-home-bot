@@ -29,7 +29,7 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
-SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality")
+SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality", "reality_alt")
 ISSUE_TIMEOUT_S = 20.0
 
 
@@ -61,9 +61,10 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
         dst = await vpn_nodes.resolve_vpn_dst(client, server=slot.server)
         if dst is None or dst.node != slot.server:
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
+        issue_transport = "reality" if slot.transport == "reality_alt" else slot.transport
         result = await client.command(
             vpn_protocol.ACTION_ISSUE,
-            {"chat_id": vpn_protocol.PROBE_CHAT_ID, "transport": slot.transport},
+            {"chat_id": vpn_protocol.PROBE_CHAT_ID, "transport": issue_transport},
             dst=dst,
             timeout=ISSUE_TIMEOUT_S,
         )
@@ -72,9 +73,14 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
         if not config_text:
             raise FixupError(f"vpn@{slot.server} не вернул config_text")
         return str(config_text)
-    share_url = result.get("share_url")
-    if not share_url:
-        raise FixupError(f"vpn@{slot.server} не вернул share_url")
+    if slot.transport == "reality_alt":
+        share_url = result.get("alt_share_url")
+        if not share_url:
+            raise FixupError(f"vpn@{slot.server} не вернул alt_share_url")
+    else:
+        share_url = result.get("share_url")
+        if not share_url:
+            raise FixupError(f"vpn@{slot.server} не вернул share_url")
     params, client_uuid = probe_client_config.parse_vless_url(str(share_url))
     return probe_client_config.render_probe_client_config(
         params, client_uuid, socks_port=slot.socks_port
@@ -217,7 +223,7 @@ def vpn_probe_sudoers_content(
             cmds.append(f"{ip_path} netns exec {slot.netns} {ip_path} route get *")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} up {slot.iface}")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} down {slot.iface}")
-        elif slot.transport == "reality":
+        elif slot.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS:
             conf_path = vpn_probe_state.reality_conf_path(slot)
             cmds.append(
                 f"{ip_path} netns exec {slot.netns} timeout * {xray_path} run -c {conf_path}"
@@ -233,7 +239,7 @@ def _sudoers_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     if ip_path is None:
         return False
     needs_awg = any(s.transport == "awg" for s in slots)
-    needs_reality = any(s.transport == "reality" for s in slots)
+    needs_reality = any(s.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS for s in slots)
     awg_quick_path = find_executable("awg-quick") if needs_awg else ""
     if needs_awg and not awg_quick_path:
         return False
@@ -260,7 +266,8 @@ def _sudoers_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
     awg_quick_path = _required_tool("awg-quick", any(s.transport == "awg" for s in slots))
-    xray_path = _required_tool("xray", any(s.transport == "reality" for s in slots))
+    needs_reality = any(s.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS for s in slots)
+    xray_path = _required_tool("xray", needs_reality)
     content = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, xray_path, getuser())
     install_sudoers_snippet(VPN_PROBE_SUDOERS_FILE, content)
 
