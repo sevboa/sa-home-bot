@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from sa_home_bot.config import RealityTransportConfig
@@ -307,7 +308,7 @@ def test_sub_links_without_alt_has_no_entries_key():
     assert "entries" not in result
 
 
-def test_resolve_subscription_parses_old_reply_with_only_entry():
+def _resolve_with_reply(extra: dict):
     from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 
     class FakeMixin(SubscriptionLinksMixin):
@@ -380,17 +381,41 @@ def test_resolve_subscription_parses_old_reply_with_only_entry():
                 "entry": entry.to_wire(),
                 "used_bytes": 0,
                 "limit_bytes": 0,
+                **extra,
             }
-
-    import asyncio
 
     mixin = FakeMixin()
     token = subs.make_token(b"secret", 1, "x")
-    sub = asyncio.run(mixin.resolve_subscription(token))
+    return asyncio.run(mixin.resolve_subscription(token))
+
+
+def test_resolve_subscription_parses_old_reply_with_only_entry():
+    sub = _resolve_with_reply({})
     assert sub is not None
     assert len(sub.entries) == 1
     assert sub.entries[0].name == "🇺🇸 США"
     assert sub.entries[0].is_alt is False
+
+
+def test_resolve_subscription_parses_new_reply_with_entries():
+    regular = subs.SubEntry(
+        node="wooster",
+        name="🇺🇸 США",
+        uuid="uuid-us",
+        params=RealityParams("198.51.100.2", 8443, "PUB2", "ab", "www.google.com"),
+    )
+    alt = subs.SubEntry(
+        node="wooster",
+        name="🇺🇸 США · 2",
+        uuid="uuid-us",
+        params=RealityParams("198.51.100.2", 2083, "PUB2", "ab", "feedwonk.com"),
+        is_alt=True,
+    )
+    sub = _resolve_with_reply({"entries": [regular.to_wire(), alt.to_wire()]})
+    assert sub is not None
+    assert [e.is_alt for e in sub.entries] == [False, True]
+    assert [e.params.port for e in sub.entries] == [8443, 2083]
+    assert sub.entries[1].params.sni == "feedwonk.com"
 
 
 def test_countries_card_skips_alt_entries():
