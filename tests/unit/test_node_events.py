@@ -3,6 +3,7 @@ from unittest.mock import ANY
 import pytest
 from aiogram.types import InputRichBlockThinking
 
+import sa_home_bot.bot.node_events as node_events
 from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -38,6 +39,7 @@ from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
+from sa_home_bot.vpn import protocol as vpn_protocol
 from tests.unit.support.fakes import FakeNotifier as SupportNotifier
 
 
@@ -966,3 +968,136 @@ async def test_task_result_closes_and_forgets_session_even_if_delivery_fails():
     assert sessions._sessions == {}
     assert session._pump_task is None
     assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "Готово"
+
+
+async def test_vpn_check_dedup_same_event_once():
+    book = _admin_book()
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    data = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": [{"target": "https://a.example", "error": "timeout"}],
+        "total": 1,
+        "all_failed": True,
+    }
+    env = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_FAILED, data, src=Address(node="alfred", service="vpn")
+    )
+    await handler(env)
+    await handler(env)
+
+    assert len(notifier.sent) == 1
+    assert len(store.recorded_events) == 1
+
+
+async def test_vpn_check_recovered_dedup_ignores_active_diff():
+    book = _admin_book()
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    data1 = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": ["https://a.example"],
+        "total": 1,
+        "all_ok": True,
+        "active": [],
+    }
+    data2 = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": ["https://a.example"],
+        "total": 1,
+        "all_ok": True,
+        "active": [
+            {
+                "node": "alfred",
+                "server": "wooster",
+                "transport": "awg",
+                "targets": ["https://b.example"],
+                "whole": True,
+            }
+        ],
+    }
+    env1 = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_RECOVERED, data1, src=Address(node="alfred", service="vpn")
+    )
+    env2 = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_RECOVERED, data2, src=Address(node="alfred", service="vpn")
+    )
+    await handler(env1)
+    await handler(env2)
+
+    assert len(notifier.sent) == 1
+    assert len(store.recorded_events) == 1
+
+
+async def test_vpn_check_dedup_different_targets_two_messages():
+    book = _admin_book()
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    data1 = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": [{"target": "https://a.example", "error": "timeout"}],
+        "total": 1,
+        "all_failed": True,
+    }
+    data2 = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": [{"target": "https://b.example", "error": "timeout"}],
+        "total": 1,
+        "all_failed": True,
+    }
+    env1 = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_FAILED, data1, src=Address(node="alfred", service="vpn")
+    )
+    env2 = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_FAILED, data2, src=Address(node="alfred", service="vpn")
+    )
+    await handler(env1)
+    await handler(env2)
+
+    assert len(notifier.sent) == 2
+    assert len(store.recorded_events) == 2
+
+
+async def test_vpn_check_dedup_expires_after_window(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(node_events.time, "monotonic", lambda: clock[0])
+
+    book = _admin_book()
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+
+    data = {
+        "node": "jeeves",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": [{"target": "https://a.example", "error": "timeout"}],
+        "total": 1,
+        "all_failed": True,
+    }
+    env = make_event(
+        vpn_protocol.EVENT_VPN_CHECK_FAILED, data, src=Address(node="alfred", service="vpn")
+    )
+    await handler(env)
+    await handler(env)
+    assert len(notifier.sent) == 1
+
+    clock[0] = node_events.VPN_EVENT_DEDUP_S + 1.0
+    await handler(env)
+    assert len(notifier.sent) == 2
