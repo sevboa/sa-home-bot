@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
+import time
 from collections.abc import Callable
 
 from aiogram.types import InlineKeyboardMarkup
@@ -71,6 +73,13 @@ _VPN_SERIES_EVENTS = (
     vpn_protocol.EVENT_VPN_SERIES_FAILED,
     vpn_protocol.EVENT_VPN_SERIES_RECOVERED,
 )
+
+VPN_EVENT_DEDUP_S = 120.0
+
+
+def _vpn_event_key(name: str, data: dict) -> str:
+    filtered = {k: v for k, v in data.items() if k != "active"}
+    return name + json.dumps(filtered, sort_keys=True, default=str)
 
 
 def _format_alfred_reply(raw: str) -> str:
@@ -399,6 +408,23 @@ def _site(target: str) -> str:
     return f"<code>{html.escape(target.removeprefix('https://'))}</code>"
 
 
+def _short_site(target: str) -> str:
+    return html.escape(target.removeprefix("https://").removeprefix("www."))
+
+
+def _active_problems_block(active: list[dict]) -> str:
+    if not active:
+        return "\nДругих проблем нет."
+    lines = ["\n⚠️ Ещё не работает:"]
+    for item in active:
+        direction = html.escape(f"{item['node']} → {item['server']} {item['transport']}")
+        sites = (
+            "все сайты" if item["whole"] else ", ".join(_short_site(t) for t in item["targets"])
+        )
+        lines.append(f"{direction}: {sites}")
+    return "\n".join(lines)
+
+
 def _check_error(error: object) -> str:
     text = str(error or "").strip() or "без подробностей"
     if len(text) > _CHECK_ERROR_MAX:
@@ -438,6 +464,8 @@ def render_vpn_check(name: str, data: dict) -> str | None:
         lines.append(", ".join(_site(str(t["target"])) for t in targets) + tail)
     else:
         lines += [f"• {_site(str(t['target']))} — {_check_error(t.get('error'))}" for t in targets]
+    if not failed and "active" in data:
+        lines.append(_active_problems_block(data["active"]))
     return "\n".join(lines)
 
 
@@ -620,6 +648,7 @@ def build_node_event_handler(
     pending_actions: PendingActions | None = None,
 ):
     task_sessions = TaskRichSessions(notifier, config)
+    recent_vpn_events: dict[str, float] = {}
 
     async def handle_idle_power_blocked(data: dict) -> None:
         node_id = data.get("node")
@@ -666,6 +695,15 @@ def build_node_event_handler(
             node_link = get_node_link() if get_node_link else None
             await _handle_vpn_event(name, data, book, notifier, store, node_link)
         elif name in _VPN_CHECK_EVENTS or name in _VPN_SERIES_EVENTS:
+            now = time.monotonic()
+            cutoff = now - VPN_EVENT_DEDUP_S
+            for k in list(recent_vpn_events.keys()):
+                if recent_vpn_events[k] < cutoff:
+                    del recent_vpn_events[k]
+            key = _vpn_event_key(name, data)
+            if key in recent_vpn_events:
+                return
+            recent_vpn_events[key] = now
             render = render_vpn_check if name in _VPN_CHECK_EVENTS else render_vpn_series
             check_text = render(name, data)
             if check_text is not None:

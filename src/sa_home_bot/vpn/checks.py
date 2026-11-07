@@ -127,7 +127,12 @@ class ChecksMixin:
             if run["recovered"]:
                 await self._emit(
                     EVENT_VPN_CHECK_RECOVERED,
-                    {**base, "targets": run["recovered"], "all_ok": run["bad"] == 0},
+                    {
+                        **base,
+                        "targets": run["recovered"],
+                        "all_ok": run["bad"] == 0,
+                        "active": await self._active_check_problems(),
+                    },
                 )
         return {"accepted": True}
 
@@ -375,6 +380,40 @@ class ChecksMixin:
             "socks": f"{socks_host}:{self._cfg.socks_port}" if socks_host else None,
             "check": check,
         }
+
+    async def _active_check_problems(self) -> list[dict[str, Any]]:
+        stale_before = (
+            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+        ).isoformat()
+        sql = (
+            "SELECT node, server, transport, target, status "
+            "FROM vpn_check_states WHERE last_seen_at >= ?"
+        )
+        cur = await self._db.conn.execute(sql, (stale_before,))
+        rows = await cur.fetchall()
+        by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            key = (row["node"], row["server"], row["transport"])
+            by_group.setdefault(key, []).append({"target": row["target"], "status": row["status"]})
+        result: list[dict[str, Any]] = []
+        for (node, server, transport), items in sorted(by_group.items()):
+            alerting_targets = [
+                item["target"] for item in items if item["status"] == CHECK_ALERTING
+            ]
+            if not alerting_targets:
+                continue
+            alerting_targets.sort()
+            whole = all(item["status"] == CHECK_ALERTING for item in items)
+            result.append(
+                {
+                    "node": node,
+                    "server": server,
+                    "transport": transport,
+                    "targets": alerting_targets,
+                    "whole": whole,
+                }
+            )
+        return result
 
     async def _check_rollup(self, *, server: str | None = None) -> list[dict[str, Any]]:
         stale_before = (

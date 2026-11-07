@@ -118,6 +118,7 @@ async def test_recovery_emits_once(env):
         "total": 1,
         "targets": [TARGET],
         "all_ok": True,
+        "active": [],
     }
 
 
@@ -273,3 +274,85 @@ async def test_check_now_without_node_link_does_not_raise(tmp_path):
     result = await svc.run_command(vpn_protocol.ACTION_CHECK_NOW, {})
     assert result["dispatched_to"] == []
     await db.close()
+
+
+async def test_active_problems_in_recovery_includes_other_node(env):
+    svc, events, _ = env
+    await _report(svc, "alfred", False, "timeout", server="wooster", transport="awg")
+    await _report(svc, "alfred", False, "timeout", server="wooster", transport="awg")
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    await _report(svc, "jeeves", True, server="jeeves", transport="awg")
+    recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
+    assert len(recovered) == 1
+    active = recovered[0]["active"]
+    assert len(active) == 1
+    assert active[0]["node"] == "alfred"
+    assert active[0]["server"] == "wooster"
+    assert active[0]["transport"] == "awg"
+    assert active[0]["targets"] == [TARGET]
+    assert active[0]["whole"] is True
+
+
+async def test_active_problems_empty_when_no_other_issues(env):
+    svc, events, _ = env
+    await _report(svc, "jeeves", False, "timeout")
+    await _report(svc, "jeeves", False, "timeout")
+    await _report(svc, "jeeves", True)
+    recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
+    assert len(recovered) == 1
+    assert recovered[0]["active"] == []
+
+
+async def test_active_problems_excludes_stale_records(env):
+    svc, events, _ = env
+    await _report(svc, "alfred", False, "timeout", server="wooster", transport="awg")
+    await _report(svc, "alfred", False, "timeout", server="wooster", transport="awg")
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    stale = (
+        datetime.now(UTC)
+        - timedelta(seconds=svc._cfg.check_interval_s * CHECK_STALE_FACTOR + 60)
+    ).isoformat()
+    sql = (
+        "UPDATE vpn_check_states SET last_seen_at = ? "
+        "WHERE node = ? AND server = ? AND transport = ?"
+    )
+    await svc._db.conn.execute(sql, (stale, "alfred", "wooster", "awg"))
+    await svc._db.conn.commit()
+    await _report(svc, "jeeves", True, server="jeeves", transport="awg")
+    recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
+    assert len(recovered) == 1
+    assert recovered[0]["active"] == []
+
+
+async def test_active_problems_partial_group_whole_false(env):
+    svc, events, _ = env
+    results = [
+        {
+            "server": "wooster",
+            "transport": "awg",
+            "target": target,
+            "ok": ok,
+            "ms": 12,
+            "error": None if ok else "timeout",
+        }
+        for target, ok in (("https://a.example", False), ("https://b.example", True))
+    ]
+    for _ in range(2):
+        await svc.run_command(
+            vpn_protocol.ACTION_REPORT_CHECK, {"node": "alfred", "results": results}
+        )
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
+    await _report(svc, "jeeves", True, server="jeeves", transport="awg")
+    recovered = [d for name, d in events if name == vpn_protocol.EVENT_VPN_CHECK_RECOVERED]
+    assert recovered[0]["active"] == [
+        {
+            "node": "alfred",
+            "server": "wooster",
+            "transport": "awg",
+            "targets": ["https://a.example"],
+            "whole": False,
+        }
+    ]

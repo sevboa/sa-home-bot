@@ -3,6 +3,7 @@ from unittest.mock import ANY
 import pytest
 from aiogram.types import InputRichBlockThinking
 
+import sa_home_bot.bot.node_events as node_events
 from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -38,6 +39,7 @@ from sa_home_bot.proto.messages import Address, make_event
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from sa_home_bot.tasks import protocol as task_protocol
+from sa_home_bot.vpn import protocol as vpn_protocol
 from tests.unit.support.fakes import FakeNotifier as SupportNotifier
 
 
@@ -966,3 +968,69 @@ async def test_task_result_closes_and_forgets_session_even_if_delivery_fails():
     assert sessions._sessions == {}
     assert session._pump_task is None
     assert bot.sent[0]["markdown"] == ALFRED_PREFIX_MD + "Готово"
+
+
+VPN_CHECK_BASE = {"node": "jeeves", "server": "wooster", "transport": "awg", "total": 6}
+VPN_FAILED_A = {**VPN_CHECK_BASE, "targets": [{"target": "https://a.example", "error": "t"}]}
+VPN_FAILED_B = {**VPN_CHECK_BASE, "targets": [{"target": "https://b.example", "error": "t"}]}
+VPN_RECOVERED = {**VPN_CHECK_BASE, "targets": ["https://a.example"], "all_ok": False}
+VPN_ACTIVE = [
+    {
+        "node": "alfred",
+        "server": "wooster",
+        "transport": "awg",
+        "targets": ["https://b.example"],
+        "whole": False,
+    }
+]
+
+
+def _vpn_handler():
+    notifier = FakeNotifier()
+    store = FakeStore()
+    return build_node_event_handler(_admin_book(), notifier, store), notifier, store
+
+
+def _vpn_event(name: str, data: dict):
+    return make_event(name, data, src=Address(node="jeeves", service="vpn"))
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "second", "shown"),
+    [
+        (vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A, VPN_FAILED_A, 1),
+        (vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A, VPN_FAILED_B, 2),
+        (
+            vpn_protocol.EVENT_VPN_CHECK_RECOVERED,
+            {**VPN_RECOVERED, "active": []},
+            {**VPN_RECOVERED, "active": VPN_ACTIVE},
+            1,
+        ),
+    ],
+)
+async def test_vpn_check_event_from_second_server_shown_once(name, first, second, shown):
+    handler, notifier, store = _vpn_handler()
+    await handler(_vpn_event(name, first))
+    await handler(_vpn_event(name, second))
+    assert len(notifier.sent) == shown
+    assert len(store.recorded_events) == shown
+
+
+async def test_vpn_failed_and_recovered_with_same_targets_are_different_events():
+    handler, notifier, _ = _vpn_handler()
+    await handler(_vpn_event(vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A))
+    await handler(_vpn_event(vpn_protocol.EVENT_VPN_CHECK_RECOVERED, VPN_FAILED_A))
+    assert len(notifier.sent) == 2
+
+
+async def test_vpn_check_repeat_after_window_shown_again(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(node_events.time, "monotonic", lambda: clock[0])
+    handler, notifier, _ = _vpn_handler()
+    event = _vpn_event(vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A)
+    await handler(event)
+    await handler(event)
+    assert len(notifier.sent) == 1
+    clock[0] = node_events.VPN_EVENT_DEDUP_S + 1.0
+    await handler(event)
+    assert len(notifier.sent) == 2
