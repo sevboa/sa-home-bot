@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import copy
+import json
+import os
+import stat
+import subprocess
+import tempfile
 from getpass import getuser
 from pathlib import Path
 
@@ -28,6 +34,171 @@ from sa_home_bot.node.fixups.privileged import (
 AWG_SUDOERS_FILE = "50-sa-home-node-awg"
 SUB_UFW_COMMENT = "sa-home vpn: подписка Hiddify / http-01"
 TCP_IP_HEADER_BYTES = 40
+
+
+def xray_config_path() -> Path:
+    return Path.home() / ".config/xray/config.json"
+
+
+def build_alt_inbound(config: dict, alt) -> dict:
+    reality_in = None
+    for inbound in config.get("inbounds", []):
+        if inbound.get("tag") == "reality-in":
+            reality_in = inbound
+            break
+    if reality_in is None:
+        raise FixupError("в конфиге xray нет входа reality-in")
+    inbound = copy.deepcopy(reality_in)
+    inbound["tag"] = alt.inbound_tag
+    inbound["port"] = alt.port
+    inbound["settings"]["clients"] = []
+    rs = inbound["streamSettings"]["realitySettings"]
+    rs["dest"] = alt.effective_dest
+    rs["serverNames"] = [alt.sni]
+    return inbound
+
+
+def alt_inbound_matches(config: dict, alt) -> bool:
+    for inbound in config.get("inbounds", []):
+        if inbound.get("tag") == alt.inbound_tag:
+            if inbound.get("port") != alt.port:
+                return False
+            rs = inbound.get("streamSettings", {}).get("realitySettings", {})
+            if rs.get("dest") != alt.effective_dest:
+                return False
+            if rs.get("serverNames") != [alt.sni]:
+                return False
+            return True
+    return False
+
+
+def _xray_api(args: list[str]) -> subprocess.CompletedProcess:
+    xray = find_executable("xray") or "/usr/local/bin/xray"
+    return subprocess.run([xray, "api", *args], capture_output=True, text=True, timeout=30)
+
+
+def make_reality_alt_inbound_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        alt = settings.vpn.reality.alt
+        api_addr = settings.vpn.reality.api_addr
+        try:
+            config_path = xray_config_path()
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not alt_inbound_matches(config, alt):
+            return False
+        try:
+            result = _xray_api(["lsi", f"--server={api_addr}", "--isOnlyTags=true"])
+        except Exception:
+            return False
+        if result.returncode != 0:
+            return False
+        try:
+            data = json.loads(result.stdout)
+        except Exception:
+            return False
+        for inbound in data.get("inbounds", []):
+            if inbound.get("tag") == alt.inbound_tag:
+                return True
+        return False
+
+    def apply() -> None:
+        alt = settings.vpn.reality.alt
+        api_addr = settings.vpn.reality.api_addr
+        config_path = xray_config_path()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        existing = None
+        for inbound in config.get("inbounds", []):
+            if inbound.get("tag") == alt.inbound_tag:
+                existing = inbound
+                break
+
+        if existing is not None:
+            if not alt_inbound_matches(config, alt):
+                raise FixupError("вход уже есть с другими настройками, менять вручную")
+        else:
+            inbound = build_alt_inbound(config, alt)
+            config["inbounds"].append(inbound)
+            fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".json")
+            try:
+                os.write(fd, json.dumps(config, indent=2).encode("utf-8"))
+                os.close(fd)
+                os.chmod(tmp_path, 0o600)
+                xray_bin = find_executable("xray") or "/usr/local/bin/xray"
+                test_result = subprocess.run(
+                    [xray_bin, "run", "-test", "-c", tmp_path],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if test_result.returncode != 0:
+                    os.unlink(tmp_path)
+                    raise FixupError(f"xray run -test: код {test_result.returncode}")
+                old_stat = config_path.stat()
+                os.chmod(tmp_path, stat.S_IMODE(old_stat.st_mode))
+                os.replace(tmp_path, config_path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+
+        try:
+            result = _xray_api(["lsi", f"--server={api_addr}", "--isOnlyTags=true"])
+        except Exception as exc:
+            raise FixupError("xray api lsi не ответил") from exc
+        if result.returncode != 0:
+            raise FixupError("xray api lsi не ответил")
+        try:
+            data = json.loads(result.stdout)
+        except Exception as exc:
+            raise FixupError("xray api lsi не ответил") from exc
+        has_tag = any(inbound.get("tag") == alt.inbound_tag for inbound in data.get("inbounds", []))
+        if has_tag:
+            return
+
+        inbound = build_alt_inbound(config, alt)
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            os.write(fd, json.dumps({"inbounds": [inbound]}, indent=2).encode("utf-8"))
+            os.close(fd)
+            os.chmod(tmp_path, 0o600)
+            try:
+                adi_result = _xray_api(["adi", f"--server={api_addr}", tmp_path])
+                if adi_result.returncode != 0:
+                    raise FixupError(f"xray api adi: код {adi_result.returncode}")
+            finally:
+                os.unlink(tmp_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    return Fixup(
+        id="reality-alt-inbound",
+        title="Второй вход Reality (alt) в xray через API без рестарта",
+        needed=lambda s: needs.vpn(s) and getattr(s.vpn.reality, "alt", None) is not None,
+        check=check,
+        apply=apply,
+    )
+
+
+def reality_alt_ufw_specs(settings: Settings) -> list[str]:
+    alt = getattr(settings.vpn.reality, "alt", None)
+    if alt is None:
+        return []
+    return [f"{alt.port}/tcp"]
+
+
+def make_reality_alt_ufw_fixup(settings: Settings) -> Fixup:
+    specs = reality_alt_ufw_specs(settings)
+    return Fixup(
+        id="reality-alt-ufw-port",
+        title=f"ufw: открыть TCP-порт второго входа Reality ({specs[0] if specs else 'нет'})",
+        needed=lambda s: bool(reality_alt_ufw_specs(s)) and ufw_in_use(),
+        check=lambda: ufw_allows_all(specs),
+        apply=lambda: ufw_allow_all(specs, "sa-home vpn: второй вход Reality (alt)"),
+    )
 
 
 def awg_sudoers_content(awg_path: str, interface: str, user: str) -> str:
