@@ -26,7 +26,7 @@ class ClientConfigsMixin:
         if row is None:
             raise ProtoError(ERR_BAD_REQUEST, f"у «{device_label}» нет активного VLESS-подключения")
         return {
-            **self._reality_artifacts(row["public_key"], device_label),
+            **self._reality_artifacts(row["public_key"], device_label, chat_id),
             "transport": TRANSPORT_REALITY,
             "device_label": device_label,
             "location": self._cfg.location,
@@ -59,6 +59,10 @@ class ClientConfigsMixin:
     def _reality_params(self) -> RealityParams:
         assert self._reality_cfg is not None
         return RealityParams.from_config(self._reality_cfg)
+
+    def _reality_alt_params(self) -> RealityParams | None:
+        assert self._reality_cfg is not None
+        return RealityParams.alt_from_config(self._reality_cfg)
 
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id

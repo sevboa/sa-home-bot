@@ -71,6 +71,7 @@ class SubEntry:
     name: str
     uuid: str
     params: RealityParams
+    is_alt: bool = False
 
     @property
     def url(self) -> str:
@@ -78,7 +79,7 @@ class SubEntry:
 
     def to_wire(self) -> dict:
         p = self.params
-        return {
+        d = {
             "node": self.node,
             "name": self.name,
             "uuid": self.uuid,
@@ -92,6 +93,9 @@ class SubEntry:
                 "fingerprint": p.fingerprint,
             },
         }
+        if self.is_alt:
+            d["is_alt"] = True
+        return d
 
     @classmethod
     def from_wire(cls, raw: dict) -> SubEntry:
@@ -109,6 +113,7 @@ class SubEntry:
                 flow=str(p.get("flow") or DEFAULT_FLOW),
                 fingerprint=str(p.get("fingerprint") or CLIENT_FINGERPRINT),
             ),
+            is_alt=bool(raw.get("is_alt")),
         )
 
 
@@ -226,15 +231,16 @@ def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
 
 
 def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
-    return sorted(entries, key=lambda e: (e.name, e.node))
+    return sorted(entries, key=lambda e: (e.is_alt, e.name, e.node))
 
 
 def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[SubEntry]:
     if not fingerprints:
         return entries
+    base = [e for e in entries if e.is_alt] or entries
     result = list(entries)
     for fp in fingerprints:
-        for e in entries:
+        for e in base:
             if e.params.fingerprint == fp:
                 continue
             result.append(
@@ -462,6 +468,8 @@ def _countries_card(sub: Subscription) -> str:
     health = {n.name: n.health for n in sub.nodes}
     rows = []
     for entry in sub.entries:
+        if entry.is_alt:
+            continue
         h = health.get(entry.name, "")
         mark = " — работает" if h == "ok" else " — может не работать" if h == "bad" else ""
         rows.append(f"<li>{e(entry.name)}{mark}</li>")

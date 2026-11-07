@@ -16,6 +16,7 @@ from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn import awg_conf, qr
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_PEER_ISSUED,
+    PROBE_CHAT_ID,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
     TRANSPORTS,
@@ -219,19 +220,26 @@ class PeersMixin:
             "prior_device_count": len(existing_labels),
         }
 
-    def _reality_artifacts(self, client_uuid: str, device_label: str) -> dict[str, Any]:
+    def _reality_artifacts(
+        self, client_uuid: str, device_label: str, chat_id: int
+    ) -> dict[str, Any]:
         assert self._reality_cfg is not None
-        params = self._reality_params()
+        alt = self._reality_alt_params()
+        params = alt if alt is not None and chat_id != PROBE_CHAT_ID else self._reality_params()
         config_text = render_singbox_config(params, client_uuid)
         flag = country_flag(self._cfg.location)
         profile_label = f"{flag} {device_label}" if flag else device_label
         share_url = render_vless_url(params, client_uuid, profile_label)
-        return {
+        result = {
             "config_text": config_text,
             "share_url": share_url,
             "deep_link": render_deep_link(share_url),
             "qr_png_b64": qr.png_b64(share_url),
         }
+        if alt is not None:
+            alt_share_url = render_vless_url(alt, client_uuid, profile_label)
+            result["alt_share_url"] = alt_share_url
+        return result
 
     async def _issue_locked(
         self, chat_id: int, device_label: str, transport: str, now: str
@@ -284,7 +292,7 @@ class PeersMixin:
             )
             await self._db.conn.commit()
             await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
-            artifacts = self._reality_artifacts(client_uuid, device_label)
+            artifacts = self._reality_artifacts(client_uuid, device_label, chat_id)
         return artifacts
 
     async def _remove_from_backend(self, transport: str, public_key: str, address: str) -> None:
