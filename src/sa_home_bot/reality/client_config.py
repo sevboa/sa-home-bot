@@ -41,6 +41,21 @@ class RealityParams:
             fingerprint=getattr(cfg, "fingerprint", CLIENT_FINGERPRINT),
         )
 
+    @classmethod
+    def alt_from_config(cls, cfg: Any) -> RealityParams | None:
+        alt = getattr(cfg, "alt", None)
+        if alt is None:
+            return None
+        return cls(
+            endpoint_host=cfg.endpoint_host,
+            port=alt.port,
+            server_public_key=cfg.server_public_key,
+            short_id=cfg.short_id,
+            sni=alt.sni,
+            flow=cfg.flow,
+            fingerprint=getattr(cfg, "fingerprint", CLIENT_FINGERPRINT),
+        )
+
 
 def _remote_ruleset(tag: str) -> dict:
     return {

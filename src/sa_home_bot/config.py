@@ -412,6 +412,17 @@ def reminder_reason(llm: LlmConfig) -> str:
     return "high" if llm.think_chat else "off"
 
 
+class RealityAltConfig(BaseModel):
+    port: int = Field(default=2083, ge=1, le=65535)
+    sni: str
+    dest: str = ""
+    inbound_tag: str = "reality-alt"
+
+    @property
+    def effective_dest(self) -> str:
+        return self.dest or f"{self.sni}:443"
+
+
 class RealityTransportConfig(BaseModel):
     endpoint_host: str = ""
     port: int = Field(default=8443, ge=1, le=65535)
@@ -424,6 +435,7 @@ class RealityTransportConfig(BaseModel):
     api_addr: str = "127.0.0.1:10085"
     inbound_tag: str = "reality-in"
     spare_fingerprints: list[str] = Field(default_factory=list)
+    alt: RealityAltConfig | None = None
 
     @property
     def effective_dest(self) -> str:
@@ -441,6 +453,15 @@ class RealityTransportConfig(BaseModel):
                 raise ValueError(f"дубликат fingerprint: {fp!r}")
             seen.add(fp)
         return v
+
+    @model_validator(mode="after")
+    def _validate_alt(self) -> RealityTransportConfig:
+        if self.alt is not None:
+            if self.alt.port == self.port:
+                raise ValueError("alt.port не должен совпадать с port")
+            if self.alt.inbound_tag == self.inbound_tag:
+                raise ValueError("alt.inbound_tag не должен совпадать с inbound_tag")
+        return self
 
 
 class VpnConfig(BaseModel):
