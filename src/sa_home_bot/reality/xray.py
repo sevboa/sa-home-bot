@@ -25,6 +25,54 @@ class XrayBackend(Protocol):
         ...
 
 
+class DualXrayBackend:
+    def __init__(self, primary: XrayBackend, alt: XrayBackend) -> None:
+        self.primary = primary
+        self.alt = alt
+
+    async def add_client(self, client_uuid: str, email: str, flow: str) -> None:
+        await self.primary.add_client(client_uuid, email, flow)
+        alt_clients = await self.alt.list_clients()
+        if email not in alt_clients:
+            try:
+                await self.alt.add_client(client_uuid, email, flow)
+            except ProtoError as exc:
+                log.warning("reality: alt add_client %s — %s", email, exc)
+
+    async def remove_client(self, email: str) -> None:
+        await self.primary.remove_client(email)
+        try:
+            await self.alt.remove_client(email)
+        except ProtoError as exc:
+            log.warning("reality: alt remove_client %s — %s", email, exc)
+
+    async def list_clients(self) -> set[str]:
+        return await self.primary.list_clients()
+
+    async def stats(self) -> dict[str, tuple[int, int]]:
+        return await self.primary.stats()
+
+
+async def _reconcile_one(backend: XrayBackend, desired: dict[str, str], flow: str) -> None:
+    current = await backend.list_clients()
+    for email in current - desired.keys():
+        await backend.remove_client(email)
+    for email, client_uuid in desired.items():
+        if email not in current:
+            await backend.add_client(client_uuid, email, flow)
+
+
+async def reconcile_clients(backend: XrayBackend, desired: dict[str, str], flow: str) -> None:
+    if isinstance(backend, DualXrayBackend):
+        await _reconcile_one(backend.primary, desired, flow)
+        try:
+            await _reconcile_one(backend.alt, desired, flow)
+        except ProtoError as exc:
+            log.warning("reality: alt reconcile — %s", exc)
+    else:
+        await _reconcile_one(backend, desired, flow)
+
+
 def _parse_stats(payload: str) -> dict[str, tuple[int, int]]:
     try:
         data = json.loads(payload or "{}")

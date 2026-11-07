@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sa_home_bot.reality.xray import reconcile_clients
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn import service_common
 from sa_home_bot.vpn.protocol import (
@@ -73,12 +74,7 @@ class ReconcileMixin:
                 for row in active
                 if row["transport"] == TRANSPORT_REALITY
             }
-            current_r = await self._reality.list_clients()
-            for email in current_r - desired_r.keys():
-                await self._reality.remove_client(email)
-            for email, client_uuid in desired_r.items():
-                if email not in current_r:
-                    await self._reality.add_client(client_uuid, email, self._reality_cfg.flow)
+            await reconcile_clients(self._reality, desired_r, self._reality_cfg.flow)
 
     async def _meta_get(self, key: str) -> str | None:
         cur = await self._db.conn.execute("SELECT value FROM vpn_meta WHERE key = ?", (key,))
