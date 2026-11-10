@@ -120,6 +120,7 @@ class VpnService(
         self._emit = emit
         self._node = socket.gethostname()
         self._server_pubkey: str | None = None
+        self._alt_server_pubkey: str | None = None
         self._apk_checked_at: datetime | None = None
         self._node_link = node_link
         self.backup: SnapshotBackup | None = None

@@ -37,6 +37,16 @@ class PeersMixin:
             self._server_pubkey = await self._backend.server_public_key()
         return self._server_pubkey
 
+    def _awg_alt_for(self, chat_id: int) -> bool:
+        return self._cfg.awg_alt is not None and chat_id != PROBE_CHAT_ID
+
+    async def _server_public_key_for_address(self, address: str) -> str:
+        if self._cfg.awg_alt is not None and self._backend.is_second(address):
+            if self._alt_server_pubkey is None:
+                self._alt_server_pubkey = await self._backend.second_server_public_key()
+            return self._alt_server_pubkey
+        return await self._server_public_key()
+
     async def _active_addresses(self) -> set[str]:
         cur = await self._db.conn.execute(
             "SELECT address FROM vpn_peers WHERE status = 'active' AND transport = ?",
@@ -81,7 +91,6 @@ class PeersMixin:
                 set((await self._backend.transfer()).keys()) if self._has(TRANSPORT_AWG) else None
             )
             live_r = await self._reality.list_clients() if self._reality_enabled else None
-            live_key = await self._server_public_key() if self._has(TRANSPORT_AWG) else None
         except Exception:
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
             return devices
@@ -92,6 +101,7 @@ class PeersMixin:
             if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG:
                 if live_awg is None:
                     continue
+                live_key = await self._server_public_key_for_address(row["address"])
                 stale_key = bool(row["server_pubkey"] and live_key) and (
                     row["server_pubkey"] != live_key
                 )
@@ -246,8 +256,15 @@ class PeersMixin:
     ) -> dict[str, Any]:
         if transport == TRANSPORT_AWG:
             private_key, public_key = await self._backend.generate_keypair()
-            address = _allocate_address(self._cfg.subnet, await self._active_addresses())
-            server_pub = await self._server_public_key()
+            if self._awg_alt_for(chat_id):
+                address = _allocate_address(
+                    self._cfg.awg_alt.subnet, await self._active_addresses()
+                )
+                cfg = self._cfg.awg_alt_render_cfg()
+            else:
+                address = _allocate_address(self._cfg.subnet, await self._active_addresses())
+                cfg = self._cfg
+            server_pub = await self._server_public_key_for_address(address)
             await self._db.conn.execute(
                 "INSERT INTO vpn_peers (chat_id, device_label, transport, public_key, address, "
                 "status, created_at, server, server_pubkey) "
@@ -265,7 +282,7 @@ class PeersMixin:
             )
             await self._db.conn.commit()
             await self._backend.add_peer(public_key, address)
-            conf = awg_conf.render(self._cfg, private_key, address, server_pub)
+            conf = awg_conf.render(cfg, private_key, address, server_pub)
             artifacts: dict[str, Any] = {
                 "config_text": conf,
                 "qr_png_b64": qr.png_b64(conf),
