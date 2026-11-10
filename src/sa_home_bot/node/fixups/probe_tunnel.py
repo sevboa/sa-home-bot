@@ -29,8 +29,12 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
-SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality", "reality_alt")
+SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality", "reality_alt", "awg_alt")
 ISSUE_TIMEOUT_S = 20.0
+_ISSUE_TRANSPORT = {
+    vpn_protocol.PROBE_TRANSPORT_REALITY_ALT: vpn_protocol.TRANSPORT_REALITY,
+    vpn_protocol.PROBE_TRANSPORT_AWG_ALT: vpn_protocol.TRANSPORT_AWG,
+}
 
 
 @asynccontextmanager
@@ -61,14 +65,19 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
         dst = await vpn_nodes.resolve_vpn_dst(client, server=slot.server)
         if dst is None or dst.node != slot.server:
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
-        issue_transport = "reality" if slot.transport == "reality_alt" else slot.transport
+        issue_args: dict = {
+            "chat_id": vpn_protocol.PROBE_CHAT_ID,
+            "transport": _ISSUE_TRANSPORT.get(slot.transport, slot.transport),
+        }
+        if slot.transport == vpn_protocol.PROBE_TRANSPORT_AWG_ALT:
+            issue_args["awg_alt"] = True
         result = await client.command(
             vpn_protocol.ACTION_ISSUE,
-            {"chat_id": vpn_protocol.PROBE_CHAT_ID, "transport": issue_transport},
+            issue_args,
             dst=dst,
             timeout=ISSUE_TIMEOUT_S,
         )
-    if slot.transport == "awg":
+    if slot.transport in vpn_protocol.AWG_PROBE_TRANSPORTS:
         config_text = result.get("config_text")
         if not config_text:
             raise FixupError(f"vpn@{slot.server} не вернул config_text")
@@ -98,7 +107,10 @@ async def _fetch_server_public_key(
             state = await client.get_state(dst=dst)
     except Exception:
         return None
-    key = state.get("server_public_key")
+    if slot.transport == vpn_protocol.PROBE_TRANSPORT_AWG_ALT:
+        key = state.get("awg_alt_server_public_key")
+    else:
+        key = state.get("server_public_key")
     return str(key) if key else None
 
 
@@ -162,7 +174,7 @@ def _reality_conf_check(slot: vpn_probe_state.ProbeSlot) -> bool:
 
 
 def _probe_conf_check(slot: vpn_probe_state.ProbeSlot, settings: Settings | None = None) -> bool:
-    if slot.transport == "awg":
+    if slot.transport in vpn_protocol.AWG_PROBE_TRANSPORTS:
         return _awg_conf_check(slot, settings)
     return _reality_conf_check(slot)
 
@@ -193,7 +205,7 @@ def _reality_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> 
 
 
 def _probe_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
-    if slot.transport == "awg":
+    if slot.transport in vpn_protocol.AWG_PROBE_TRANSPORTS:
         _awg_conf_apply(settings, slot)
     else:
         _reality_conf_apply(settings, slot)
@@ -219,7 +231,7 @@ def vpn_probe_sudoers_content(
     cmds: list[str] = []
     for slot in slots:
         cmds.append(f"{ip_path} netns exec {slot.netns} curl *")
-        if slot.transport == "awg":
+        if slot.transport in vpn_protocol.AWG_PROBE_TRANSPORTS:
             cmds.append(f"{ip_path} netns exec {slot.netns} {ip_path} route get *")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} up {slot.iface}")
             cmds.append(f"{ip_path} netns exec {slot.netns} {awg_quick_path} down {slot.iface}")
@@ -238,7 +250,7 @@ def _sudoers_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
     ip_path = find_executable("ip")
     if ip_path is None:
         return False
-    needs_awg = any(s.transport == "awg" for s in slots)
+    needs_awg = any(s.transport in vpn_protocol.AWG_PROBE_TRANSPORTS for s in slots)
     needs_reality = any(s.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS for s in slots)
     awg_quick_path = find_executable("awg-quick") if needs_awg else ""
     if needs_awg and not awg_quick_path:
@@ -265,7 +277,9 @@ def _sudoers_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     ip_path = find_executable("ip")
     if ip_path is None:
         raise FixupError("ip (iproute2) не найден в PATH")
-    awg_quick_path = _required_tool("awg-quick", any(s.transport == "awg" for s in slots))
+    awg_quick_path = _required_tool(
+        "awg-quick", any(s.transport in vpn_protocol.AWG_PROBE_TRANSPORTS for s in slots)
+    )
     needs_reality = any(s.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS for s in slots)
     xray_path = _required_tool("xray", needs_reality)
     content = vpn_probe_sudoers_content(slots, ip_path, awg_quick_path, xray_path, getuser())

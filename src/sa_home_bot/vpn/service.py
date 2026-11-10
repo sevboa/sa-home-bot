@@ -56,6 +56,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_USAGE,
     GB,
     PROBE_CHAT_ID,
+    PROBE_TRANSPORT_AWG_ALT,
     PROBE_TRANSPORT_REALITY_ALT,
     SERVICE_NAME,
     TRANSPORT_AWG,
@@ -324,11 +325,19 @@ class VpnService(
         )
         row = await cur.fetchone()
         server_pubkey: str | None = None
+        awg_alt_server_pubkey: str | None = None
         if self._has(TRANSPORT_AWG):
             try:
                 server_pubkey = await self._server_public_key()
             except Exception:
                 log.warning("vpn: не удалось прочитать публичный ключ awg-сервера", exc_info=True)
+            if self._cfg.awg_alt is not None:
+                try:
+                    awg_alt_server_pubkey = await self._backend.second_server_public_key()
+                except Exception:
+                    log.warning(
+                        "vpn: не удалось прочитать публичный ключ awg_alt-сервера", exc_info=True
+                    )
         state = {
             "node": self._node,
             "service": SERVICE_NAME,
@@ -339,12 +348,20 @@ class VpnService(
             "check": [
                 row
                 for row in await self._check_rollup(server=self._node)
-                if row.get("transport") != PROBE_TRANSPORT_REALITY_ALT
+                if row.get("transport")
+                not in (PROBE_TRANSPORT_REALITY_ALT, PROBE_TRANSPORT_AWG_ALT)
             ],
             "access_control": True,
         }
+        probe_transports: list[str] = []
         if self._reality_cfg is not None and self._reality_alt_params() is not None:
-            state["probe_transports"] = [*self._transports, PROBE_TRANSPORT_REALITY_ALT]
+            probe_transports.append(PROBE_TRANSPORT_REALITY_ALT)
+        if self._cfg.awg_alt is not None and self._has(TRANSPORT_AWG):
+            probe_transports.append(PROBE_TRANSPORT_AWG_ALT)
+        if probe_transports:
+            state["probe_transports"] = [*self._transports, *probe_transports]
+            if awg_alt_server_pubkey is not None:
+                state["awg_alt_server_public_key"] = awg_alt_server_pubkey
         return state
 
     @staticmethod

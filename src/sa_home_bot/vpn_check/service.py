@@ -30,6 +30,7 @@ from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_su
 from sa_home_bot.vpn.protocol import (
     ACTION_REPORT_CHECK,
     ACTION_REPORT_SERIES,
+    AWG_PROBE_TRANSPORTS,
     REALITY_PROBE_TRANSPORTS,
 )
 from sa_home_bot.vpn_check.protocol import (
@@ -291,14 +292,14 @@ class VpnCheckService:
             )
 
     async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
-        if slot.transport == "awg":
+        if slot.transport in AWG_PROBE_TRANSPORTS:
             return await self._awg_up(slot)
         if slot.transport in REALITY_PROBE_TRANSPORTS:
             return await self._reality_up(slot)
         return f"транспорт {slot.transport} пока не поддержан этим пробником"
 
     async def _tunnel_down(self, slot: ProbeSlot) -> None:
-        if slot.transport == "awg":
+        if slot.transport in AWG_PROBE_TRANSPORTS:
             await self._awg_down(slot)
         elif slot.transport in REALITY_PROBE_TRANSPORTS:
             await self._reality_down(slot)
@@ -443,7 +444,7 @@ class VpnCheckService:
         }
 
     async def _egress_gate(self, slot: ProbeSlot) -> str | None:
-        if slot.transport == "awg":
+        if slot.transport in AWG_PROBE_TRANSPORTS:
             route_err = await self._wait_for_route(slot)
             if route_err is not None:
                 return route_err

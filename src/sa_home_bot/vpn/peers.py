@@ -234,7 +234,9 @@ class PeersMixin:
                     f"устройство «{explicit}» ({transport}) уже выдано — "
                     "для нового ключа используйте перевыпуск",
                 )
-            artifacts = await self._issue_locked(chat_id, device_label, transport, now)
+            artifacts = await self._issue_locked(
+                chat_id, device_label, transport, now, probe_alt=bool(args.get("awg_alt"))
+            )
 
         await self._emit(
             EVENT_VPN_PEER_ISSUED,
@@ -275,11 +277,14 @@ class PeersMixin:
         return result
 
     async def _issue_locked(
-        self, chat_id: int, device_label: str, transport: str, now: str
+        self, chat_id: int, device_label: str, transport: str, now: str, probe_alt: bool = False
     ) -> dict[str, Any]:
         if transport == TRANSPORT_AWG:
             private_key, public_key = await self._backend.generate_keypair()
-            if self._awg_alt_for(chat_id):
+            use_alt = self._awg_alt_for(chat_id) or (
+                probe_alt and chat_id == PROBE_CHAT_ID and self._cfg.awg_alt is not None
+            )
+            if use_alt:
                 address = _allocate_address(
                     self._cfg.awg_alt.subnet, await self._active_addresses()
                 )

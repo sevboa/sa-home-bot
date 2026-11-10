@@ -33,6 +33,7 @@ from sa_home_bot.node.fixups.privileged import (
 )
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
+from sa_home_bot.vpn import protocol as vpn_protocol
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,11 @@ VPN_PROBE_LEGACY_VETH = "vprobe-veth0"
 REALITY_SOCKS_PORT_BASE = 11080
 SLOT_SUBNET_SIZE = 4
 ALT_SLOT_INDEX_BASE = 32
+AWG_ALT_SLOT_INDEX_BASE = 48
+ALT_SLOT_INDEX_BASES = {
+    vpn_protocol.PROBE_TRANSPORT_REALITY_ALT: ALT_SLOT_INDEX_BASE,
+    vpn_protocol.PROBE_TRANSPORT_AWG_ALT: AWG_ALT_SLOT_INDEX_BASE,
+}
 
 WAIT_TABLE_FUNCTION = [
     "wait_table() {",
@@ -65,7 +71,7 @@ NAT_CHAIN_DEFINITION = "{ type nat hook postrouting priority srcnat ; policy acc
 
 def probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_probe_state.ProbeSlot:
     base = index * SLOT_SUBNET_SIZE
-    is_awg = target.transport == "awg"
+    is_awg = target.transport in vpn_protocol.AWG_PROBE_TRANSPORTS
     return vpn_probe_state.ProbeSlot(
         server=target.server,
         transport=target.transport,
@@ -83,13 +89,13 @@ def probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_pro
 def probe_slots_from_targets(
     targets: list[vpn_nodes.ProbeTarget],
 ) -> list[vpn_probe_state.ProbeSlot]:
-    normal_targets = [t for t in targets if t.transport != "reality_alt"]
-    alt_targets = [t for t in targets if t.transport == "reality_alt"]
+    normal_targets = [t for t in targets if t.transport not in ALT_SLOT_INDEX_BASES]
+    alt_targets = [t for t in targets if t.transport in ALT_SLOT_INDEX_BASES]
     servers = sorted({t.server for t in targets})
     slots = [probe_slot_from_target(i, t) for i, t in enumerate(normal_targets)]
     for alt_target in alt_targets:
         server_index = servers.index(alt_target.server)
-        index = ALT_SLOT_INDEX_BASE + server_index
+        index = ALT_SLOT_INDEX_BASES[alt_target.transport] + server_index
         slots.append(probe_slot_from_target(index, alt_target))
     return slots
 
