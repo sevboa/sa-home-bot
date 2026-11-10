@@ -60,7 +60,8 @@ class ReconcileMixin:
         blocked = await self._blocked_chats(month)
         allowed = await self._allowed_chats()
         cur = await self._db.conn.execute(
-            "SELECT chat_id, transport, public_key, address FROM vpn_peers WHERE status = 'active'"
+            "SELECT chat_id, transport, public_key, address FROM vpn_peers "
+            "WHERE status IN ('active', 'retiring')"
         )
         rows = await cur.fetchall()
         active = [

@@ -225,7 +225,7 @@ class UsageMixin:
 
         cur = await self._db.conn.execute(
             "SELECT id, chat_id, transport, public_key, address FROM vpn_peers "
-            "WHERE status = 'active'"
+            "WHERE status IN ('active', 'retiring')"
         )
         rows = await cur.fetchall()
         touched_chats: set[int] = set()
@@ -281,6 +281,7 @@ class UsageMixin:
         await self._db.conn.commit()
         if self._cfg.mtg_public_host:
             await self._sample_proxy(month)
+        await self._retire_upgraded(now)
         for chat_id in touched_chats:
             await self._check_thresholds(chat_id, month)
         await self._check_node_limit(month)

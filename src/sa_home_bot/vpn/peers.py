@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import uuid as uuidlib
+from datetime import datetime, timedelta
 from typing import Any
 
 from sa_home_bot.proto.messages import (
@@ -30,6 +32,9 @@ from sa_home_bot.vpn.service_common import (
     log,
 )
 
+STATUS_RETIRING = "retiring"
+RETIRE_AFTER = timedelta(days=3)
+
 
 class PeersMixin:
     async def _server_public_key(self) -> str:
@@ -40,6 +45,12 @@ class PeersMixin:
     def _awg_alt_for(self, chat_id: int) -> bool:
         return self._cfg.awg_alt is not None and chat_id != PROBE_CHAT_ID
 
+    def _is_legacy_awg(self, chat_id: int, transport: str, address: str) -> bool:
+        if transport != TRANSPORT_AWG or not self._awg_alt_for(chat_id):
+            return False
+        subnet = ipaddress.ip_network(self._cfg.awg_alt.subnet, strict=False)
+        return ipaddress.ip_interface(address).ip not in subnet
+
     async def _server_public_key_for_address(self, address: str) -> str:
         if self._cfg.awg_alt is not None and self._backend.is_second(address):
             if self._alt_server_pubkey is None:
@@ -49,14 +60,16 @@ class PeersMixin:
 
     async def _active_addresses(self) -> set[str]:
         cur = await self._db.conn.execute(
-            "SELECT address FROM vpn_peers WHERE status = 'active' AND transport = ?",
+            "SELECT address FROM vpn_peers "
+            "WHERE status IN ('active', 'retiring') AND transport = ?",
             (TRANSPORT_AWG,),
         )
         return {row["address"] for row in await cur.fetchall()}
 
     async def _peers_for_chat(self, chat_id: int) -> list[dict[str, Any]]:
         cur = await self._db.conn.execute(
-            "SELECT device_label, transport, status, created_at, last_handshake_at, server "
+            "SELECT device_label, transport, status, created_at, "
+            "last_handshake_at, server, address "
             "FROM vpn_peers WHERE chat_id = ? AND status = 'active' ORDER BY created_at",
             (chat_id,),
         )
@@ -68,6 +81,9 @@ class PeersMixin:
                 "created_at": row["created_at"],
                 "last_handshake_at": row["last_handshake_at"],
                 "server": row["server"] or self._node,
+                "awg_legacy": self._is_legacy_awg(
+                    chat_id, row["transport"] or TRANSPORT_AWG, row["address"]
+                ),
             }
             for row in await cur.fetchall()
         ]
@@ -335,12 +351,21 @@ class PeersMixin:
         row = await self._active_row(chat_id, device_label, wanted)
         transport = row["transport"] or TRANSPORT_AWG if row is not None else None
         if row is not None:
-            await self._db.conn.execute(
-                "UPDATE vpn_peers SET status = 'expired', revoked_at = ? WHERE public_key = ?",
-                (utc_now().isoformat(), row["public_key"]),
-            )
-            await self._db.conn.commit()
-            await self._remove_from_backend(transport, row["public_key"], row["address"])
+            keep_old = bool(args.get("keep_old"))
+            is_legacy = self._is_legacy_awg(chat_id, transport, row["address"])
+            if keep_old and is_legacy:
+                await self._db.conn.execute(
+                    "UPDATE vpn_peers SET status = 'retiring' WHERE public_key = ?",
+                    (row["public_key"],),
+                )
+                await self._db.conn.commit()
+            else:
+                await self._db.conn.execute(
+                    "UPDATE vpn_peers SET status = 'expired', revoked_at = ? WHERE public_key = ?",
+                    (utc_now().isoformat(), row["public_key"]),
+                )
+                await self._db.conn.commit()
+                await self._remove_from_backend(transport, row["public_key"], row["address"])
         try:
             return await self._issue(args, forced_label=device_label, forced_transport=transport)
         finally:
@@ -361,11 +386,56 @@ class PeersMixin:
         await self._remove_from_backend(
             row["transport"] or TRANSPORT_AWG, row["public_key"], row["address"]
         )
+        cur = await self._db.conn.execute(
+            "SELECT public_key, address FROM vpn_peers "
+            "WHERE chat_id = ? AND device_label = ? AND status = 'retiring'",
+            (chat_id, device_label),
+        )
+        retiring = await cur.fetchall()
+        for old in retiring:
+            await self._db.conn.execute(
+                "UPDATE vpn_peers SET status = 'expired', revoked_at = ? WHERE public_key = ?",
+                (utc_now().isoformat(), old["public_key"]),
+            )
+        await self._db.conn.commit()
+        for old in retiring:
+            await self._remove_from_backend(TRANSPORT_AWG, old["public_key"], old["address"])
         return {
             "revoked": True,
             "device_label": device_label,
             "transport": row["transport"] or TRANSPORT_AWG,
         }
+
+    async def _retire_upgraded(self, now: datetime) -> None:
+        retire_at = (now + RETIRE_AFTER).isoformat()
+        await self._db.conn.execute(
+            "UPDATE vpn_peers SET revoked_at = ? "
+            "WHERE status = 'retiring' AND revoked_at IS NULL "
+            "AND EXISTS ("
+            "    SELECT 1 FROM vpn_peers n "
+            "    WHERE n.chat_id = vpn_peers.chat_id "
+            "    AND n.device_label = vpn_peers.device_label "
+            "    AND n.status = 'active' "
+            "    AND n.transport = 'awg' "
+            "    AND n.last_handshake_at IS NOT NULL"
+            ")",
+            (retire_at,),
+        )
+        cur = await self._db.conn.execute(
+            "SELECT public_key, address FROM vpn_peers "
+            "WHERE status = 'retiring' AND revoked_at IS NOT NULL AND revoked_at <= ?",
+            (now.isoformat(),),
+        )
+        rows = await cur.fetchall()
+        for row in rows:
+            await self._remove_from_backend(TRANSPORT_AWG, row["public_key"], row["address"])
+            await self._db.conn.execute(
+                "UPDATE vpn_peers SET status = 'expired' WHERE public_key = ?",
+                (row["public_key"],),
+            )
+        await self._db.conn.commit()
+        if rows:
+            log.info("vpn: погашено %d устаревших пиров", len(rows))
 
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
