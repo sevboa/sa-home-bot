@@ -110,6 +110,15 @@ def patch_xray_config(doc: dict[str, Any], reality: dict[str, Any]) -> bool:
 _HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 
 
+def _toml_tables(name: str, values: dict[str, Any]) -> list[str]:
+    scalars = {k: v for k, v in values.items() if not isinstance(v, dict)}
+    parts = [toml_table(name, scalars)]
+    for key, value in values.items():
+        if isinstance(value, dict):
+            parts += _toml_tables(f"{name}.{key}", value)
+    return parts
+
+
 def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
     cfg = identity.get("config") or {}
     vpn = dict(cfg.get("vpn") or {})
@@ -124,13 +133,13 @@ def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
     for line in text.splitlines():
         m = _HEADER.match(line)
         if m:
-            skipping = m.group(1) in ("vpn", "vpn.reality")
+            skipping = m.group(1) == "vpn" or m.group(1).startswith("vpn.")
         if not skipping:
             kept.append(line)
     out = "\n".join(kept).rstrip("\n")
-    parts = [toml_table("vpn", vpn)]
+    parts = _toml_tables("vpn", vpn)
     if cfg.get("vpn_reality"):
-        parts.append(toml_table("vpn.reality", cfg["vpn_reality"]))
+        parts += _toml_tables("vpn.reality", cfg["vpn_reality"])
     return (out + "\n\n" if out else "") + "\n".join(parts)
 
 
