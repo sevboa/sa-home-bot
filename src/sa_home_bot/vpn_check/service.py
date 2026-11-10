@@ -27,7 +27,11 @@ from sa_home_bot.proto.server import undeclared_action
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.process import run
 from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
-from sa_home_bot.vpn.protocol import ACTION_REPORT_CHECK, ACTION_REPORT_SERIES
+from sa_home_bot.vpn.protocol import (
+    ACTION_REPORT_CHECK,
+    ACTION_REPORT_SERIES,
+    REALITY_PROBE_TRANSPORTS,
+)
 from sa_home_bot.vpn_check.protocol import (
     ACTION_CHECK,
     ACTION_SERIES,
@@ -220,7 +224,7 @@ class VpnCheckService:
                 await self._tunnel_down(slot)
 
     def _reality_raw_target(self, slot: ProbeSlot) -> RawTarget | None:
-        if slot.transport != "reality":
+        if slot.transport not in REALITY_PROBE_TRANSPORTS:
             return None
         try:
             return reality_target(vpn_probe_state.reality_conf_path(slot).read_text())
@@ -289,14 +293,14 @@ class VpnCheckService:
     async def _tunnel_up(self, slot: ProbeSlot) -> str | None:
         if slot.transport == "awg":
             return await self._awg_up(slot)
-        if slot.transport == "reality":
+        if slot.transport in REALITY_PROBE_TRANSPORTS:
             return await self._reality_up(slot)
         return f"транспорт {slot.transport} пока не поддержан этим пробником"
 
     async def _tunnel_down(self, slot: ProbeSlot) -> None:
         if slot.transport == "awg":
             await self._awg_down(slot)
-        elif slot.transport == "reality":
+        elif slot.transport in REALITY_PROBE_TRANSPORTS:
             await self._reality_down(slot)
 
     async def _awg_up(self, slot: ProbeSlot) -> str | None:
@@ -400,7 +404,7 @@ class VpnCheckService:
     def _curl_argv(self, slot: ProbeSlot, curl_args: list[str]) -> list[str]:
         ip_path = shutil.which("ip") or "ip"
         curl = ["curl"]
-        if slot.transport == "reality":
+        if slot.transport in REALITY_PROBE_TRANSPORTS:
             curl += ["--socks5-hostname", f"127.0.0.1:{slot.socks_port}"]
         curl += curl_args
         return ["sudo", "-n", ip_path, "netns", "exec", slot.netns, *curl]

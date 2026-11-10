@@ -118,8 +118,20 @@ class SubscriptionLinksMixin:
             uuid=client_uuid,
             params=self._reality_params(),
         )
+        entries = [entry]
+        alt_params = self._reality_alt_params()
+        if alt_params is not None:
+            entries.append(
+                subs.SubEntry(
+                    node=self._node_id,
+                    name=f"{self._sub_entry_name()} · 2",
+                    uuid=client_uuid,
+                    params=alt_params,
+                    is_alt=True,
+                )
+            )
         awg_key = await self._active_row(chat_id, label, TRANSPORT_AWG) is not None
-        return {
+        resp = {
             "found": True,
             "device_label": label,
             "chat_id": chat_id,
@@ -134,6 +146,9 @@ class SubscriptionLinksMixin:
             "used_bytes": await self._used_bytes(chat_id, month),
             "limit_bytes": await self._limit_bytes(chat_id, month),
         }
+        if len(entries) > 1:
+            resp["entries"] = [e.to_wire() for e in entries]
+        return resp
 
     async def _sub_device_info(
         self, token: str, args: dict[str, Any], base: dict[str, Any]
@@ -237,11 +252,16 @@ class SubscriptionLinksMixin:
                 self._sub_stale.pop((token, node), None)
                 continue
             try:
-                entry = subs.SubEntry.from_wire(reply["entry"])
+                parsed: list[subs.SubEntry] = []
+                if "entries" in reply:
+                    for e in reply["entries"]:
+                        parsed.append(subs.SubEntry.from_wire(e))
+                else:
+                    parsed.append(subs.SubEntry.from_wire(reply["entry"]))
             except (KeyError, TypeError, ValueError):
                 continue
-            entries.append(entry)
-            self._sub_stale[(token, node)] = [entry]
+            entries += parsed
+            self._sub_stale[(token, node)] = parsed
             label = label or str(reply.get("device_label") or "")
             chat_id = chat_id or int(reply.get("chat_id") or 0)
             newest_gen = max(newest_gen, int(reply.get("gen") or 0))

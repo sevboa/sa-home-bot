@@ -31,6 +31,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_server.make_awg_sudoers_fixup(settings),
         vpn_server.make_awg_ufw_fixup(settings),
         vpn_server.make_sub_ufw_fixup(settings),
+        vpn_server.make_reality_alt_ufw_fixup(settings),
+        vpn_server.make_reality_alt_inbound_fixup(settings),
         vpn_server.make_awg_forward_fixup(settings),
     ]
     if needs.vpn_check(settings):

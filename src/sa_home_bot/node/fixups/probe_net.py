@@ -46,6 +46,7 @@ VPN_PROBE_LEGACY_NETNS = "vpn-probe"
 VPN_PROBE_LEGACY_VETH = "vprobe-veth0"
 REALITY_SOCKS_PORT_BASE = 11080
 SLOT_SUBNET_SIZE = 4
+ALT_SLOT_INDEX_BASE = 32
 
 WAIT_TABLE_FUNCTION = [
     "wait_table() {",
@@ -79,6 +80,20 @@ def probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_pro
     )
 
 
+def probe_slots_from_targets(
+    targets: list[vpn_nodes.ProbeTarget],
+) -> list[vpn_probe_state.ProbeSlot]:
+    normal_targets = [t for t in targets if t.transport != "reality_alt"]
+    alt_targets = [t for t in targets if t.transport == "reality_alt"]
+    servers = sorted({t.server for t in targets})
+    slots = [probe_slot_from_target(i, t) for i, t in enumerate(normal_targets)]
+    for alt_target in alt_targets:
+        server_index = servers.index(alt_target.server)
+        index = ALT_SLOT_INDEX_BASE + server_index
+        slots.append(probe_slot_from_target(index, alt_target))
+    return slots
+
+
 async def _fetch_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:
     client = ProtoClient(resolve_endpoint(settings.node.socket), token=settings.swarm.token)
     try:
@@ -86,7 +101,7 @@ async def _fetch_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSl
         targets = await vpn_nodes.probe_targets(client, exclude=socket.gethostname())
     finally:
         await client.close()
-    return [probe_slot_from_target(i, t) for i, t in enumerate(targets)]
+    return probe_slots_from_targets(targets)
 
 
 def discover_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:

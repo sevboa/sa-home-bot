@@ -56,6 +56,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_USAGE,
     GB,
     PROBE_CHAT_ID,
+    PROBE_TRANSPORT_REALITY_ALT,
     SERVICE_NAME,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
@@ -327,16 +328,23 @@ class VpnService(
                 server_pubkey = await self._server_public_key()
             except Exception:
                 log.warning("vpn: не удалось прочитать публичный ключ awg-сервера", exc_info=True)
-        return {
+        state = {
             "node": self._node,
             "service": SERVICE_NAME,
             "active_peers": row["n"] if row else 0,
             "label": self._cfg.location,
             "server_public_key": server_pubkey,
             "transports": list(self._transports),
-            "check": await self._check_rollup(server=self._node),
+            "check": [
+                row
+                for row in await self._check_rollup(server=self._node)
+                if row.get("transport") != PROBE_TRANSPORT_REALITY_ALT
+            ],
             "access_control": True,
         }
+        if self._reality_cfg is not None and self._reality_alt_params() is not None:
+            state["probe_transports"] = [*self._transports, PROBE_TRANSPORT_REALITY_ALT]
+        return state
 
     @staticmethod
     def _chat_id(args: dict[str, Any]) -> int:

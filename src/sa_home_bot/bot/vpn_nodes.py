@@ -62,12 +62,15 @@ async def live_vpn_servers(node_link: ServiceLink) -> list[dict]:
             state = await node_link.get_state(dst=Address(node=node_id, service=SERVICE_NAME))
         except (ServiceUnavailableError, ProtoError):
             return None
-        return {
+        server = {
             "node": node_id,
             "label": state.get("label") or "",
             "transports": state.get("transports") or [],
             "check": state.get("check") or [],
         }
+        if "probe_transports" in state:
+            server["probe_transports"] = state["probe_transports"]
+        return server
 
     states = await asyncio.gather(*(_one(node_id) for node_id in nodes))
     return [state for state in states if state is not None]
@@ -85,7 +88,7 @@ async def probe_targets(node_link: ServiceLink, *, exclude: str) -> list[ProbeTa
         ProbeTarget(server=s["node"], transport=t)
         for s in servers
         if s["node"] != exclude
-        for t in s["transports"]
+        for t in (s.get("probe_transports") or s["transports"])
     ]
     return sorted(targets)
 

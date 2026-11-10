@@ -172,6 +172,7 @@ new = json.load(open(os.environ["NEW"], encoding="utf-8"))
 o_rs = old["inbounds"][0]["streamSettings"]["realitySettings"]
 n_in = new["inbounds"][0]
 n_in["settings"]["clients"] = old["inbounds"][0]["settings"].get("clients", [])
+new["inbounds"].extend(i for i in old["inbounds"] if i.get("tag") == "reality-alt")
 if os.environ["KEEP_DEST"] == "1":
     for k in ("dest", "serverNames"):
         if k in o_rs:

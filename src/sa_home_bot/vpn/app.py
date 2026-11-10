@@ -12,7 +12,7 @@ from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
-from sa_home_bot.reality.xray import RealXrayBackend
+from sa_home_bot.reality.xray import DualXrayBackend, RealXrayBackend
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.vpn.awg import RealAwgBackend
 from sa_home_bot.vpn.protocol import SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
@@ -40,11 +40,20 @@ async def run_vpn(settings: Settings) -> None:
                 "[vpn.reality] — транспорт отключён"
             )
         else:
-            reality_backend = RealXrayBackend(
+            primary = RealXrayBackend(
                 settings.vpn.reality.api_addr,
                 settings.vpn.reality.inbound_tag,
                 settings.vpn.reality.port,
             )
+            if settings.vpn.reality.alt is not None:
+                alt = RealXrayBackend(
+                    settings.vpn.reality.api_addr,
+                    settings.vpn.reality.alt.inbound_tag,
+                    settings.vpn.reality.alt.port,
+                )
+                reality_backend = DualXrayBackend(primary, alt)
+            else:
+                reality_backend = primary
 
     node_link = ServiceLink(
         settings.node.socket, token=settings.swarm.token, display_name="нода (vpn)"
