@@ -466,10 +466,10 @@ class AwgAltConfig(BaseModel):
     i4: str = ""
     i5: str = ""
 
-    _validate_h1 = field_validator("h1", mode="before")(_check_h_range)
-    _validate_h2 = field_validator("h2", mode="before")(_check_h_range)
-    _validate_h3 = field_validator("h3", mode="before")(_check_h_range)
-    _validate_h4 = field_validator("h4", mode="before")(_check_h_range)
+    @field_validator("h1", "h2", "h3", "h4", mode="before")
+    @classmethod
+    def _validate_h_range(cls, v: int | str) -> int | str:
+        return _check_h_range(v)
 
 
 class RealityTransportConfig(BaseModel):
@@ -579,31 +579,16 @@ class VpnConfig(BaseModel):
     def awg_alt_render_cfg(self) -> VpnConfig | None:
         if self.awg_alt is None:
             return None
-        return self.model_copy(
-            update={
-                "interface": self.awg_alt.interface,
-                "subnet": self.awg_alt.subnet,
-                "endpoint_port": self.awg_alt.port,
-                "jc": self.awg_alt.jc,
-                "jmin": self.awg_alt.jmin,
-                "jmax": self.awg_alt.jmax,
-                "s1": self.awg_alt.s1,
-                "s2": self.awg_alt.s2,
-                "s3": self.awg_alt.s3,
-                "s4": self.awg_alt.s4,
-                "h1": self.awg_alt.h1,
-                "h2": self.awg_alt.h2,
-                "h3": self.awg_alt.h3,
-                "h4": self.awg_alt.h4,
-                "i1": self.awg_alt.i1,
-                "i2": self.awg_alt.i2,
-                "i3": self.awg_alt.i3,
-                "i4": self.awg_alt.i4,
-                "i5": self.awg_alt.i5,
-                "awg2": True,
-                "awg_alt": None,
-            }
-        )
+        alt = self.awg_alt
+        update = alt.model_dump(exclude={"interface", "port", "subnet"})
+        update |= {
+            "interface": alt.interface,
+            "subnet": alt.subnet,
+            "endpoint_port": alt.port,
+            "awg2": True,
+            "awg_alt": None,
+        }
+        return self.model_copy(update=update)
 
     hiddify_site_url: str = "https://hiddify.com"
     hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"
