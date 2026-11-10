@@ -114,6 +114,7 @@ class UsageMixin:
                     "last_handshake_at": dev["last_handshake_at"],
                     "created_at": dev["created_at"],
                     "broken": bool(dev.get("broken", False)),
+                    "awg_legacy": bool(dev.get("awg_legacy", False)),
                     "used_bytes": by_pair.get((label, transport), 0),
                 }
             )
