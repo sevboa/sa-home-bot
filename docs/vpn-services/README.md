@@ -11,3 +11,4 @@
 | [client-configs.md](client-configs.md) | sing-box, vless://, xray-конфиг пробника, маршрутизация, AWG-конфиг, имена файлов |
 | [health-checks.md](health-checks.md) | `vpn_check`: туннели, гейт, HEAD/GET, гистерезис, устаревание, фанаут |
 | [operations.md](operations.md) | sudo-узкие места, xray api, APK-кэш, прокси mtg, `nodectl fix` |
+| [reality-alt.md](reality-alt.md) | Второй вход Reality `reality-alt` (63.2.7): сервер без перезапуска xray, подписка, слоты пробника |
