@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import tomllib
 from pathlib import Path
@@ -22,6 +23,27 @@ from sa_home_bot.node.kind import NodeKind
 from sa_home_bot.reality.client_config import CLIENT_FINGERPRINT, DEFAULT_FLOW
 
 log = logging.getLogger(__name__)
+
+
+def _check_h_range(v: int | str) -> int | str:
+    if isinstance(v, int):
+        if v < 1:
+            raise ValueError("h1-h4: значение должно быть >= 1")
+        return v
+    if isinstance(v, str):
+        if "-" not in v:
+            raise ValueError("h1-h4: строка должна быть вида 'a-b'")
+        a_str, b_str = v.split("-", 1)
+        try:
+            a = int(a_str)
+            b = int(b_str)
+        except ValueError:
+            raise ValueError("h1-h4: границы диапазона должны быть целыми") from None
+        if a < 1 or b < 1:
+            raise ValueError("h1-h4: границы диапазона должны быть >= 1")
+        if a > b:
+            raise ValueError("h1-h4: левая граница не может быть больше правой")
+    return v
 
 
 def unknown_config_keys(
@@ -423,6 +445,33 @@ class RealityAltConfig(BaseModel):
         return self.dest or f"{self.sni}:443"
 
 
+class AwgAltConfig(BaseModel):
+    interface: str = "awg1"
+    port: int = Field(default=51821, ge=1, le=65535)
+    subnet: str = "10.9.1.0/24"
+    jc: int = Field(default=5, ge=1)
+    jmin: int = Field(default=40, ge=0)
+    jmax: int = Field(default=70, ge=0)
+    s1: int = Field(default=50, ge=0)
+    s2: int = Field(default=80, ge=0)
+    s3: int = Field(default=0, ge=0)
+    s4: int = Field(default=0, ge=0)
+    h1: int | str = 5
+    h2: int | str = 6
+    h3: int | str = 7
+    h4: int | str = 8
+    i1: str = ""
+    i2: str = ""
+    i3: str = ""
+    i4: str = ""
+    i5: str = ""
+
+    _validate_h1 = field_validator("h1", mode="before")(_check_h_range)
+    _validate_h2 = field_validator("h2", mode="before")(_check_h_range)
+    _validate_h3 = field_validator("h3", mode="before")(_check_h_range)
+    _validate_h4 = field_validator("h4", mode="before")(_check_h_range)
+
+
 class RealityTransportConfig(BaseModel):
     endpoint_host: str = ""
     port: int = Field(default=8443, ge=1, le=65535)
@@ -490,6 +539,7 @@ class VpnConfig(BaseModel):
     i4: str = ""
     i5: str = ""
     awg2: bool = False
+    awg_alt: AwgAltConfig | None = None
     base_quota_gb: int = Field(default=500, ge=0)
     extra_step_gb: int = Field(default=100, gt=0)
     self_ceiling_gb: int = Field(default=1000, ge=0)
@@ -511,24 +561,49 @@ class VpnConfig(BaseModel):
     @field_validator("h1", "h2", "h3", "h4", mode="before")
     @classmethod
     def _validate_h_range(cls, v: int | str) -> int | str:
-        if isinstance(v, int):
-            if v < 1:
-                raise ValueError("h1-h4: значение должно быть >= 1")
-            return v
-        if isinstance(v, str):
-            if "-" not in v:
-                raise ValueError("h1-h4: строка должна быть вида 'a-b'")
-            a_str, b_str = v.split("-", 1)
-            try:
-                a = int(a_str)
-                b = int(b_str)
-            except ValueError:
-                raise ValueError("h1-h4: границы диапазона должны быть целыми") from None
-            if a < 1 or b < 1:
-                raise ValueError("h1-h4: границы диапазона должны быть >= 1")
-            if a > b:
-                raise ValueError("h1-h4: левая граница не может быть больше правой")
-        return v
+        return _check_h_range(v)
+
+    @model_validator(mode="after")
+    def _validate_awg_alt(self) -> VpnConfig:
+        if self.awg_alt is not None:
+            if self.awg_alt.interface == self.interface:
+                raise ValueError("awg_alt.interface не должен совпадать с interface")
+            if self.awg_alt.port == self.endpoint_port:
+                raise ValueError("awg_alt.port не должен совпадать с endpoint_port")
+            if ipaddress.ip_network(self.awg_alt.subnet).overlaps(
+                ipaddress.ip_network(self.subnet)
+            ):
+                raise ValueError("awg_alt.subnet не должен пересекаться с subnet")
+        return self
+
+    def awg_alt_render_cfg(self) -> VpnConfig | None:
+        if self.awg_alt is None:
+            return None
+        return self.model_copy(
+            update={
+                "interface": self.awg_alt.interface,
+                "subnet": self.awg_alt.subnet,
+                "endpoint_port": self.awg_alt.port,
+                "jc": self.awg_alt.jc,
+                "jmin": self.awg_alt.jmin,
+                "jmax": self.awg_alt.jmax,
+                "s1": self.awg_alt.s1,
+                "s2": self.awg_alt.s2,
+                "s3": self.awg_alt.s3,
+                "s4": self.awg_alt.s4,
+                "h1": self.awg_alt.h1,
+                "h2": self.awg_alt.h2,
+                "h3": self.awg_alt.h3,
+                "h4": self.awg_alt.h4,
+                "i1": self.awg_alt.i1,
+                "i2": self.awg_alt.i2,
+                "i3": self.awg_alt.i3,
+                "i4": self.awg_alt.i4,
+                "i5": self.awg_alt.i5,
+                "awg2": True,
+                "awg_alt": None,
+            }
+        )
 
     hiddify_site_url: str = "https://hiddify.com"
     hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"
