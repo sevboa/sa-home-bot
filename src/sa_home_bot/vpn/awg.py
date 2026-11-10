@@ -60,14 +60,14 @@ class DualAwgBackend:
         await self._primary.remove_peer(public_key)
         try:
             await self._second.remove_peer(public_key)
-        except ProtoError:
+        except Exception:
             log.warning("awg: second remove_peer %s", public_key, exc_info=True)
 
     async def transfer(self) -> dict[str, tuple[int, int]]:
         primary_transfer = await self._primary.transfer()
         try:
             second_transfer = await self._second.transfer()
-        except ProtoError:
+        except Exception:
             log.warning("awg: second transfer failed", exc_info=True)
             return primary_transfer
         return {**primary_transfer, **second_transfer}
@@ -76,7 +76,7 @@ class DualAwgBackend:
         primary_handshakes = await self._primary.latest_handshakes()
         try:
             second_handshakes = await self._second.latest_handshakes()
-        except ProtoError:
+        except Exception:
             log.warning("awg: second latest_handshakes failed", exc_info=True)
             return primary_handshakes
         return {**primary_handshakes, **second_handshakes}
