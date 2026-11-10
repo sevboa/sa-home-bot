@@ -12,3 +12,4 @@
 | [health-checks.md](health-checks.md) | `vpn_check`: туннели, гейт, HEAD/GET, гистерезис, устаревание, фанаут |
 | [operations.md](operations.md) | sudo-узкие места, xray api, APK-кэш, прокси mtg, `nodectl fix` |
 | [reality-alt.md](reality-alt.md) | Второй вход Reality `reality-alt` (63.2.7): сервер без перезапуска xray, подписка, слоты пробника |
+| [awg-alt.md](awg-alt.md) | Второй интерфейс AmneziaWG 2.0 `awg1` (63.4): сервер, выдача, переход `retiring`, слот пробника, бэкап |
