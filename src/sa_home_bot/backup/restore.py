@@ -123,6 +123,10 @@ def summarize_bundle(bundle: dict[str, Any]) -> str:
         obf = " ".join(f"{k}={v}" for k, v in awg["obfuscation"].items())
         lines.append(f"  awg: интерфейс {awg['interface']}, публичный ключ сервера {pub}")
         lines.append(f"       обфускация: {obf}")
+    awg_alt = ident.get("awg_alt")
+    if awg_alt:
+        pub = awg_public_key(awg_alt["private_key"])
+        lines.append(f"  awg_alt: интерфейс {awg_alt['interface']}, публичный ключ сервера {pub}")
     rea = ident.get("reality")
     if rea:
         pubr = (ident.get("config", {}).get("vpn_reality") or {}).get("server_public_key", "?")

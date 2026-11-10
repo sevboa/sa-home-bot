@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 from typing import Protocol
 
@@ -13,6 +14,8 @@ log = logging.getLogger(__name__)
 class AwgBackend(Protocol):
     async def server_public_key(self) -> str: ...
 
+    async def server_private_key(self) -> str: ...
+
     async def add_peer(self, public_key: str, address: str) -> None: ...
 
     async def remove_peer(self, public_key: str) -> None: ...
@@ -25,6 +28,61 @@ class AwgBackend(Protocol):
 
     async def generate_keypair(self) -> tuple[str, str]:
         ...
+
+
+class DualAwgBackend:
+    def __init__(
+        self, primary: AwgBackend, second: AwgBackend, second_subnet: str
+    ) -> None:
+        self._primary = primary
+        self._second = second
+        self._second_network = ipaddress.ip_network(second_subnet)
+
+    def is_second(self, address: str) -> bool:
+        return ipaddress.ip_address(address) in self._second_network
+
+    async def server_public_key(self) -> str:
+        return await self._primary.server_public_key()
+
+    async def server_private_key(self) -> str:
+        return await self._primary.server_private_key()
+
+    async def second_server_public_key(self) -> str:
+        return await self._second.server_public_key()
+
+    async def add_peer(self, public_key: str, address: str) -> None:
+        if self.is_second(address):
+            await self._second.add_peer(public_key, address)
+        else:
+            await self._primary.add_peer(public_key, address)
+
+    async def remove_peer(self, public_key: str) -> None:
+        await self._primary.remove_peer(public_key)
+        try:
+            await self._second.remove_peer(public_key)
+        except Exception:
+            log.warning("awg: second remove_peer %s", public_key, exc_info=True)
+
+    async def transfer(self) -> dict[str, tuple[int, int]]:
+        primary_transfer = await self._primary.transfer()
+        try:
+            second_transfer = await self._second.transfer()
+        except Exception:
+            log.warning("awg: second transfer failed", exc_info=True)
+            return primary_transfer
+        return {**primary_transfer, **second_transfer}
+
+    async def latest_handshakes(self) -> dict[str, int]:
+        primary_handshakes = await self._primary.latest_handshakes()
+        try:
+            second_handshakes = await self._second.latest_handshakes()
+        except Exception:
+            log.warning("awg: second latest_handshakes failed", exc_info=True)
+            return primary_handshakes
+        return {**primary_handshakes, **second_handshakes}
+
+    async def generate_keypair(self) -> tuple[str, str]:
+        return await self._primary.generate_keypair()
 
 
 def _parse_transfer(output: str) -> dict[str, tuple[int, int]]:

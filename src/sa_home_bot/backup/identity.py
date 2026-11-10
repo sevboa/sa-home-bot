@@ -31,7 +31,11 @@ class IdentityError(Exception):
 
 
 def collect_identity(
-    settings: Settings, *, awg_private_key: str | None, xray_config: dict | None
+    settings: Settings,
+    *,
+    awg_private_key: str | None,
+    xray_config: dict | None,
+    awg_alt_private_key: str | None = None,
 ) -> dict[str, Any]:
     vpn = settings.vpn
     transports = vpn.transports or [vpn_protocol.TRANSPORT_AWG]
@@ -44,6 +48,13 @@ def collect_identity(
             "private_key": awg_private_key,
             "obfuscation": {name: getattr(vpn, name) for name in OBFUSCATION_FIELDS},
         }
+        if vpn.awg_alt is not None:
+            if not awg_alt_private_key:
+                raise IdentityError("нет приватного ключа второго awg-интерфейса")
+            doc["awg_alt"] = {
+                "interface": vpn.awg_alt.interface,
+                "private_key": awg_alt_private_key,
+            }
     if vpn_protocol.TRANSPORT_REALITY in transports and vpn.reality is not None:
         doc["reality"] = _reality_secrets(xray_config, vpn.reality.inbound_tag)
     doc["config"] = {
@@ -125,12 +136,14 @@ class IdentityPublisher:
         node_id: str,
         *,
         read_awg_private_key: Callable[[], Awaitable[str]],
+        read_awg_alt_private_key: Callable[[], Awaitable[str]] | None = None,
         read_xray: Callable[[], dict | None] | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._node_id = node_id
         self._read_awg = read_awg_private_key
+        self._read_awg_alt = read_awg_alt_private_key
         self._read_xray = read_xray or (lambda: read_xray_config(settings.backup.xray_config))
         self._recipient = sealed.load_key(settings.backup.recipient_public_key)
         self._held_logged = False
@@ -146,12 +159,22 @@ class IdentityPublisher:
                 self._held_logged = True
             return False
         awg_key = None
+        awg_alt_key = None
         transports = self._settings.vpn.transports or [vpn_protocol.TRANSPORT_AWG]
         try:
             if vpn_protocol.TRANSPORT_AWG in transports:
                 awg_key = (await self._read_awg()).strip()
+                if self._settings.vpn.awg_alt is not None:
+                    if self._read_awg_alt is None:
+                        raise IdentityError(
+                            "нет ридера для приватного ключа второго awg-интерфейса"
+                        )
+                    awg_alt_key = (await self._read_awg_alt()).strip()
             doc = collect_identity(
-                self._settings, awg_private_key=awg_key, xray_config=self._read_xray()
+                self._settings,
+                awg_private_key=awg_key,
+                xray_config=self._read_xray(),
+                awg_alt_private_key=awg_alt_key,
             )
         except IdentityError as exc:
             log.warning("Бэкап identity: %s — пакет не обновлён", exc)
@@ -201,8 +224,15 @@ def replicator_hooks(
     if publishing_enabled(settings, vpn_assigned):
         try:
             publisher = IdentityPublisher(
-                settings, store, node_id,
+                settings,
+                store,
+                node_id,
                 read_awg_private_key=RealAwgBackend(settings.vpn.interface).server_private_key,
+                read_awg_alt_private_key=(
+                    RealAwgBackend(settings.vpn.awg_alt.interface).server_private_key
+                    if settings.vpn.awg_alt is not None
+                    else None
+                ),
             )
         except sealed.SealedError as exc:
             log.warning("Бэкап identity выключен: [backup].recipient_public_key негоден (%s)", exc)

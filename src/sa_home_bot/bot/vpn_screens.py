@@ -154,6 +154,18 @@ def device_card_keyboard(
                     )
                 ]
             )
+        for node in device.legacy_awg_nodes():
+            country = countries.get(node)
+            rows.append(
+                [
+                    button(
+                        f"⬆️ AmneziaWG 2.0 {country.short if country else node}",
+                        _cb.expert_cb(
+                            vpn_protocol.ACTION_REISSUE, _cb.KIND_UPGRADE_AWG, device.key, node
+                        ),
+                    )
+                ]
+            )
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_REVOKE):
         rows.append([button("🗑 Удалить устройство", _cb.card_cb(_cb.SCREEN_DELETE, device.key))])
     if vpn_report.can_report(subscription):

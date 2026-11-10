@@ -25,6 +25,11 @@ _TRANSPORT_BY_KIND = {
     _cb.KIND_REISSUE_AWG: vpn_protocol.TRANSPORT_AWG,
 }
 
+UPGRADE_AWG_NOTE = (
+    "Старое подключение поработает ещё 3 дня после того, как вы подключитесь "
+    "с новыми настройками, потом отключится само."
+)
+
 
 async def _find_device(ctx: Ctx, key: str) -> tuple[vpn_devices.Device | None, list[dict]]:
     error, servers, _down = await fetch_card(ctx.node_link, ctx.chat_id, ctx.subscription)
@@ -55,6 +60,13 @@ async def expert_reissue(ctx: Ctx, value: str, node_id: str | None) -> None:
         return
     if kind == _cb.KIND_FIX:
         transports = [c.transport for c in device.broken_in(node_id)]
+    elif kind == _cb.KIND_UPGRADE_AWG:
+        conn = device.connection(node_id, vpn_protocol.TRANSPORT_AWG)
+        if conn is None or not conn.awg_legacy:
+            await ctx.alert("Тут нечего перевыпускать.")
+            await show_screen(ctx, _cb.SCREEN_DEVICE, key)
+            return
+        transports = [vpn_protocol.TRANSPORT_AWG]
     else:
         transport = _TRANSPORT_BY_KIND.get(kind)
         found = device.connection(node_id, transport) if transport else None
@@ -66,10 +78,13 @@ async def expert_reissue(ctx: Ctx, value: str, node_id: str | None) -> None:
     await ctx.callback.answer("Перевыпускаю…")
     dst = node_address(node_id)
     for transport in transports:
+        args = {"chat_id": ctx.chat_id, "device_label": device.label, "transport": transport}
+        if kind == _cb.KIND_UPGRADE_AWG:
+            args["keep_old"] = True
         try:
             result = await ctx.node_link.command(
                 vpn_protocol.ACTION_REISSUE,
-                {"chat_id": ctx.chat_id, "device_label": device.label, "transport": transport},
+                args,
                 dst=dst,
             )
         except ProtoError as exc:
@@ -87,6 +102,8 @@ async def expert_reissue(ctx: Ctx, value: str, node_id: str | None) -> None:
             ctx.ttl_s,
             message_thread_id=ctx.thread_id,
         )
+        if kind == _cb.KIND_UPGRADE_AWG:
+            await ctx.callback.message.answer(UPGRADE_AWG_NOTE)
     await show_screen(ctx, _cb.SCREEN_DEVICE, key)
 
 

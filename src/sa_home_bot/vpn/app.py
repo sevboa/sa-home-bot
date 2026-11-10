@@ -14,7 +14,7 @@ from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.reality.xray import DualXrayBackend, RealXrayBackend
 from sa_home_bot.utils.lifespan import Lifespan
-from sa_home_bot.vpn.awg import RealAwgBackend
+from sa_home_bot.vpn.awg import DualAwgBackend, RealAwgBackend
 from sa_home_bot.vpn.protocol import SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService
 from sa_home_bot.vpn.subweb import SubscriptionWeb
@@ -30,7 +30,12 @@ async def run_vpn(settings: Settings) -> None:
     transports = settings.vpn.transports or [TRANSPORT_AWG]
     awg_on = TRANSPORT_AWG in transports
 
-    backend = RealAwgBackend(settings.vpn.interface)
+    if settings.vpn.awg_alt is not None:
+        primary = RealAwgBackend(settings.vpn.interface)
+        second = RealAwgBackend(settings.vpn.awg_alt.interface)
+        backend = DualAwgBackend(primary, second, settings.vpn.awg_alt.subnet)
+    else:
+        backend = RealAwgBackend(settings.vpn.interface)
 
     reality_backend = None
     if TRANSPORT_REALITY in transports:

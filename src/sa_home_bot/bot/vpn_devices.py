@@ -46,6 +46,7 @@ class Connection:
     broken: bool
     used_bytes: int
     issued: bool = True
+    awg_legacy: bool = False
 
     @property
     def never_connected(self) -> bool:
@@ -84,6 +85,13 @@ class Device:
         seen: list[str] = []
         for conn in self.issued:
             if conn.broken and conn.node not in seen:
+                seen.append(conn.node)
+        return seen
+
+    def legacy_awg_nodes(self) -> list[str]:
+        seen: list[str] = []
+        for conn in self.issued:
+            if conn.awg_legacy and conn.transport == AWG and conn.node not in seen:
                 seen.append(conn.node)
         return seen
 
@@ -134,6 +142,7 @@ def _entries(server: dict) -> list[dict]:
                 "last_handshake_at": dev.get("last_handshake_at"),
                 "created_at": dev.get("created_at"),
                 "broken": bool(dev.get("broken")),
+                "awg_legacy": bool(dev.get("awg_legacy")),
                 "used_bytes": 0,
             }
         )
@@ -161,6 +170,7 @@ def build_devices(servers: list[dict]) -> list[Device]:
                         created_at=created,
                         broken=bool(conn.get("broken")),
                         used_bytes=int(conn.get("used_bytes") or 0),
+                        awg_legacy=bool(conn.get("awg_legacy")),
                     )
                 )
                 if created and (not dev.first_created_at or created < dev.first_created_at):

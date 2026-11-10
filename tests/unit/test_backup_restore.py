@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -413,3 +414,39 @@ async def test_round_trip_jeeves_to_wooster_and_back(world, tmp_path):
             assert new[table]["rows"] == []
         else:
             assert new[table] == old[table], table
+
+
+def test_patch_config_toml_restores_nested_alt_sections():
+    vpn = VpnConfig(
+        endpoint_host="203.0.113.7",
+        awg_alt={"port": 51821, "h1": "100-200"},
+        reality=RealityTransportConfig(alt={"port": 2083, "sni": "a.example"}),
+    )
+    ident = {
+        "config": {
+            "vpn": vpn.model_dump(mode="json", exclude={"reality"}),
+            "vpn_reality": vpn.reality.model_dump(mode="json"),
+        }
+    }
+    old = (
+        '[node]\nname = "jeeves"\n\n[vpn]\nsocket = "./data/vpn.sock"\n\n'
+        '[vpn.reality]\nport = 8443\n\n[vpn.reality.alt]\nport = 2083\nsni = "old.example"\n\n'
+        "[vpn.awg_alt]\nport = 51821\n\n[swarm]\nx = 1\n"
+    )
+    out = bapply.patch_config_toml(old, ident)
+    parsed = tomllib.loads(out)
+    restored = VpnConfig.model_validate(parsed["vpn"])
+    assert restored.awg_alt is not None and restored.awg_alt.h1 == "100-200"
+    assert restored.reality is not None and restored.reality.alt is not None
+    assert restored.reality.alt.sni == "a.example"
+    assert parsed["vpn"]["socket"] == "./data/vpn.sock"
+    assert parsed["node"]["name"] == "jeeves" and parsed["swarm"]["x"] == 1
+
+
+def test_patch_config_toml_without_nested_sections_unchanged_shape():
+    vpn = VpnConfig(endpoint_host="203.0.113.7")
+    dumped = vpn.model_dump(mode="json", exclude={"reality"})
+    ident = {"config": {"vpn": dumped, "vpn_reality": None}}
+    out = bapply.patch_config_toml("[vpn]\n", ident)
+    assert "[vpn.awg_alt]" not in out and "awg_alt" not in out
+    assert out.count("[vpn") == 1

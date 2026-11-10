@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
 import stat
@@ -24,6 +25,7 @@ from sa_home_bot.node.fixups.privileged import (
     SUDOERS_DIR,
     daemon_reload,
     enable_now,
+    file_matches,
     find_executable,
     install_root_file,
     install_sudoers_snippet,
@@ -34,6 +36,56 @@ from sa_home_bot.node.fixups.privileged import (
 AWG_SUDOERS_FILE = "50-sa-home-node-awg"
 SUB_UFW_COMMENT = "sa-home vpn: подписка Hiddify / http-01"
 TCP_IP_HEADER_BYTES = 40
+AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
+
+
+def awg_alt_conf_content(alt, private_key: str, mtu: int, out_iface: str) -> str:
+    subnet = alt.subnet
+    network = ipaddress.ip_network(subnet, strict=False)
+    address = f"{next(network.hosts())}/{network.prefixlen}"
+    lines = [
+        "[Interface]",
+        f"Address = {address}",
+        f"ListenPort = {alt.port}",
+        f"PrivateKey = {private_key}",
+        f"MTU = {mtu}",
+        f"Jc = {alt.jc}",
+        f"Jmin = {alt.jmin}",
+        f"Jmax = {alt.jmax}",
+        f"S1 = {alt.s1}",
+        f"S2 = {alt.s2}",
+        f"S3 = {alt.s3}",
+        f"S4 = {alt.s4}",
+        f"H1 = {alt.h1}",
+        f"H2 = {alt.h2}",
+        f"H3 = {alt.h3}",
+        f"H4 = {alt.h4}",
+    ]
+    for i in range(1, 6):
+        val = getattr(alt, f"i{i}")
+        if val:
+            lines.append(f"I{i} = {val}")
+    post_up = (
+        f"iptables -A FORWARD -i {alt.interface} -j ACCEPT; "
+        f"iptables -A FORWARD -o {alt.interface} -j ACCEPT; "
+        f"iptables -t nat -A POSTROUTING -s {subnet} -o {out_iface} -j MASQUERADE; "
+        f"iptables -t mangle -A FORWARD -o {alt.interface} -p tcp --tcp-flags SYN,RST SYN "
+        f"-j TCPMSS --set-mss {mtu - TCP_IP_HEADER_BYTES}; "
+        f"iptables -t mangle -A FORWARD -i {alt.interface} -p tcp --tcp-flags SYN,RST SYN "
+        f"-j TCPMSS --set-mss {mtu - TCP_IP_HEADER_BYTES}"
+    )
+    post_down = (
+        f"iptables -D FORWARD -i {alt.interface} -j ACCEPT; "
+        f"iptables -D FORWARD -o {alt.interface} -j ACCEPT; "
+        f"iptables -t nat -D POSTROUTING -s {subnet} -o {out_iface} -j MASQUERADE; "
+        f"iptables -t mangle -D FORWARD -o {alt.interface} -p tcp --tcp-flags SYN,RST SYN "
+        f"-j TCPMSS --set-mss {mtu - TCP_IP_HEADER_BYTES}; "
+        f"iptables -t mangle -D FORWARD -i {alt.interface} -p tcp --tcp-flags SYN,RST SYN "
+        f"-j TCPMSS --set-mss {mtu - TCP_IP_HEADER_BYTES}"
+    )
+    lines.append(f"PostUp = {post_up}")
+    lines.append(f"PostDown = {post_down}")
+    return "\n".join(lines) + "\n"
 
 
 def xray_config_path() -> Path:
@@ -201,8 +253,13 @@ def make_reality_alt_ufw_fixup(settings: Settings) -> Fixup:
     )
 
 
-def awg_sudoers_content(awg_path: str, interface: str, user: str) -> str:
-    return f"{user} ALL=(root) NOPASSWD: {awg_path} show *, {awg_path} set {interface} peer *\n"
+def awg_sudoers_content(
+    awg_path: str, interface: str, user: str, extra_interfaces: tuple[str, ...] = ()
+) -> str:
+    parts = [f"{awg_path} show *", f"{awg_path} set {interface} peer *"]
+    for iface in extra_interfaces:
+        parts.append(f"{awg_path} set {iface} peer *")
+    return f"{user} ALL=(root) NOPASSWD: {', '.join(parts)}\n"
 
 
 def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
@@ -213,15 +270,28 @@ def make_awg_sudoers_fixup(settings: Settings) -> Fixup:
                 "awg не найден в PATH — сначала поставьте amneziawg-tools "
                 "(см. deploy/setup-awg-jeeves.sh)"
             )
+        extra = ()
+        if settings.vpn.awg_alt is not None:
+            extra = (settings.vpn.awg_alt.interface,)
         install_sudoers_snippet(
-            AWG_SUDOERS_FILE, awg_sudoers_content(path, settings.vpn.interface, getuser())
+            AWG_SUDOERS_FILE, awg_sudoers_content(path, settings.vpn.interface, getuser(), extra)
         )
+
+    def check() -> bool:
+        if settings.vpn.awg_alt is None:
+            return (SUDOERS_DIR / AWG_SUDOERS_FILE).exists()
+        path = find_executable("awg")
+        if path is None:
+            return False
+        extra = (settings.vpn.awg_alt.interface,)
+        expected = awg_sudoers_content(path, settings.vpn.interface, getuser(), extra)
+        return file_matches(SUDOERS_DIR / AWG_SUDOERS_FILE, expected)
 
     return Fixup(
         id="awg-sudoers",
         title="Разрешить управление awg без пароля (sudoers, только show/set peer)",
         needed=needs.vpn_awg,
-        check=lambda: (SUDOERS_DIR / AWG_SUDOERS_FILE).exists(),
+        check=check,
         apply=apply,
     )
 
@@ -235,6 +305,46 @@ def make_awg_ufw_fixup(settings: Settings) -> Fixup:
         needed=lambda s: needs.vpn_awg(s) and ufw_in_use(),
         check=lambda: ufw_allows_all(specs),
         apply=lambda: ufw_allow_all(specs, comment),
+    )
+
+
+def make_awg_alt_interface_fixup(settings: Settings) -> Fixup:
+    alt = settings.vpn.awg_alt
+    if alt is None:
+        return Fixup(
+            id="awg-alt-interface",
+            title="Второй интерфейс AmneziaWG (не настроен)",
+            needed=lambda s: False,
+            check=lambda: True,
+            apply=lambda: None,
+        )
+    conf_path = AWG_CONF_DIR / f"{alt.interface}.conf"
+    unit_name = f"awg-quick@{alt.interface}"
+
+    def check() -> bool:
+        return path_exists(conf_path) and unit_is_active(unit_name)
+
+    def apply() -> None:
+        if not path_exists(conf_path):
+            result = subprocess.run(["awg", "genkey"], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise FixupError("awg genkey не сработал")
+            private_key = result.stdout.strip()
+            out_iface = default_route_iface()
+            if out_iface is None:
+                raise FixupError("не определён внешний интерфейс (нет маршрута по умолчанию)")
+            content = awg_alt_conf_content(alt, private_key, settings.vpn.mtu, out_iface)
+            install_root_file(conf_path, content, mode="0600", make_parents=True)
+        ensure_ip_forward()
+        daemon_reload()
+        enable_now(unit_name)
+
+    return Fixup(
+        id="awg-alt-interface",
+        title=f"Второй интерфейс AmneziaWG ({alt.interface})",
+        needed=lambda s: needs.vpn_awg(s) and s.vpn.awg_alt is not None,
+        check=check,
+        apply=apply,
     )
 
 
@@ -320,8 +430,30 @@ def awg_forward_unit_content(interface: str, script_path: Path) -> str:
     )
 
 
-def make_awg_forward_fixup(settings: Settings) -> Fixup:
-    interface = settings.vpn.interface
+def make_awg_alt_ufw_fixup(settings: Settings) -> Fixup:
+    alt = settings.vpn.awg_alt
+    if alt is None:
+        return Fixup(
+            id="awg-alt-ufw-port",
+            title="ufw: открыть UDP-порт второго awg-сервера (не настроен)",
+            needed=lambda s: False,
+            check=lambda: True,
+            apply=lambda: None,
+        )
+    specs = [f"{alt.port}/udp"]
+    comment = f"amneziawg {alt.interface} server (sa-home vpn)"
+    return Fixup(
+        id="awg-alt-ufw-port",
+        title=f"ufw: открыть UDP-порт второго awg-сервера ({alt.port}/udp)",
+        needed=lambda s: needs.vpn_awg(s) and s.vpn.awg_alt is not None and ufw_in_use(),
+        check=lambda: ufw_allows_all(specs),
+        apply=lambda: ufw_allow_all(specs, comment),
+    )
+
+
+def _awg_forward_fixup(
+    fixup_id: str, title: str, interface: str, subnet: str, mtu: int, needed
+) -> Fixup:
     script, unit = awg_forward_paths(interface)
 
     def check() -> bool:
@@ -335,9 +467,7 @@ def make_awg_forward_fixup(settings: Settings) -> Fixup:
         files = [
             (
                 script,
-                awg_forward_script_content(
-                    interface, settings.vpn.subnet, out_iface, settings.vpn.mtu
-                ),
+                awg_forward_script_content(interface, subnet, out_iface, mtu),
                 "0755",
             ),
             (unit, awg_forward_unit_content(interface, script), "0644"),
@@ -349,9 +479,43 @@ def make_awg_forward_fixup(settings: Settings) -> Fixup:
         enable_now(unit.name)
 
     return Fixup(
-        id="awg-forward-persist",
-        title=f"Пережить перезагрузку: nft forward/NAT для {interface} (systemd-юнит)",
-        needed=lambda s: needs.vpn_awg(s) and ufw_state() == "active",
+        id=fixup_id,
+        title=title,
+        needed=needed,
         check=check,
         apply=apply,
+    )
+
+
+def make_awg_forward_fixup(settings: Settings) -> Fixup:
+    interface = settings.vpn.interface
+    return _awg_forward_fixup(
+        fixup_id="awg-forward-persist",
+        title=f"Пережить перезагрузку: nft forward/NAT для {interface} (systemd-юнит)",
+        interface=interface,
+        subnet=settings.vpn.subnet,
+        mtu=settings.vpn.mtu,
+        needed=lambda s: needs.vpn_awg(s) and ufw_state() == "active",
+    )
+
+
+def make_awg_alt_forward_fixup(settings: Settings) -> Fixup:
+    alt = settings.vpn.awg_alt
+    if alt is None:
+        return Fixup(
+            id="awg-alt-forward-persist",
+            title="Пережить перезагрузку: nft forward/NAT для второго awg (не настроен)",
+            needed=lambda s: False,
+            check=lambda: True,
+            apply=lambda: None,
+        )
+    return _awg_forward_fixup(
+        fixup_id="awg-alt-forward-persist",
+        title=f"Пережить перезагрузку: nft forward/NAT для {alt.interface} (systemd-юнит)",
+        interface=alt.interface,
+        subnet=alt.subnet,
+        mtu=settings.vpn.mtu,
+        needed=lambda s: (
+            needs.vpn_awg(s) and s.vpn.awg_alt is not None and ufw_state() == "active"
+        ),
     )

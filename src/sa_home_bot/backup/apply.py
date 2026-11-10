@@ -10,10 +10,12 @@ from typing import Any, Protocol
 
 from sa_home_bot.backup.hold import allow_publish
 from sa_home_bot.backup.snapshot import SNAPSHOT_TABLES
-from sa_home_bot.config import Settings
+from sa_home_bot.config import AwgAltConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.node.fixups import privileged
+from sa_home_bot.node.fixups.netfilter import default_route_iface
+from sa_home_bot.node.fixups.vpn_server import awg_alt_conf_content
 from sa_home_bot.toml_emit import toml_table
 from sa_home_bot.utils.files import atomic_write
 
@@ -110,6 +112,15 @@ def patch_xray_config(doc: dict[str, Any], reality: dict[str, Any]) -> bool:
 _HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
 
 
+def _toml_tables(name: str, values: dict[str, Any]) -> list[str]:
+    scalars = {k: v for k, v in values.items() if not isinstance(v, dict)}
+    parts = [toml_table(name, scalars)]
+    for key, value in values.items():
+        if isinstance(value, dict):
+            parts += _toml_tables(f"{name}.{key}", value)
+    return parts
+
+
 def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
     cfg = identity.get("config") or {}
     vpn = dict(cfg.get("vpn") or {})
@@ -124,13 +135,13 @@ def patch_config_toml(text: str, identity: dict[str, Any]) -> str:
     for line in text.splitlines():
         m = _HEADER.match(line)
         if m:
-            skipping = m.group(1) in ("vpn", "vpn.reality")
+            skipping = m.group(1) == "vpn" or m.group(1).startswith("vpn.")
         if not skipping:
             kept.append(line)
     out = "\n".join(kept).rstrip("\n")
-    parts = [toml_table("vpn", vpn)]
+    parts = _toml_tables("vpn", vpn)
     if cfg.get("vpn_reality"):
-        parts.append(toml_table("vpn.reality", cfg["vpn_reality"]))
+        parts += _toml_tables("vpn.reality", cfg["vpn_reality"])
     return (out + "\n\n" if out else "") + "\n".join(parts)
 
 
@@ -213,6 +224,26 @@ async def apply_bundle(
             io.write_root(path, patch_awg_conf(old or "", ident["awg"]))
             log(f"awg: ключ и обфускация записаны в {path}" + ("" if old else " (файл создан)"))
             awg_reload = old is not None
+        awg_alt_reload = False
+        if ident.get("awg_alt"):
+            alt = ident["awg_alt"]
+            path = AWG_DIR / f"{alt['interface']}.conf"
+            old = io.read_root(path)
+            if old is not None:
+                patch = {"private_key": alt["private_key"], "obfuscation": {}}
+                io.write_root(path, patch_awg_conf(old, patch))
+                log(f"awg_alt: ключ записан в {path}")
+                awg_alt_reload = True
+            else:
+                alt_cfg = AwgAltConfig.model_validate(ident["config"]["vpn"]["awg_alt"])
+                mtu = ident["config"]["vpn"]["mtu"]
+                out_iface = default_route_iface()
+                if out_iface is None:
+                    raise ApplyError("не определён внешний интерфейс для второго awg")
+                text = awg_alt_conf_content(alt_cfg, alt["private_key"], mtu, out_iface)
+                io.write_root(path, text)
+                log(f"awg_alt: конфиг создан в {path}")
+                awg_alt_reload = True
         xray_reload = False
         if ident.get("reality"):
             io.write_root(reality_env, reality_env_text(ident))
@@ -241,6 +272,13 @@ async def apply_bundle(
 
     if awg_reload:
         unit = f"awg-quick@{ident['awg']['interface']}"
+        if io.unit_active(unit):
+            io.restart(unit)
+            log(f"{unit} перезапущен")
+        else:
+            log(f"{unit} не запущен — поднимите: sudo systemctl enable --now {unit}")
+    if awg_alt_reload:
+        unit = f"awg-quick@{ident['awg_alt']['interface']}"
         if io.unit_active(unit):
             io.restart(unit)
             log(f"{unit} перезапущен")
