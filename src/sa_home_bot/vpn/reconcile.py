@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 from sa_home_bot.reality.xray import reconcile_clients
@@ -91,29 +92,63 @@ class ReconcileMixin:
         await self._db.conn.commit()
 
     async def check_restore(self) -> list[dict[str, Any]]:
-        fingerprints: dict[str, str] = {}
+        fingerprints: list[tuple[str, str, str]] = []
         try:
             if self._has(TRANSPORT_AWG):
-                fingerprints[TRANSPORT_AWG] = await self._server_public_key()
+                fingerprints.append(
+                    (TRANSPORT_AWG, "server_key:awg", await self._server_public_key())
+                )
         except Exception:
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
+        if self._cfg.awg_alt is not None:
+            try:
+                fingerprints.append(
+                    (
+                        TRANSPORT_AWG,
+                        "server_key:awg_alt",
+                        await self._backend.second_server_public_key(),
+                    )
+                )
+            except Exception:
+                log.warning(
+                    "vpn: сверка ключа awg_alt-сервера после старта не удалась", exc_info=True
+                )
         if self._reality_enabled and self._reality_cfg.server_public_key:
-            fingerprints[TRANSPORT_REALITY] = self._reality_cfg.server_public_key
+            fingerprints.append(
+                (TRANSPORT_REALITY, "server_key:reality", self._reality_cfg.server_public_key)
+            )
         affected: dict[tuple[int, str, str], None] = {}
         key_changed = False
-        for transport, current in fingerprints.items():
-            meta_key = f"server_key:{transport}"
+        alt_subnet = self._cfg.awg_alt.subnet if self._cfg.awg_alt is not None else None
+        for transport, meta_key, current in fingerprints:
             recorded = await self._meta_get(meta_key)
             if recorded == current:
                 continue
             key_changed = key_changed or recorded is not None
             cur = await self._db.conn.execute(
-                "SELECT chat_id, device_label, server_pubkey FROM vpn_peers "
+                "SELECT chat_id, device_label, server_pubkey, address FROM vpn_peers "
                 "WHERE status = 'active' AND chat_id != ? "
                 "AND COALESCE(transport, 'awg') = ? ORDER BY chat_id, created_at",
                 (PROBE_CHAT_ID, transport),
             )
             for row in await cur.fetchall():
+                if transport == TRANSPORT_AWG:
+                    if meta_key == "server_key:awg" and alt_subnet is not None:
+                        try:
+                            if ipaddress.ip_address(row["address"]) in ipaddress.ip_network(
+                                alt_subnet, strict=False
+                            ):
+                                continue
+                        except ValueError:
+                            pass
+                    elif meta_key == "server_key:awg_alt" and alt_subnet is not None:
+                        try:
+                            if ipaddress.ip_address(row["address"]) not in ipaddress.ip_network(
+                                alt_subnet, strict=False
+                            ):
+                                continue
+                        except ValueError:
+                            pass
                 stale = bool(row["server_pubkey"]) and row["server_pubkey"] != current
                 if stale or recorded is not None:
                     affected[(row["chat_id"], row["device_label"], transport)] = None

@@ -290,7 +290,7 @@ class SubscriptionWeb:
         if found is None or not found.entries:
             return _not_found()
         token = request.match_info["token"]
-        status = sub.detect_status(request.remote or "", found.nodes, self._cfg.subnet)
+        status = sub.detect_status(request.remote or "", found.nodes, self._cfg.awg_subnets())
         forms: dict[str, str] = {}
         if self._issue_awg is not None:
             forms = {
@@ -348,8 +348,8 @@ class SubscriptionWeb:
             return _not_found()
         addr = request.remote or ""
         answer = {
-            "via": sub.detect_via(addr, found.nodes, self._cfg.subnet),
-            "exit": sub.detect_exit(addr, found.nodes, self._cfg.subnet),
+            "via": sub.detect_via(addr, found.nodes, self._cfg.awg_subnets()),
+            "exit": sub.detect_exit(addr, found.nodes, self._cfg.awg_subnets()),
             "ip": addr,
         }
         resp = _Response(

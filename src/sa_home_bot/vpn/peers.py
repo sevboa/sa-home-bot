@@ -86,11 +86,18 @@ class PeersMixin:
             (row["device_label"], row["transport"] or TRANSPORT_AWG): row
             for row in await cur.fetchall()
         }
+        live_keys: dict[str, str] = {}
         try:
             live_awg = (
                 set((await self._backend.transfer()).keys()) if self._has(TRANSPORT_AWG) else None
             )
             live_r = await self._reality.list_clients() if self._reality_enabled else None
+            if self._has(TRANSPORT_AWG):
+                for row in rows.values():
+                    if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG:
+                        live_keys[row["address"]] = await self._server_public_key_for_address(
+                            row["address"]
+                        )
         except Exception:
             log.warning("vpn: сверка пиров с сервером не удалась", exc_info=True)
             return devices
@@ -101,7 +108,7 @@ class PeersMixin:
             if (row["transport"] or TRANSPORT_AWG) == TRANSPORT_AWG:
                 if live_awg is None:
                     continue
-                live_key = await self._server_public_key_for_address(row["address"])
+                live_key = live_keys.get(row["address"])
                 stale_key = bool(row["server_pubkey"] and live_key) and (
                     row["server_pubkey"] != live_key
                 )

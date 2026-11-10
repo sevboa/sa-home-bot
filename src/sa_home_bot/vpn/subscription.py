@@ -182,17 +182,21 @@ def _norm_ip(text: str):
     return ip.ipv4_mapped if getattr(ip, "ipv4_mapped", None) else ip
 
 
-def detect_status(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> VpnStatus:
+def detect_status(
+    addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str | tuple[str, ...]
+) -> VpnStatus:
     ip = _norm_ip(addr or "")
     if ip is None:
         return VpnStatus(False)
     own = next((n for n in nodes if n.local), None)
     if own is not None and local_subnet:
-        try:
-            if ip in ipaddress.ip_network(local_subnet, strict=False):
-                return VpnStatus(True, own.name, METHOD_AWG)
-        except ValueError:
-            pass
+        subnets = local_subnet if isinstance(local_subnet, tuple) else (local_subnet,)
+        for subnet in subnets:
+            try:
+                if ip in ipaddress.ip_network(subnet, strict=False):
+                    return VpnStatus(True, own.name, METHOD_AWG)
+            except ValueError:
+                pass
     for node in nodes:
         if node.ip and _norm_ip(node.ip) == ip:
             return VpnStatus(True, node.name, METHOD_VLESS if node.local else "")
@@ -205,14 +209,18 @@ VIA_AWG = "awg"
 VIA_VLESS = "vless"
 
 
-def detect_via(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str:
+def detect_via(
+    addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str | tuple[str, ...]
+) -> str:
     status = detect_status(addr, nodes, local_subnet)
     if not status.on or not status.method:
         return ""
     return VIA_AWG if status.method == METHOD_AWG else VIA_VLESS
 
 
-def detect_exit(addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str) -> str:
+def detect_exit(
+    addr: str, nodes: tuple[NodeInfo, ...], local_subnet: str | tuple[str, ...]
+) -> str:
     status = detect_status(addr, nodes, local_subnet)
     return status.name if status.on and not status.method else ""
 

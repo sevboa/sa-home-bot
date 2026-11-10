@@ -590,6 +590,11 @@ class VpnConfig(BaseModel):
         }
         return self.model_copy(update=update)
 
+    def awg_subnets(self) -> tuple[str, ...]:
+        if self.awg_alt is None:
+            return (self.subnet,)
+        return (self.subnet, self.awg_alt.subnet)
+
     hiddify_site_url: str = "https://hiddify.com"
     hiddify_google_play_url: str = "https://play.google.com/store/apps/details?id=app.hiddify.com"
     hiddify_ios_app_store_url: str = "https://apps.apple.com/app/hiddify-proxy-vpn/id6596777532"
