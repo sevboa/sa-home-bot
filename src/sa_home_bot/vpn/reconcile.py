@@ -16,6 +16,17 @@ from sa_home_bot.vpn.service_common import (
     log,
 )
 
+META_KEY_AWG_ALT = "server_key:awg_alt"
+
+
+def _in_subnet(address: str, subnet: str | None) -> bool:
+    if subnet is None:
+        return False
+    try:
+        return ipaddress.ip_address(address) in ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return False
+
 
 class ReconcileMixin:
     async def backfill_server(self) -> None:
@@ -100,12 +111,12 @@ class ReconcileMixin:
                 )
         except Exception:
             log.warning("vpn: сверка ключа awg-сервера после старта не удалась", exc_info=True)
-        if self._cfg.awg_alt is not None:
+        if self._has(TRANSPORT_AWG) and self._cfg.awg_alt is not None:
             try:
                 fingerprints.append(
                     (
                         TRANSPORT_AWG,
-                        "server_key:awg_alt",
+                        META_KEY_AWG_ALT,
                         await self._backend.second_server_public_key(),
                     )
                 )
@@ -132,23 +143,10 @@ class ReconcileMixin:
                 (PROBE_CHAT_ID, transport),
             )
             for row in await cur.fetchall():
-                if transport == TRANSPORT_AWG:
-                    if meta_key == "server_key:awg" and alt_subnet is not None:
-                        try:
-                            if ipaddress.ip_address(row["address"]) in ipaddress.ip_network(
-                                alt_subnet, strict=False
-                            ):
-                                continue
-                        except ValueError:
-                            pass
-                    elif meta_key == "server_key:awg_alt" and alt_subnet is not None:
-                        try:
-                            if ipaddress.ip_address(row["address"]) not in ipaddress.ip_network(
-                                alt_subnet, strict=False
-                            ):
-                                continue
-                        except ValueError:
-                            pass
+                if transport == TRANSPORT_AWG and (
+                    _in_subnet(row["address"], alt_subnet) != (meta_key == META_KEY_AWG_ALT)
+                ):
+                    continue
                 stale = bool(row["server_pubkey"]) and row["server_pubkey"] != current
                 if stale or recorded is not None:
                     affected[(row["chat_id"], row["device_label"], transport)] = None
