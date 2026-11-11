@@ -18,6 +18,11 @@ from sa_home_bot.domain.vpn_check import (
     reconcile_vpn_check,
     rollup_status,
 )
+from sa_home_bot.domain.vpn_link import (
+    LinkState,
+    link_level,
+    reconcile_link,
+)
 from sa_home_bot.domain.vpn_series import (
     failure_at_bytes,
     reconcile_vpn_series,
@@ -32,6 +37,7 @@ from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_CHECK_FAILED,
     EVENT_VPN_CHECK_RECOVERED,
+    EVENT_VPN_LINK_CHANGED,
     EVENT_VPN_SERIES_FAILED,
     EVENT_VPN_SERIES_RECOVERED,
     TELEGRAM_EGRESS_TARGET,
@@ -101,10 +107,13 @@ class ChecksMixin:
             ok = bool(raw.get("ok"))
             error = str(error_raw) if error_raw else None
             run = runs.setdefault(
-                (server, transport), {"failed": [], "recovered": [], "total": 0, "bad": 0}
+                (server, transport),
+                {"failed": [], "recovered": [], "total": 0, "bad": 0, "bad_targets": []},
             )
             run["total"] += 1
             run["bad"] += not ok
+            if not ok:
+                run["bad_targets"].append(str(target))
             to_status = await self._apply_check_result(
                 node, server, transport, str(target), ok, ms, error, now
             )
@@ -114,7 +123,7 @@ class ChecksMixin:
                 run["recovered"].append(str(target))
         for (server, transport), run in runs.items():
             base = {"node": node, "server": server, "transport": transport, "total": run["total"]}
-            if run["failed"]:
+            if run["failed"] and self._cfg.check_target_events:
                 await self._emit(
                     EVENT_VPN_CHECK_FAILED,
                     {
@@ -124,7 +133,7 @@ class ChecksMixin:
                         "consecutive": self._cfg.check_fail_threshold,
                     },
                 )
-            if run["recovered"]:
+            if run["recovered"] and self._cfg.check_target_events:
                 await self._emit(
                     EVENT_VPN_CHECK_RECOVERED,
                     {
@@ -134,7 +143,66 @@ class ChecksMixin:
                         "active": await self._active_check_problems(),
                     },
                 )
+            await self._apply_link_report(node, server, transport, run, now)
         return {"accepted": True}
+
+    async def _apply_link_report(
+        self,
+        node: str,
+        server: str,
+        transport: str,
+        run: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        level = link_level(run["total"], run["bad"])
+        cur = await self._db.conn.execute(
+            "SELECT level, candidate, candidate_count, announced FROM vpn_link_states "
+            "WHERE node = ? AND server = ? AND transport = ?",
+            (node, server, transport),
+        )
+        row = await cur.fetchone()
+        known = None
+        if row is not None:
+            known = LinkState(
+                level=row["level"],
+                candidate=row["candidate"],
+                candidate_count=row["candidate_count"],
+                announced=row["announced"],
+            )
+        state, transition = reconcile_link(known, level, self._cfg.link_stable_threshold)
+        await self._db.conn.execute(
+            "INSERT INTO vpn_link_states ("
+            "node, server, transport, level, candidate, candidate_count, announced, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node, server, transport) DO UPDATE SET "
+            "level = excluded.level, candidate = excluded.candidate, "
+            "candidate_count = excluded.candidate_count, announced = excluded.announced, "
+            "updated_at = excluded.updated_at",
+            (
+                node,
+                server,
+                transport,
+                state.level,
+                state.candidate,
+                state.candidate_count,
+                state.announced,
+                now.isoformat(),
+            ),
+        )
+        await self._db.conn.commit()
+        if transition is not None and node not in self._cfg.ignored_observers:
+            await self._emit(
+                EVENT_VPN_LINK_CHANGED,
+                {
+                    "node": node,
+                    "server": server,
+                    "transport": transport,
+                    "from": transition.from_announced,
+                    "to": transition.to_announced,
+                    "bad_targets": run["bad_targets"],
+                    "total": run["total"],
+                },
+            )
 
     async def _report_series(self, args: dict[str, Any]) -> dict[str, Any]:
         node = str(args.get("node", "")).strip()
