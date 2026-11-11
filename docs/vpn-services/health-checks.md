@@ -137,5 +137,13 @@ nodectl -n zakhar call vpn_check sni_probe domains=www.google.com,dl.google.com
 пока он не продержится `threshold` отчётов подряд; прерванный ряд обнуляет счётчик, поэтому дребезг
 не даёт ни одного оповещения. Объявляется только достижение края `ok` или `down` — устойчивый
 `partial` не объявляется, значит постепенное падение через `partial` даёт одно оповещение в конце.
-Первый отчёт связки молчит: он лишь задаёт объявленный край. Подключение модуля к службе — следующая
-задача.
+Первый отчёт связки молчит: он лишь задаёт объявленный край.
+
+Состояние связки — таблица `vpn_link_states` (ключ node, server, transport; level — устойчивый
+уровень, candidate — уровень-кандидат, candidate_count — длина ряда, announced — объявленный край).
+Ведёт её служба при приёме отчёта: `vpn/checks.py::_apply_link_report` — уровень по всем целям
+связки, `reconcile_link`, запись строки и событие `vpn_link_changed {node, server, transport, from,
+to, bad_targets, total}` только при устойчивом переходе края. Настройки `[vpn]`:
+`link_stable_threshold` (3), `ignored_observers` (состояние пишется, события нет),
+`check_target_events` (false выключает `vpn_check_failed/recovered`; оставлено выключателем, чтобы
+вернуть старую схему одной строкой конфига).

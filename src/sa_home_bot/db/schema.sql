@@ -560,6 +560,22 @@ CREATE TABLE IF NOT EXISTS vpn_check_states (
     PRIMARY KEY (node, server, transport, target)
 );
 
+-- Состояние связки (65.1, 2026-11-11): одна строка на (наблюдатель, сервер,
+-- транспорт). level — устойчивый уровень, candidate — уровень-кандидат
+-- неустойчивого ряда, candidate_count — длина ряда, announced — объявленный
+-- край (окно оповещения). Гистерезис ведёт domain/vpn_link.py::reconcile_link.
+CREATE TABLE IF NOT EXISTS vpn_link_states (
+    node             TEXT NOT NULL,
+    server           TEXT NOT NULL,
+    transport        TEXT NOT NULL,
+    level            TEXT NOT NULL,
+    candidate        TEXT NOT NULL,
+    candidate_count  INTEGER NOT NULL DEFAULT 0,
+    announced        TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (node, server, transport)
+);
+
 -- Серийная проверка из РФ (63.1.5): одна строка на (наблюдатель, сервер, транспорт),
 -- last_report — JSON последнего отчёта vpn_check.series.
 CREATE TABLE IF NOT EXISTS vpn_series_states (
