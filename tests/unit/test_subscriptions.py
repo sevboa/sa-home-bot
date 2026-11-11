@@ -5,7 +5,11 @@ import pytest
 from aiogram.exceptions import TelegramNetworkError
 
 from sa_home_bot.config import GuestSubscriptionConfig, SubscriptionConfig
-from sa_home_bot.subscriptions.book import SubscriptionBook, warn_group_log_config
+from sa_home_bot.subscriptions.book import (
+    SubscriptionBook,
+    guest_subscription,
+    warn_group_log_config,
+)
 from sa_home_bot.subscriptions.guests import render
 from sa_home_bot.subscriptions.models import SOURCE_GUEST, Subscription
 
@@ -40,6 +44,53 @@ def test_specific_event_type_filter():
     assert sub.accepts_event("overheat_started")
     assert not sub.accepts_event("overheat_cleared")
     assert not sub.accepts_event("system")
+
+
+def test_except_event_types_beats_wildcard():
+    sub = Subscription(
+        "me", 1, frozenset({"*"}), except_event_types=frozenset({"vpn_link_changed"})
+    )
+    assert not sub.accepts_event("vpn_link_changed")
+    assert sub.accepts_event("overheat_started")
+
+
+def test_except_event_types_beats_explicit_list():
+    sub = Subscription(
+        "room", 2, frozenset({"a", "b"}), except_event_types=frozenset({"a"})
+    )
+    assert not sub.accepts_event("a")
+    assert sub.accepts_event("b")
+
+
+def test_from_config_carries_except_event_types():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(
+                name="me",
+                chat_id=1,
+                event_types=["*"],
+                except_event_types=["x"],
+                allowed_commands=[],
+            ),
+        ]
+    )
+    sub = book.for_chat(1)
+    assert sub.except_event_types == frozenset({"x"})
+    assert not sub.accepts_event("x")
+    assert sub.accepts_event("system")
+
+
+def test_guest_has_no_except_event_types():
+    guest = guest_subscription(
+        GuestSubscriptionConfig(
+            name="guest",
+            chat_id=-1002,
+            event_types=["*"],
+            allowed_commands=["status"],
+        )
+    )
+    assert guest.except_event_types == frozenset()
+    assert guest.accepts_event("vpn_link_changed")
 
 
 def test_allows_command():
