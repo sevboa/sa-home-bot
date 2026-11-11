@@ -726,6 +726,7 @@ class SubscriptionConfig(BaseModel):
     name: str
     chat_id: int
     event_types: list[str] = Field(default_factory=lambda: ["*"])
+    except_event_types: list[str] = Field(default_factory=list)
     allowed_commands: list[str] = Field(default_factory=list)
 
 

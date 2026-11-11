@@ -13,6 +13,7 @@ class Subscription:
     name: str
     chat_id: int
     event_types: frozenset[str] = field(default_factory=frozenset)
+    except_event_types: frozenset[str] = field(default_factory=frozenset)
     allowed_commands: frozenset[str] = field(default_factory=frozenset)
     broken: bool = False
     source: str = SOURCE_CONFIG
@@ -31,6 +32,8 @@ class Subscription:
 
     def accepts_event(self, event_type: str) -> bool:
         if self.broken:
+            return False
+        if event_type in self.except_event_types:
             return False
         return WILDCARD in self.event_types or event_type in self.event_types
 

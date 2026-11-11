@@ -59,6 +59,7 @@ class SubscriptionBook:
                 name=c.name,
                 chat_id=c.chat_id,
                 event_types=frozenset(c.event_types),
+                except_event_types=frozenset(c.except_event_types),
                 allowed_commands=frozenset(c.allowed_commands),
             )
             for c in configs
