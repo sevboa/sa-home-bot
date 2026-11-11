@@ -1,10 +1,17 @@
+import pytest
+
 from sa_home_bot.domain.vpn_link import (
     LEVEL_DOWN,
     LEVEL_OK,
     LEVEL_PARTIAL,
+    SCOPE_GLOBAL,
+    SCOPE_RUSSIA,
     LinkState,
     link_level,
     reconcile_link,
+    scope_level,
+    scope_levels,
+    scope_of,
 )
 
 THRESHOLD = 3
@@ -105,3 +112,51 @@ def test_candidate_change_resets_count():
     assert transitions == []
     assert state.level == LEVEL_PARTIAL
     assert state.announced == LEVEL_OK
+
+
+def test_scope_of_ignored_observer():
+    assert scope_of("zakhar", ["zakhar"], ["zakhar"]) is None
+    assert scope_of("zakhar", [], ["zakhar"]) is None
+
+
+def test_scope_of_russia_observer():
+    assert scope_of("osip", ["osip"], []) == SCOPE_RUSSIA
+
+
+def test_scope_of_other_observer():
+    assert scope_of("alfred", ["osip"], []) == SCOPE_GLOBAL
+
+
+@pytest.mark.parametrize(
+    ("levels", "expected"),
+    [
+        ([], None),
+        ([LEVEL_OK], LEVEL_OK),
+        ([LEVEL_DOWN, LEVEL_OK], LEVEL_OK),
+        ([LEVEL_PARTIAL, LEVEL_OK], LEVEL_OK),
+        ([LEVEL_DOWN, LEVEL_DOWN], LEVEL_DOWN),
+        ([LEVEL_PARTIAL, LEVEL_DOWN], LEVEL_PARTIAL),
+        ([LEVEL_PARTIAL], LEVEL_PARTIAL),
+    ],
+)
+def test_scope_level(levels, expected):
+    assert scope_level(levels) == expected
+
+
+def test_scope_levels_groups_by_scope():
+    links = [
+        ("alfred", "jeeves", LEVEL_OK),
+        ("wooster", "jeeves", LEVEL_DOWN),
+        ("osip", "jeeves", LEVEL_DOWN),
+        ("osip", "wooster", LEVEL_PARTIAL),
+        ("zakhar", "jeeves", LEVEL_OK),
+        ("zakhar", "wooster", LEVEL_OK),
+    ]
+    assert scope_levels(links, ["osip"], ["zakhar"]) == {
+        SCOPE_GLOBAL: {"jeeves": LEVEL_OK},
+        SCOPE_RUSSIA: {"jeeves": LEVEL_DOWN, "wooster": LEVEL_PARTIAL},
+    }
+
+
+def test_scope_levels_empty():
+    assert scope_levels([], [], []) == {SCOPE_GLOBAL: {}, SCOPE_RUSSIA: {}}
