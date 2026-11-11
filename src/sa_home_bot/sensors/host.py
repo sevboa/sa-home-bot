@@ -25,7 +25,10 @@ KERNEL_JOURNAL_REQUIREMENT = Requirement(
     package="systemd",
     platforms=("linux",),
     key="journalctl-kernel",
-    note="счётчик стойл ядра/гипервизора (нужна группа systemd-journal)",
+    note=(
+        "счётчик стойл ядра/гипервизора (нужна группа systemd-journal; "
+        "после nodectl fix нужен sudo systemctl restart user@<uid>.service)"
+    ),
 )
 
 _JOURNAL_GROUPS = ("systemd-journal", "adm")
