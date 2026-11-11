@@ -53,7 +53,8 @@ MagicDNS `100.100.100.100` достижим через forward-правило ve
 6. `vpn-check-probe-sudoers` — `ip netns exec <ns> curl *`; для awg `ip route get *`,
    `awg-quick up|down <iface>`; для reality `timeout * xray run -c <conf>`. Не голый `ip`
    (равносилен root). Содержимое сверяется целиком: после смены состава серверов старый снипет не
-   должен оставаться неполным.
+   должен оставаться неполным. Без целей сниппет не пишется, а удаляется (находка 2026-11-11:
+   нода osip не видела рой, visudo отверг пустой `NOPASSWD:`).
 7. `vpn-check-probe-state` — `/etc/sa-home-bot/vpn-probe-state.json` (`node/vpn_probe_state.py`):
    что реально настроено; пишет root, читает `vpn_check` без sudo.
 
