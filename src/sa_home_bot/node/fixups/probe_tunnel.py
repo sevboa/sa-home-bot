@@ -20,6 +20,7 @@ from sa_home_bot.node.fixups.privileged import (
     path_exists,
     read_text,
     read_text_if_exists,
+    run_sudo,
 )
 from sa_home_bot.node.fixups.toolchain import build_amneziawg_tools, ensure_xray_binary
 from sa_home_bot.proto.client import ProtoClient
@@ -287,6 +288,15 @@ def _sudoers_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
 
 
 def make_vpn_probe_sudoers_fixup(slots: list[vpn_probe_state.ProbeSlot]) -> Fixup:
+    if not slots:
+        path = SUDOERS_DIR / VPN_PROBE_SUDOERS_FILE
+        return Fixup(
+            id="vpn-check-probe-sudoers",
+            title="Разрешить vpn_check ходить в netns пробников и поднимать/гасить awg без пароля",
+            needed=needs.vpn_check,
+            check=lambda: not path_exists(path),
+            apply=lambda: run_sudo(["rm", "-f", str(path)]),
+        )
     return Fixup(
         id="vpn-check-probe-sudoers",
         title="Разрешить vpn_check ходить в netns пробников и поднимать/гасить awg без пароля",

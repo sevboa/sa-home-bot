@@ -376,6 +376,20 @@ def test_probe_sudoers_content_joins_slots_with_commas():
     assert content.count("curl *") == 2 and content.count("/q up") == 2
 
 
+def test_probe_sudoers_without_slots_is_done_when_file_absent(root):
+    assert probe_tunnel.make_vpn_probe_sudoers_fixup([]).check() is True
+
+
+def test_probe_sudoers_without_slots_removes_stale_snippet_without_visudo(root):
+    path = "/etc/sudoers.d/50-sa-home-node-vpn-probe"
+    root.files[path] = "sevboa ALL=(root) NOPASSWD: \n"
+    fixup = probe_tunnel.make_vpn_probe_sudoers_fixup([])
+    assert fixup.check() is False
+    fixup.apply()
+    assert root.sudo_commands("rm") == [["rm", "-f", path]]
+    assert not any("visudo" in call for call in root.calls)
+
+
 def test_probe_sudoers_check_compares_content(root):
     slots = [make_slot()]
     path = "/etc/sudoers.d/50-sa-home-node-vpn-probe"
