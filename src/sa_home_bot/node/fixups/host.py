@@ -170,8 +170,10 @@ def _journalctl_group_check() -> bool:
 def _journalctl_group_apply() -> None:
     run_sudo(["usermod", "-aG", "systemd-journal", getuser()])
     log.warning(
-        "Группа systemd-journal добавлена — применится после нового логина/сессии, "
-        "не мгновенно в текущей."
+        "Группа systemd-journal добавлена; чтобы нода её увидела, выполните: "
+        "sudo systemctl restart user@%s.service (перезапустит службы пользователя, "
+        "в том числе ноду)",
+        os.getuid(),
     )
 
 

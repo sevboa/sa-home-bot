@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -253,6 +254,13 @@ def test_real_smartctl_path_skips_wrapper_dir(monkeypatch):
 def test_smartmontools_check_sees_binary_in_sbin(sbin_dir):
     _make_executable(sbin_dir / "smartctl")
     assert host.INSTALL_SMARTMONTOOLS.check()
+
+
+def test_journalctl_group_apply_warns_about_user_manager_restart(root, caplog):
+    host.JOURNALCTL_GROUP.apply()
+    usermod = root.sudo_commands("usermod")[-1]
+    assert usermod == ["usermod", "-aG", "systemd-journal", host.getuser()]
+    assert f"systemctl restart user@{os.getuid()}.service" in caplog.text
 
 
 def test_install_sudoers_snippet_validates_with_visudo_then_installs(root):
