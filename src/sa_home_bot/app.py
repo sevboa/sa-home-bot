@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import socket
+from typing import Any
 
 from aiogram.exceptions import TelegramConflictError
 
@@ -61,66 +62,79 @@ log = logging.getLogger(__name__)
 STATE_CLEAN_SHUTDOWN = "last_shutdown_clean"
 
 
+async def _close_startup_resources(bot: Any | None, db: Database) -> None:
+    if bot is not None:
+        with contextlib.suppress(Exception):
+            await bot.session.close()
+    with contextlib.suppress(Exception):
+        await db.close()
+
+
 async def run(settings: Settings, *, instance: str = "") -> bool:
     runtime = Runtime()
 
     db = Database(settings.database.path)
-    await db.open()
-    await apply_migrations(db)
-    store = Store(db)
-
-    prev = await store.get_state(STATE_CLEAN_SHUTDOWN)
-    started_clean = prev in (None, "1")
-    await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
-
-    book = SubscriptionBook.from_config(
-        settings.subscriptions, settings.guest_subscriptions, settings.group_log.chat_ids
-    )
-    warn_group_log_config(book, settings.group_log.chat_ids)
+    bot = None
     try:
-        await people_seed.seed_local(store, settings, book)
-    except Exception:
-        log.exception("Карточки людей: перенос не удался, повтор при следующем старте")
+        await db.open()
+        await apply_migrations(db)
+        store = Store(db)
 
-    bot = build_bot(settings.telegram.token, settings.telegram.proxy)
-    notifier = Notifier(bot, outbox=store)
-    auto_egress = settings.telegram.proxy_mode == "auto"
-    if auto_egress:
-        await pick_startup_route(bot, startup_routes(settings.telegram))
-    bot_username = (
-        await call_with_network_retry(
-            lambda: bot.get_me(request_timeout=REQUEST_TIMEOUT_S),
-            what="get_me() при старте бота",
+        prev = await store.get_state(STATE_CLEAN_SHUTDOWN)
+        started_clean = prev in (None, "1")
+        await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
+
+        book = SubscriptionBook.from_config(
+            settings.subscriptions, settings.guest_subscriptions, settings.group_log.chat_ids
         )
-    ).username
+        warn_group_log_config(book, settings.group_log.chat_ids)
+        try:
+            await people_seed.seed_local(store, settings, book)
+        except Exception:
+            log.exception("Карточки людей: перенос не удался, повтор при следующем старте")
 
-    await store.purge_group_messages_except(settings.group_log.chat_ids)
+        bot = build_bot(settings.telegram.token, settings.telegram.proxy)
+        notifier = Notifier(bot, outbox=store)
+        auto_egress = settings.telegram.proxy_mode == "auto"
+        if auto_egress:
+            await pick_startup_route(bot, startup_routes(settings.telegram))
+        bot_username = (
+            await call_with_network_retry(
+                lambda: bot.get_me(request_timeout=REQUEST_TIMEOUT_S),
+                what="get_me() при старте бота",
+            )
+        ).username
 
-    async def on_reconnect(downtime: float) -> None:
-        await broadcast_system(book, notifier, render_link_restored(downtime))
+        await store.purge_group_messages_except(settings.group_log.chat_ids)
 
-    bot.session.middleware(LinkWatchMiddleware(on_reconnect))
-    bot.session.middleware(GroupLogOutgoing(book, store))
-    gate = Gatekeeper(
-        settings.invites, store, book, GuestStore(settings.guests_path), notifier
-    )
-    if not gate.enabled:
-        log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
-    dp = build_dispatcher(book, gate, store)
+        async def on_reconnect(downtime: float) -> None:
+            await broadcast_system(book, notifier, render_link_restored(downtime))
 
-    await book.validate_on_startup(bot)
+        bot.session.middleware(LinkWatchMiddleware(on_reconnect))
+        bot.session.middleware(GroupLogOutgoing(book, store))
+        gate = Gatekeeper(
+            settings.invites, store, book, GuestStore(settings.guests_path), notifier
+        )
+        if not gate.enabled:
+            log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
+        dp = build_dispatcher(book, gate, store)
 
-    await set_bot_commands(bot, book)
+        await book.validate_on_startup(bot)
 
-    last_outage = None
-    if not started_clean:
-        loop = asyncio.get_running_loop()
-        events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
-        if events:
-            last_outage = events[0]
-    await broadcast_system(
-        book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
-    )
+        await set_bot_commands(bot, book)
+
+        last_outage = None
+        if not started_clean:
+            loop = asyncio.get_running_loop()
+            events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
+            if events:
+                last_outage = events[0]
+        await broadcast_system(
+            book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
+        )
+    except BaseException:
+        await _close_startup_resources(bot, db)
+        raise
 
     dispatcher = TelegramEventDispatcher(notifier, book, store)
     link = ServiceLink(
