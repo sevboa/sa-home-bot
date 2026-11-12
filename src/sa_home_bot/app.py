@@ -42,6 +42,7 @@ from sa_home_bot.bot.setup import build_bot, build_dispatcher
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.torrent_pending import PendingTorrents
+from sa_home_bot.bot.vpn_daily_runner import VpnDailyReport
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
@@ -265,6 +266,16 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             notifier=notifier,
         )
         devlab_notify_task = asyncio.create_task(devlab_notifier.run(), name="devlab-notify")
+    vpn_daily_task: asyncio.Task | None = None
+    if settings.vpn_report.enabled:
+        vpn_daily_report = VpnDailyReport(
+            get_node_link=_get_node_link,
+            store=store,
+            config=settings,
+            book=book,
+            notifier=notifier,
+        )
+        vpn_daily_task = asyncio.create_task(vpn_daily_report.run(), name="vpn-daily")
     people_seed_task = asyncio.create_task(
         people_seed.graph_seed_loop(store, book, node_link), name="people-seed"
     )
@@ -323,6 +334,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             active_ai_chats=active_ai_chats,
             away_task=away_task,
             devlab_notify_task=devlab_notify_task,
+            vpn_daily_task=vpn_daily_task,
             people_seed_task=people_seed_task,
             egress=egress,
             outbox_flusher=outbox_flusher,
@@ -357,6 +369,7 @@ async def _shutdown(
     db: Database,
     away_task: asyncio.Task | None = None,
     devlab_notify_task: asyncio.Task | None = None,
+    vpn_daily_task: asyncio.Task | None = None,
     people_seed_task: asyncio.Task | None = None,
     egress: EgressManager | None = None,
     outbox_flusher: OutboxFlusher | None = None,
@@ -400,6 +413,11 @@ async def _shutdown(
             pass
         except Exception:
             log.warning("devlab-notify-задача упала при остановке", exc_info=True)
+
+    if vpn_daily_task is not None and not vpn_daily_task.done():
+        vpn_daily_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await vpn_daily_task
 
     if people_seed_task is not None and not people_seed_task.done():
         people_seed_task.cancel()
