@@ -154,4 +154,19 @@ to, bad_targets, total}` только при устойчивом переход
 все лежат, иначе `partial`; устаревшие строки связок (старше порога свежести) в охват не входят.
 Событие `vpn_outage {scope, server, from, to, scopes}` — охват вошёл в `down` или вышел из него;
 оно заменяет `vpn_link_changed` той же пары (охват, сервер) в том же отчёте. `vpn_link_changed`
-несёт `scope` и `scopes`. Действие `check_scopes` → `{scopes, links}`.
+несёт `scope` и `scopes`. Действие `check_scopes` → `{scopes, russia, ignored, links}` (`russia` и `ignored` — списки наблюдателей из конфига, по ним бот раскладывает историю по охватам).
+
+### История замеров (65.5, 2026-11-12)
+На каждый принятый отчёт служба пишет по строке истории на связку (наблюдатель, сервер,
+транспорт) — таблица `vpn_check_samples`: `total` целей, `bad` плохих, `median_ms` — медиана
+задержки здоровых целей (`domain/vpn_history.py::median_ms`). Строка пишется в
+`vpn/checks.py::_record_sample` сразу после `_apply_link_report`. Старше
+`[vpn] samples_keep_days` (14) история удаляется в цикле проверок (`_prune_samples`).
+
+Действие `check_history {hours, bucket_min}` → `{hours, bucket_min, series}`: история за окно,
+сжатая по интервалам времени (`domain/vpn_history.py::aggregate`, группировка по
+(server, transport, node), точки по интервалам с `reports/down/partial/median_ms`). Точки
+сжимаются, потому что сообщение роя ограничено 1 МиБ: 14 дней по 15-минутным интервалам на
+каждую связку — десятки тысяч точек, в одно сообщение они не помещаются. `hours` и `bucket_min`
+не целые → `ProtoError(ERR_BAD_REQUEST, ...)`; значения ограничиваются отрезками
+1 … `samples_keep_days * 24` и 1 … 1440, чтобы окно не вышло за хранящуюся историю.

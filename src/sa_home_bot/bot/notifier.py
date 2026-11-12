@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -14,7 +14,7 @@ from aiogram.exceptions import (
     TelegramNotFound,
     TelegramRetryAfter,
 )
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InputMediaPhoto, ReplyParameters
 
 from sa_home_bot.db.store import OUTBOX_KIND_INTERACTIVE
 from sa_home_bot.subscriptions.models import WILDCARD
@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 MAX_LEN = 4096
 MAX_RETRIES = 3
+MEDIA_GROUP_MAX = 10
 _TRANSIENT_BACKOFF_S = (0.0, 2.0, 5.0)
 TYPING_KEEPALIVE_INTERVAL_S = 4.0
 TYPING_MAX_TICKS = 450
@@ -359,6 +360,40 @@ class Notifier:
             ),
         )
         return msg.message_id if msg is not None else None
+
+    async def send_media_group(
+        self,
+        chat_id: int,
+        photos: Sequence[bytes],
+        *,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> list[int] | None:
+        if not photos:
+            return None
+        if len(photos) == 1:
+            message_id = await self.send_photo(
+                chat_id, photos[0], caption=caption, message_thread_id=message_thread_id
+            )
+            return [message_id] if message_id is not None else None
+        media = [
+            InputMediaPhoto(
+                media=BufferedInputFile(data, filename=f"photo{i}.png"),
+                caption=caption if i == 1 else None,
+                parse_mode="HTML",
+            )
+            for i, data in enumerate(photos[:MEDIA_GROUP_MAX], start=1)
+        ]
+        messages = await send_with_retry(
+            chat_id,
+            "альбом",
+            lambda: self._bot.send_media_group(
+                chat_id, media, message_thread_id=message_thread_id
+            ),
+        )
+        if messages is None:
+            return None
+        return [msg.message_id for msg in messages]
 
     async def send_photo_ex(
         self,

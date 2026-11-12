@@ -269,6 +269,26 @@ class DevlabNotifyConfig(BaseModel):
     facts_max_chars: int = Field(default=1500, ge=100)
 
 
+class VpnReportConfig(BaseModel):
+    enabled: bool = False
+    time: str = "09:00"
+    tz: str = "Asia/Almaty"
+    hours: int = Field(default=24, ge=1, le=72)
+    bucket_min: int = Field(default=15, ge=1, le=120)
+    llm_timeout_s: float = Field(default=90.0, gt=0)
+
+    @field_validator("time", mode="before")
+    @classmethod
+    def _validate_time(cls, value: Any) -> Any:
+        parts = value.split(":") if isinstance(value, str) else []
+        if len(parts) != 2 or not all(len(part) == 2 and part.isdigit() for part in parts):
+            raise ValueError("time: строка должна быть вида 'ЧЧ:ММ'")
+        hour, minute = (int(part) for part in parts)
+        if hour > 23 or minute > 59:
+            raise ValueError("time: значение должно быть в пределах 00:00–23:59")
+        return value
+
+
 class DevlabModelConfig(BaseModel):
     kind: Literal["openai", "llamacpp"] = "openai"
     base_url: str = ""
@@ -625,6 +645,7 @@ class VpnConfig(BaseModel):
     ignored_observers: list[str] = Field(default_factory=list)
     russia_observers: list[str] = Field(default_factory=list)
     check_target_events: bool = True
+    samples_keep_days: int = Field(default=14, ge=1)
     series_fail_threshold: int = Field(default=2, ge=1)
     series_clear_threshold: int = Field(default=1, ge=1)
     check_dispatch_timeout_s: float = Field(default=5.0, gt=0)
@@ -822,6 +843,7 @@ class Settings(BaseSettings):
     devlab_hub: DevlabHubConfig = Field(default_factory=DevlabHubConfig)
     devlab_models: DevlabModelsConfig = Field(default_factory=DevlabModelsConfig)
     devlab_notify: DevlabNotifyConfig = Field(default_factory=DevlabNotifyConfig)
+    vpn_report: VpnReportConfig = Field(default_factory=VpnReportConfig)
     net: NetConfig = Field(default_factory=NetConfig)
     vpn: VpnConfig = Field(default_factory=VpnConfig)
     vpn_check: VpnCheckConfig = Field(default_factory=VpnCheckConfig)

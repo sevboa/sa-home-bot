@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import socket
+from typing import Any
 
 from aiogram.exceptions import TelegramConflictError
 
@@ -41,6 +42,7 @@ from sa_home_bot.bot.setup import build_bot, build_dispatcher
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.bot.torrent_pending import PendingTorrents
+from sa_home_bot.bot.vpn_daily_runner import VpnDailyReport
 from sa_home_bot.bot.vpn_secrets import PendingVpnSecrets
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
@@ -61,66 +63,79 @@ log = logging.getLogger(__name__)
 STATE_CLEAN_SHUTDOWN = "last_shutdown_clean"
 
 
+async def _close_startup_resources(bot: Any | None, db: Database) -> None:
+    if bot is not None:
+        with contextlib.suppress(Exception):
+            await bot.session.close()
+    with contextlib.suppress(Exception):
+        await db.close()
+
+
 async def run(settings: Settings, *, instance: str = "") -> bool:
     runtime = Runtime()
 
     db = Database(settings.database.path)
-    await db.open()
-    await apply_migrations(db)
-    store = Store(db)
-
-    prev = await store.get_state(STATE_CLEAN_SHUTDOWN)
-    started_clean = prev in (None, "1")
-    await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
-
-    book = SubscriptionBook.from_config(
-        settings.subscriptions, settings.guest_subscriptions, settings.group_log.chat_ids
-    )
-    warn_group_log_config(book, settings.group_log.chat_ids)
+    bot = None
     try:
-        await people_seed.seed_local(store, settings, book)
-    except Exception:
-        log.exception("Карточки людей: перенос не удался, повтор при следующем старте")
+        await db.open()
+        await apply_migrations(db)
+        store = Store(db)
 
-    bot = build_bot(settings.telegram.token, settings.telegram.proxy)
-    notifier = Notifier(bot, outbox=store)
-    auto_egress = settings.telegram.proxy_mode == "auto"
-    if auto_egress:
-        await pick_startup_route(bot, startup_routes(settings.telegram))
-    bot_username = (
-        await call_with_network_retry(
-            lambda: bot.get_me(request_timeout=REQUEST_TIMEOUT_S),
-            what="get_me() при старте бота",
+        prev = await store.get_state(STATE_CLEAN_SHUTDOWN)
+        started_clean = prev in (None, "1")
+        await store.set_state(STATE_CLEAN_SHUTDOWN, "0")
+
+        book = SubscriptionBook.from_config(
+            settings.subscriptions, settings.guest_subscriptions, settings.group_log.chat_ids
         )
-    ).username
+        warn_group_log_config(book, settings.group_log.chat_ids)
+        try:
+            await people_seed.seed_local(store, settings, book)
+        except Exception:
+            log.exception("Карточки людей: перенос не удался, повтор при следующем старте")
 
-    await store.purge_group_messages_except(settings.group_log.chat_ids)
+        bot = build_bot(settings.telegram.token, settings.telegram.proxy)
+        notifier = Notifier(bot, outbox=store)
+        auto_egress = settings.telegram.proxy_mode == "auto"
+        if auto_egress:
+            await pick_startup_route(bot, startup_routes(settings.telegram))
+        bot_username = (
+            await call_with_network_retry(
+                lambda: bot.get_me(request_timeout=REQUEST_TIMEOUT_S),
+                what="get_me() при старте бота",
+            )
+        ).username
 
-    async def on_reconnect(downtime: float) -> None:
-        await broadcast_system(book, notifier, render_link_restored(downtime))
+        await store.purge_group_messages_except(settings.group_log.chat_ids)
 
-    bot.session.middleware(LinkWatchMiddleware(on_reconnect))
-    bot.session.middleware(GroupLogOutgoing(book, store))
-    gate = Gatekeeper(
-        settings.invites, store, book, GuestStore(settings.guests_path), notifier
-    )
-    if not gate.enabled:
-        log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
-    dp = build_dispatcher(book, gate, store)
+        async def on_reconnect(downtime: float) -> None:
+            await broadcast_system(book, notifier, render_link_restored(downtime))
 
-    await book.validate_on_startup(bot)
+        bot.session.middleware(LinkWatchMiddleware(on_reconnect))
+        bot.session.middleware(GroupLogOutgoing(book, store))
+        gate = Gatekeeper(
+            settings.invites, store, book, GuestStore(settings.guests_path), notifier
+        )
+        if not gate.enabled:
+            log.info("Приглашения выключены (нет пакета инстанса или [invites].enabled=false)")
+        dp = build_dispatcher(book, gate, store)
 
-    await set_bot_commands(bot, book)
+        await book.validate_on_startup(bot)
 
-    last_outage = None
-    if not started_clean:
-        loop = asyncio.get_running_loop()
-        events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
-        if events:
-            last_outage = events[0]
-    await broadcast_system(
-        book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
-    )
+        await set_bot_commands(bot, book)
+
+        last_outage = None
+        if not started_clean:
+            loop = asyncio.get_running_loop()
+            events, _ = await loop.run_in_executor(None, read_power_events_sync, 0, 1)
+            if events:
+                last_outage = events[0]
+        await broadcast_system(
+            book, notifier, render_startup(clean=started_clean, last_outage=last_outage)
+        )
+    except BaseException:
+        await _close_startup_resources(bot, db)
+        raise
 
     dispatcher = TelegramEventDispatcher(notifier, book, store)
     link = ServiceLink(
@@ -251,6 +266,16 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             notifier=notifier,
         )
         devlab_notify_task = asyncio.create_task(devlab_notifier.run(), name="devlab-notify")
+    vpn_daily_task: asyncio.Task | None = None
+    if settings.vpn_report.enabled:
+        vpn_daily_report = VpnDailyReport(
+            get_node_link=_get_node_link,
+            store=store,
+            config=settings,
+            book=book,
+            notifier=notifier,
+        )
+        vpn_daily_task = asyncio.create_task(vpn_daily_report.run(), name="vpn-daily")
     people_seed_task = asyncio.create_task(
         people_seed.graph_seed_loop(store, book, node_link), name="people-seed"
     )
@@ -309,6 +334,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             active_ai_chats=active_ai_chats,
             away_task=away_task,
             devlab_notify_task=devlab_notify_task,
+            vpn_daily_task=vpn_daily_task,
             people_seed_task=people_seed_task,
             egress=egress,
             outbox_flusher=outbox_flusher,
@@ -343,6 +369,7 @@ async def _shutdown(
     db: Database,
     away_task: asyncio.Task | None = None,
     devlab_notify_task: asyncio.Task | None = None,
+    vpn_daily_task: asyncio.Task | None = None,
     people_seed_task: asyncio.Task | None = None,
     egress: EgressManager | None = None,
     outbox_flusher: OutboxFlusher | None = None,
@@ -386,6 +413,11 @@ async def _shutdown(
             pass
         except Exception:
             log.warning("devlab-notify-задача упала при остановке", exc_info=True)
+
+    if vpn_daily_task is not None and not vpn_daily_task.done():
+        vpn_daily_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await vpn_daily_task
 
     if people_seed_task is not None and not people_seed_task.done():
         people_seed_task.cancel()
