@@ -18,6 +18,7 @@ from sa_home_bot.domain.vpn_check import (
     reconcile_vpn_check,
     rollup_status,
 )
+from sa_home_bot.domain.vpn_history import Sample, aggregate, median_ms
 from sa_home_bot.domain.vpn_link import (
     LEVEL_DOWN,
     SCOPES,
@@ -88,6 +89,7 @@ class ChecksMixin:
             await asyncio.sleep(self._cfg.check_interval_s)
             try:
                 await self._dispatch_checks()
+                await self._prune_samples()
             except Exception:
                 log.exception("vpn: сбой цикла проверок доступности")
 
@@ -113,12 +115,21 @@ class ChecksMixin:
             error = str(error_raw) if error_raw else None
             run = runs.setdefault(
                 (server, transport),
-                {"failed": [], "recovered": [], "total": 0, "bad": 0, "bad_targets": []},
+                {
+                    "failed": [],
+                    "recovered": [],
+                    "total": 0,
+                    "bad": 0,
+                    "bad_targets": [],
+                    "ok_ms": [],
+                },
             )
             run["total"] += 1
             run["bad"] += not ok
             if not ok:
                 run["bad_targets"].append(str(target))
+            if ok and ms is not None:
+                run["ok_ms"].append(ms)
             to_status = await self._apply_check_result(
                 node, server, transport, str(target), ok, ms, error, now
             )
@@ -151,6 +162,7 @@ class ChecksMixin:
                     },
                 )
             data = await self._apply_link_report(node, server, transport, run, now)
+            await self._record_sample(node, server, transport, run, now)
             if data is not None:
                 link_events.append(data)
         after = await self._scope_levels()
@@ -228,6 +240,67 @@ class ChecksMixin:
             "to": transition.to_announced,
             "bad_targets": run["bad_targets"],
             "total": run["total"],
+        }
+
+    async def _record_sample(
+        self,
+        node: str,
+        server: str,
+        transport: str,
+        run: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        await self._db.conn.execute(
+            "INSERT INTO vpn_check_samples (at, node, server, transport, total, bad, median_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                now.isoformat(),
+                node,
+                server,
+                transport,
+                run["total"],
+                run["bad"],
+                median_ms(run["ok_ms"]),
+            ),
+        )
+        await self._db.conn.commit()
+
+    async def _prune_samples(self) -> None:
+        threshold = (utc_now() - timedelta(days=self._cfg.samples_keep_days)).isoformat()
+        await self._db.conn.execute("DELETE FROM vpn_check_samples WHERE at < ?", (threshold,))
+        await self._db.conn.commit()
+
+    async def _check_history(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            hours = int(args.get("hours", 24))
+            bucket_min = int(args.get("bucket_min", 15))
+        except (ValueError, TypeError):
+            raise ProtoError(ERR_BAD_REQUEST, "hours и bucket_min — целые числа") from None
+        hours = min(max(hours, 1), self._cfg.samples_keep_days * 24)
+        bucket_min = min(max(bucket_min, 1), 1440)
+        since = (utc_now() - timedelta(hours=hours)).isoformat()
+        cur = await self._db.conn.execute(
+            "SELECT at, node, server, transport, total, bad, median_ms FROM vpn_check_samples "
+            "WHERE at >= ?",
+            (since,),
+        )
+        rows = await cur.fetchall()
+        samples = [
+            Sample(
+                at=datetime.fromisoformat(row["at"]),
+                node=row["node"],
+                server=row["server"],
+                transport=row["transport"],
+                total=row["total"],
+                bad=row["bad"],
+                median_ms=row["median_ms"],
+            )
+            for row in rows
+        ]
+        return {
+            "hours": hours,
+            "bucket_min": bucket_min,
+            "series": aggregate(samples, bucket_min * 60),
         }
 
     async def _scope_levels(self) -> dict[str, dict[str, str]]:

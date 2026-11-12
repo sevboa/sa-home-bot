@@ -625,6 +625,7 @@ class VpnConfig(BaseModel):
     ignored_observers: list[str] = Field(default_factory=list)
     russia_observers: list[str] = Field(default_factory=list)
     check_target_events: bool = True
+    samples_keep_days: int = Field(default=14, ge=1)
     series_fail_threshold: int = Field(default=2, ge=1)
     series_clear_threshold: int = Field(default=1, ge=1)
     check_dispatch_timeout_s: float = Field(default=5.0, gt=0)
