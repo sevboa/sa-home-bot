@@ -576,6 +576,19 @@ CREATE TABLE IF NOT EXISTS vpn_link_states (
     PRIMARY KEY (node, server, transport)
 );
 
+-- История замеров (65.5, 2026-11-12): одна строка на связку за принятый отчёт.
+-- total — число целей, bad — плохих, median_ms — медиана задержки здоровых целей.
+CREATE TABLE IF NOT EXISTS vpn_check_samples (
+    at         TEXT NOT NULL,
+    node       TEXT NOT NULL,
+    server     TEXT NOT NULL,
+    transport  TEXT NOT NULL,
+    total      INTEGER NOT NULL,
+    bad        INTEGER NOT NULL,
+    median_ms  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_vpn_check_samples_at ON vpn_check_samples(at);
+
 -- Серийная проверка из РФ (63.1.5): одна строка на (наблюдатель, сервер, транспорт),
 -- last_report — JSON последнего отчёта vpn_check.series.
 CREATE TABLE IF NOT EXISTS vpn_series_states (

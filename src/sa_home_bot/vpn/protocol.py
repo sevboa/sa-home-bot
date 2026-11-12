@@ -119,6 +119,7 @@ ACTION_REPORT_SERIES = "report_series"
 ACTION_CHECK_NOW = "check_now"
 ACTION_CHECK_STATUS = "check_status"
 ACTION_CHECK_SCOPES = "check_scopes"
+ACTION_CHECK_HISTORY = "check_history"
 
 ACTION_PROXY_LINK = "proxy_link"
 ACTION_PROXY_ROTATE_SECRET = "proxy_rotate_secret"
