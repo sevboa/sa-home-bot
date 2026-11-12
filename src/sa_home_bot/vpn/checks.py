@@ -326,6 +326,8 @@ class ChecksMixin:
         rows = await cur.fetchall()
         return {
             "scopes": await self._scope_levels(),
+            "russia": list(self._cfg.russia_observers),
+            "ignored": list(self._cfg.ignored_observers),
             "links": [
                 {
                     "node": row["node"],

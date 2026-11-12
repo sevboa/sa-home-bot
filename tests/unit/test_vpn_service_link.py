@@ -293,6 +293,8 @@ async def test_check_scopes_returns_scopes_and_links(scope_env):
     result = await svc.run_command(vpn_protocol.ACTION_CHECK_SCOPES, {})
     assert set(result["scopes"]) == {"global", "russia"}
     assert result["scopes"]["russia"]["jeeves"] == "ok"
+    assert result["russia"] == ["osip"]
+    assert result["ignored"] == ["zakhar"]
     assert isinstance(result["links"], list)
     row = result["links"][0]
     assert row["node"] == "alfred"
