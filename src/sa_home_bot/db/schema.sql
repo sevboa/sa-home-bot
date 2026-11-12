@@ -576,6 +576,30 @@ CREATE TABLE IF NOT EXISTS vpn_link_states (
     PRIMARY KEY (node, server, transport)
 );
 
+-- Слои «сеть» и «нода» (65.8, 2026-11-12). layer = net: строка на (наблюдатель, сервер) —
+-- отвечает ли адрес сервера наблюдателю; layer = node: node пуст, строка на сервер — отвечает
+-- ли его служба vpn рою. notified — ушло ли оповещение о поломке (восстановление сообщается,
+-- только если сообщали поломку).
+CREATE TABLE IF NOT EXISTS vpn_layer_states (
+    layer            TEXT NOT NULL,
+    node             TEXT NOT NULL,
+    server           TEXT NOT NULL,
+    level            TEXT NOT NULL,
+    candidate        TEXT NOT NULL,
+    candidate_count  INTEGER NOT NULL DEFAULT 0,
+    announced        TEXT NOT NULL,
+    notified         INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (layer, node, server)
+);
+
+-- Сайты, недоступные через все рабочие связки (65.8): такой сайт не входит в уровень связки.
+CREATE TABLE IF NOT EXISTS vpn_resource_states (
+    target       TEXT PRIMARY KEY,
+    bad_since    TEXT NOT NULL,
+    last_bad_at  TEXT NOT NULL
+);
+
 -- История замеров (65.5, 2026-11-12): одна строка на связку за принятый отчёт.
 -- total — число целей, bad — плохих, median_ms — медиана задержки здоровых целей.
 CREATE TABLE IF NOT EXISTS vpn_check_samples (

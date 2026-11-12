@@ -57,6 +57,9 @@ _TUNNEL_READY_DELAY_S = 1.0
 _REALITY_STARTUP_DELAY_S = 0.5
 _REALITY_STOP_GRACE_S = 5.0
 
+_NET_CONNECT_TIMEOUT_S = 5.0
+_NET_TOTAL_TIMEOUT_S = 8.0
+
 
 async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
     try:
@@ -83,6 +86,7 @@ class VpnCheckService:
         self._reality_procs: dict[str, asyncio.subprocess.Process] = {}
         self._slot_locks: dict[str, asyncio.Lock] = {}
         self._series_last: dict[str, dict] = {}
+        self._net_targets: dict[str, RawTarget] = {}
 
     def _slot_lock(self, slot: ProbeSlot) -> asyncio.Lock:
         lock = self._slot_locks.get(slot.netns)
@@ -157,6 +161,7 @@ class VpnCheckService:
                 "server": server,
                 "skipped": "нет локально настроенного тоннеля к этому серверу",
             }
+        self._remember_net_target(server, args.get("net_target"))
         if action == ACTION_SERIES:
             asyncio.create_task(self._series_run(slots, mode), name="vpn-series-run")
             return {"accepted": True, "server": server, "mode": mode}
@@ -174,15 +179,72 @@ class VpnCheckService:
     async def _run_and_report(
         self, server: str, slots: list[ProbeSlot], targets: list[str]
     ) -> None:
+        net = await self._net_probe(slots)
         results: list[dict[str, Any]] = []
         for slot in slots:
             results.extend(await self._check_slot(slot, targets))
-        await self._report_to_vpn(ACTION_REPORT_CHECK, results)
+        extra = {"net": {server: net}} if net is not None else {}
+        await self._report_to_vpn(ACTION_REPORT_CHECK, results, extra)
 
-    async def _report_to_vpn(self, action: str, results: list[dict[str, Any]]) -> None:
+    def _remember_net_target(self, server: str, raw: object) -> None:
+        if not isinstance(raw, dict):
+            return
+        try:
+            self._net_targets[server] = RawTarget(host=str(raw["host"]), port=int(raw["port"]))
+        except (KeyError, ValueError, TypeError):
+            return
+
+    async def _net_probe(self, slots: list[ProbeSlot]) -> dict[str, Any] | None:
+        for slot in slots:
+            target = self._net_targets.get(slot.server)
+            if target is None or slot.transport not in REALITY_PROBE_TRANSPORTS:
+                continue
+            host = f"[{target.host}]" if ":" in target.host else target.host
+            ip_path = shutil.which("ip") or "ip"
+            code, out, err = await _run(
+                "sudo",
+                "-n",
+                ip_path,
+                "netns",
+                "exec",
+                slot.netns,
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "--connect-timeout",
+                str(_NET_CONNECT_TIMEOUT_S),
+                "-m",
+                str(_NET_TOTAL_TIMEOUT_S),
+                "-w",
+                "%{time_connect}",
+                f"http://{host}:{target.port}/",
+                timeout=_NET_TOTAL_TIMEOUT_S + 3.0,
+            )
+            if looks_like_sudo_message(err):
+                return None
+            try:
+                connect_s = float(out.strip().replace(",", "."))
+            except ValueError:
+                connect_s = 0.0
+            if connect_s > 0:
+                return {"ok": True, "ms": int(connect_s * 1000), "error": None}
+            log.warning(
+                "vpn_check: %s не отвечает по сети (%s:%s, curl %s)",
+                slot.server,
+                target.host,
+                target.port,
+                code,
+            )
+            return {"ok": False, "ms": None, "error": f"нет TCP до {target.host}:{target.port}"}
+        return None
+
+    async def _report_to_vpn(
+        self, action: str, results: list[dict[str, Any]], extra: dict[str, Any] | None = None
+    ) -> None:
         try:
             reports = await vpn_nodes.fanout(
-                self._node_link, action, {"node": self._node, "results": results}
+                self._node_link, action, {"node": self._node, "results": results, **(extra or {})}
             )
             if not reports:
                 log.warning("vpn_check: результат некуда деть — vpn в рое сейчас не держит никто")

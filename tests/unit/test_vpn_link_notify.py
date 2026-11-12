@@ -113,5 +113,35 @@ def test_dedup_key_ignores_scopes_and_depends_on_to():
     assert key(LINK_CHANGED, {**first, "to": "ok"}) != key(LINK_CHANGED, first)
     assert key(LINK_CHANGED, first) == "vpn_link_changed|osip|jeeves|awg|down"
     outage = {**OUTAGE_BASE, "from": "ok", "to": "down", "scopes": SCOPES}
-    assert key(OUTAGE, outage) == "vpn_outage|russia|jeeves|down"
+    assert key(OUTAGE, outage) == "vpn_outage|vpn|russia|jeeves|down"
+    node = {"layer": "node", "scope": None, "server": "jeeves", "to": "down"}
+    assert key(OUTAGE, node) == "vpn_outage|node||jeeves|down"
     assert key(OUTAGE, {**outage, "to": "ok"}) != key(OUTAGE, outage)
+
+
+def test_outage_text_names_the_broken_layer():
+    net = {**OUTAGE_BASE, "layer": "net", "from": "ok", "to": "down"}
+    assert notify.outage_text(net, label_of) == "🚨 🇳🇱 <code>jeeves</code> — сервер не отвечает 🇷🇺"
+    back = {**net, "from": "down", "to": "ok"}
+    assert (
+        notify.outage_text(back, label_of) == "✅ 🇳🇱 <code>jeeves</code> — сервер снова отвечает 🇷🇺"
+    )
+    node = {"layer": "node", "scope": None, "server": "jeeves", "from": "ok", "to": "down"}
+    assert notify.outage_text(node, label_of) == "🚨 🇳🇱 <code>jeeves</code> — нода недоступна"
+    assert notify.outage_text({**node, "layer": "vpn"}, label_of) is None
+    assert notify.outage_text({**net, "layer": "moon"}, label_of) is None
+
+
+def test_layers_lines_mute_layers_under_the_broken_one():
+    layers = {
+        "global": {"jeeves": {"net": "ok", "node": "ok", "vpn": "partial"}},
+        "russia": {
+            "jeeves": {"net": "down", "node": "ok", "vpn": "ok"},
+            "wooster": {"net": None, "node": "down", "vpn": "ok"},
+        },
+    }
+    assert notify.layers_lines(layers, label_of) == [
+        "🌍 🇳🇱 🟢🟢🟡",
+        "🇷🇺 🇳🇱 🔴⚪⚪ · 🇺🇸 ⚪🔴⚪",
+    ]
+    assert notify.layers_lines(None, label_of) == []

@@ -309,3 +309,65 @@ def test_caption_keeps_episodes_when_it_fits():
         "",
         "короткий итог",
     ]
+
+
+BOTH_SCOPES = {"scopes": {}, "russia": ["osip"], "ignored": []}
+
+
+def _down(node: str, first: int, last: int) -> dict:
+    return _series(node, "jeeves", "awg", [_point(s, 1, 1, None) for s in range(first, last + 1)])
+
+
+def _alive(node: str, first: int, last: int) -> dict:
+    return _series(node, "jeeves", "awg", [_point(s, 1, 0, 200) for s in range(first, last + 1)])
+
+
+@pytest.mark.parametrize(
+    ("other", "cause"),
+    [
+        (_down("alfred", 8, 14), " (сервер)"),
+        (_alive("alfred", 0, 40), " (направление)"),
+        (_alive("alfred", 30, 40), ""),
+    ],
+)
+def test_episode_cause_comes_from_the_other_scope(other: dict, cause: str) -> None:
+    history = _history(_down("osip", 10, 12), other)
+    episodes = daily.outage_episodes(history, BOTH_SCOPES, now=NOW, tz=TZ, label_of=label_of)
+    assert f"🇷🇺 🇳🇱 jeeves: нет связи 11:00–11:45{cause}" in episodes
+
+
+def test_panel_gets_band_per_episode_with_cause():
+    history = _history(_down("osip", 10, 12), _alive("alfred", 0, 40))
+    panels = daily.build_panels(history, BOTH_SCOPES, now=NOW, tz=TZ, label_of=label_of)
+    russia = _panel(panels, TITLE_RUSSIA)
+    assert [(band.start, band.end, band.label) for band in russia.bands] == [
+        (10, 12, "направление")
+    ]
+    assert _panel(panels, TITLE_GLOBAL).bands == ()
+
+
+def test_caption_shows_layers_when_server_sends_them():
+    scopes = {
+        **EMPTY_SCOPES,
+        "scopes": {"global": {"jeeves": "ok"}},
+        "layers": {"global": {"jeeves": {"net": "ok", "node": "ok", "vpn": "ok"}}},
+    }
+    lines = daily.build_caption(_history(), scopes, label_of=label_of).split("\n")
+    assert lines[0] == "📊 <b>VPN за сутки</b> (сеть · нода · VPN)"
+    assert lines[1] == "🌍 🇳🇱 🟢🟢🟢"
+
+
+def test_resource_lines_follow_outage_episodes():
+    scopes = {
+        **BOTH_SCOPES,
+        "resources": [
+            {
+                "target": "https://dead.example/path",
+                "since": "2026-11-11T20:00:00+00:00",
+                "until": "2026-11-11T21:30:00+00:00",
+            },
+            {"target": "", "since": "x", "until": "y"},
+        ],
+    }
+    episodes = daily.outage_episodes(_history(), scopes, now=NOW, tz=TZ, label_of=label_of)
+    assert episodes == ["🌐 dead.example: не открывался ни через один сервер 01:00–02:30"]
