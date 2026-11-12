@@ -36,6 +36,12 @@ def server_title(server: str, label: str) -> str:
     return f"{flag} {code}" if flag else code
 
 
+def server_mark(server: object, label_of: Callable[[str], str]) -> str:
+    name = html.escape(str(server))
+    flag = server_flag(label_of(str(server)))
+    return f"{name} {flag}" if flag else name
+
+
 def scopes_line(scopes: object, label_of: Callable[[str], str]) -> str:
     if not isinstance(scopes, dict):
         return ""
@@ -47,10 +53,9 @@ def scopes_line(scopes: object, label_of: Callable[[str], str]) -> str:
         marks = []
         for server in servers:
             icon = LEVEL_ICON.get(servers[server], UNKNOWN_LEVEL_ICON)
-            name = server_flag(label_of(server)) or html.escape(str(server))
-            marks.append(f"{name}{icon}")
-        parts.append(f"{SCOPE_ICON[scope]} {' '.join(marks)}")
-    return " · ".join(parts)
+            marks.append(f"{server_mark(server, label_of)}{icon}")
+        parts.append(f"{SCOPE_ICON[scope]} {' · '.join(marks)}")
+    return "\n".join(parts)
 
 
 def link_changed_text(data: dict, label_of: Callable[[str], str]) -> str | None:
@@ -91,8 +96,7 @@ def layers_lines(layers: object, label_of: Callable[[str], str]) -> list[str]:
                     continue
                 icons.append(LEVEL_ICON.get(level, UNKNOWN_LEVEL_ICON))
                 broken = level == vpn_link.LEVEL_DOWN
-            name = server_flag(label_of(server)) or html.escape(str(server))
-            marks.append(f"{name} {''.join(icons)}")
+            marks.append(f"{server_mark(server, label_of)} {''.join(icons)}")
         if marks:
             lines.append(f"{SCOPE_ICON[scope]} {' · '.join(marks)}")
     return lines

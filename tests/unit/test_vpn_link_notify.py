@@ -17,7 +17,7 @@ SCOPES = {
     "global": {"jeeves": "ok", "wooster": "ok"},
     "russia": {"jeeves": "down", "wooster": "partial"},
 }
-SCOPES_LINE = "🌍 🇳🇱🟢 🇺🇸🟢 · 🇷🇺 🇳🇱🔴 🇺🇸🟡"
+SCOPES_LINE = "🌍 jeeves 🇳🇱🟢 · wooster 🇺🇸🟢\n🇷🇺 jeeves 🇳🇱🔴 · wooster 🇺🇸🟡"
 LINK_BASE = {"node": "osip", "server": "jeeves", "transport": "awg"}
 OUTAGE_BASE = {"scope": "russia", "server": "jeeves"}
 
@@ -141,7 +141,7 @@ def test_layers_lines_mute_layers_under_the_broken_one():
         },
     }
     assert notify.layers_lines(layers, label_of) == [
-        "🌍 🇳🇱 🟢🟢🟡",
-        "🇷🇺 🇳🇱 🔴⚪⚪ · 🇺🇸 ⚪🔴⚪",
+        "🌍 jeeves 🇳🇱 🟢🟢🟡",
+        "🇷🇺 jeeves 🇳🇱 🔴⚪⚪ · wooster 🇺🇸 ⚪🔴⚪",
     ]
     assert notify.layers_lines(None, label_of) == []

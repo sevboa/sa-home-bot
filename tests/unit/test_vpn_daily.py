@@ -211,7 +211,8 @@ def test_caption_best_lines_and_no_working_connections():
     caption = daily.build_caption(history, SCOPES, label_of=label_of)
     assert caption.split("\n") == [
         "📊 <b>VPN за сутки</b>",
-        "🌍 🇳🇱🟢 · 🇷🇺 🇺🇸🟡 zee🔴",
+        "🌍 jeeves 🇳🇱🟢",
+        "🇷🇺 wooster 🇺🇸🟡 · zee🔴",
         "🌍 лучшее: 🇳🇱 jeeves · AmneziaVPN — 99 %, 540 мс",
         "🇷🇺 рабочих подключений нет",
     ]
@@ -354,7 +355,7 @@ def test_caption_shows_layers_when_server_sends_them():
     }
     lines = daily.build_caption(_history(), scopes, label_of=label_of).split("\n")
     assert lines[0] == "📊 <b>VPN за сутки</b> (сеть · нода · VPN)"
-    assert lines[1] == "🌍 🇳🇱 🟢🟢🟢"
+    assert lines[1] == "🌍 jeeves 🇳🇱 🟢🟢🟢"
 
 
 def test_resource_lines_follow_outage_episodes():
