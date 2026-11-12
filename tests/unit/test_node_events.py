@@ -4,6 +4,7 @@ import pytest
 from aiogram.types import InputRichBlockThinking
 
 import sa_home_bot.bot.node_events as node_events
+from sa_home_bot.bot import vpn_link_notify, vpn_nodes
 from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
     ALBERT_ASLEEP_MD,
@@ -1034,3 +1035,35 @@ async def test_vpn_check_repeat_after_window_shown_again(monkeypatch):
     clock[0] = node_events.VPN_EVENT_DEDUP_S + 1.0
     await handler(event)
     assert len(notifier.sent) == 2
+
+
+def _link_book() -> SubscriptionBook:
+    return SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(name="subscriber", chat_id=1, event_types=["vpn_link_changed"]),
+            SubscriptionConfig(
+                name="owner",
+                chat_id=2,
+                event_types=["*"],
+                allowed_commands=["*"],
+                except_event_types=["vpn_link_changed"],
+            ),
+        ]
+    )
+
+
+async def test_vpn_link_event_goes_to_accepting_subs_and_repeats_are_dropped():
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(_link_book(), notifier, store)
+    data = {"node": "osip", "server": "jeeves", "transport": "awg", "from": "ok", "to": "down"}
+    event = _vpn_event(vpn_protocol.EVENT_VPN_LINK_CHANGED, data)
+
+    await handler(event)
+    expected = vpn_link_notify.link_changed_text(data, vpn_nodes.known_server_label)
+    assert notifier.sent == [(1, expected)]
+    assert store.recorded_events == [(vpn_protocol.EVENT_VPN_LINK_CHANGED, "osip", expected, ANY)]
+
+    await handler(event)
+    assert len(notifier.sent) == 1
+    assert len(store.recorded_events) == 1
