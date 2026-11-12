@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, tzinfo
 
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.bot import vpn_link_notify as notify
-from sa_home_bot.bot.vpn_report_chart import MAX_MS, ChartPanel
+from sa_home_bot.bot.vpn_report_chart import MAX_MS, ChartBand, ChartPanel
 from sa_home_bot.domain import vpn_link
 from sa_home_bot.domain.vpn_history import bucket_start, median_ms
 from sa_home_bot.utils.text import clip
@@ -35,6 +35,12 @@ ALL_PERIOD_WORD = "весь период"
 BEST_WORD = "лучшее"
 NO_WORKING_WORD = "рабочих подключений нет"
 CAPTION_HEAD = "📊 <b>VPN за сутки</b>"
+LAYERS_LEGEND = "сеть · нода · VPN"
+CAUSE_SERVER = "сервер"
+CAUSE_DIRECTION = "направление"
+MAX_RESOURCES = 2
+RESOURCE_ICON = "🌐"
+RESOURCE_WORD = "не открывался ни через один сервер"
 PERCENT_JOIN = " %"
 MS_JOIN = " мс"
 REGIONAL_INDICATOR_FIRST = 0x1F1E6
@@ -221,6 +227,7 @@ def build_panels(
     servers = servers_of(history, scopes)
     period = _period(grid)
     labels = _x_labels(grid, int(history.get("hours") or DEFAULT_HOURS))
+    episodes = find_episodes(history, scopes, grid)
     panels = []
     for scope in vpn_link.SCOPES:
         group = by_scope.get(scope, {})
@@ -238,6 +245,11 @@ def build_panels(
                     period=period,
                     x_labels=labels,
                     lines=lines,
+                    bands=tuple(
+                        ChartBand(start=episode.first, end=episode.last, label=episode.cause)
+                        for episode in episodes
+                        if episode.scope == scope and episode.server == server
+                    ),
                 )
             )
     return panels
@@ -295,10 +307,16 @@ def _best_line(scope: str, lines: Sequence[Line], label_of: Callable[[str], str]
 class Episode:
     scope: str
     server: str
+    first: int
+    last: int
     start: datetime
     end: datetime
-    length: int
     order: int
+    cause: str = ""
+
+    @property
+    def length(self) -> int:
+        return self.last - self.first + 1
 
     def text(self, label_of: Callable[[str], str], grid: Grid) -> str:
         if self.length == grid.slots:
@@ -306,21 +324,19 @@ class Episode:
         else:
             span = f"{self.start:{TIME_FORMAT}}{EPISODE_JOIN}{self.end:{TIME_FORMAT}}"
         server = _server_name(self.server, label_of)
-        return f"{notify.SCOPE_ICON[self.scope]} {server}: {OUTAGE_WORD} {span}"
+        text = f"{notify.SCOPE_ICON[self.scope]} {server}: {OUTAGE_WORD} {span}"
+        return f"{text} ({self.cause})" if self.cause else text
 
 
-def _outage_slots(values_by_line: Sequence[tuple[int | None, ...]]) -> list[bool]:
-    hits = []
+def _outage_slots(values_by_line: Sequence[tuple[int | None, ...]]) -> list[bool | None]:
+    hits: list[bool | None] = []
     for slot in range(len(values_by_line[0])):
-        values = [line[slot] for line in values_by_line]
-        hits.append(
-            any(value is not None for value in values)
-            and all(value == MAX_MS for value in values if value is not None)
-        )
+        values = [line[slot] for line in values_by_line if line[slot] is not None]
+        hits.append(all(value == MAX_MS for value in values) if values else None)
     return hits
 
 
-def _runs(hits: Sequence[bool]) -> list[tuple[int, int]]:
+def _runs(hits: Sequence[bool | None]) -> list[tuple[int, int]]:
     runs = []
     start = None
     for slot, hit in enumerate(hits):
@@ -334,6 +350,68 @@ def _runs(hits: Sequence[bool]) -> list[tuple[int, int]]:
     return runs
 
 
+def episode_cause(first: int, last: int, other: Sequence[bool | None] | None) -> str:
+    if other is None:
+        return ""
+    seen = [hit for hit in other[first : last + 1] if hit is not None]
+    if not seen:
+        return ""
+    return CAUSE_SERVER if any(seen) else CAUSE_DIRECTION
+
+
+def find_episodes(history: dict, scopes: dict, grid: Grid) -> list[Episode]:
+    by_scope = observations(history, scopes)
+    hits: dict[tuple[str, str], list[bool | None]] = {}
+    for scope in vpn_link.SCOPES:
+        group = by_scope.get(scope, {})
+        for server in sorted({pair[0] for pair in group}):
+            values_by_line = [
+                line_values(group[(server, transport)], grid)
+                for transport in sorted(key[1] for key in group if key[0] == server)
+            ]
+            if values_by_line:
+                hits[(scope, server)] = _outage_slots(values_by_line)
+
+    episodes: list[Episode] = []
+    for (scope, server), slots in hits.items():
+        others = [hits[key] for key in hits if key[1] == server and key[0] != scope]
+        for first, last in _runs(slots):
+            episodes.append(
+                Episode(
+                    scope=scope,
+                    server=server,
+                    first=first,
+                    last=last,
+                    start=grid.starts[first],
+                    end=grid.end_of(last),
+                    order=len(episodes),
+                    cause=episode_cause(first, last, others[0] if others else None),
+                )
+            )
+    return episodes
+
+
+def _resource_name(target: str) -> str:
+    return target.split("://", 1)[-1].split("/", 1)[0]
+
+
+def resource_lines(scopes: dict, *, tz: tzinfo) -> list[str]:
+    lines = []
+    for raw in scopes.get("resources") or []:
+        if not isinstance(raw, dict):
+            continue
+        since, until = _moment(raw.get("since")), _moment(raw.get("until"))
+        target = str(raw.get("target") or "")
+        if not target or since is None or until is None:
+            continue
+        first = since.astimezone(tz).strftime(TIME_FORMAT)
+        last = until.astimezone(tz).strftime(TIME_FORMAT)
+        span = f"{first}{EPISODE_JOIN}{last}"
+        name = html.escape(_resource_name(target))
+        lines.append(f"{RESOURCE_ICON} {name}: {RESOURCE_WORD} {span}")
+    return lines[:MAX_RESOURCES]
+
+
 def outage_episodes(
     history: dict,
     scopes: dict,
@@ -343,34 +421,13 @@ def outage_episodes(
     label_of: Callable[[str], str],
 ) -> list[str]:
     grid = grid_of(history, now=now, tz=tz)
-    by_scope = observations(history, scopes)
-    episodes: list[Episode] = []
-    for scope in vpn_link.SCOPES:
-        group = by_scope.get(scope, {})
-        for server in sorted({pair[0] for pair in group}):
-            values_by_line = [
-                line_values(group[(server, transport)], grid)
-                for transport in sorted(key[1] for key in group if key[0] == server)
-            ]
-            if not values_by_line:
-                continue
-            for first, last in _runs(_outage_slots(values_by_line)):
-                episodes.append(
-                    Episode(
-                        scope=scope,
-                        server=server,
-                        start=grid.starts[first],
-                        end=grid.end_of(last),
-                        length=last - first + 1,
-                        order=len(episodes),
-                    )
-                )
-
+    episodes = find_episodes(history, scopes, grid)
     longest = sorted(episodes, key=lambda episode: (-episode.length, episode.order))[:MAX_EPISODES]
-    return [
+    texts = [
         episode.text(label_of, grid)
         for episode in sorted(longest, key=lambda episode: (episode.start, episode.order))
     ]
+    return [*texts, *resource_lines(scopes, tz=tz)]
 
 
 def _assemble(head: Sequence[str], episodes: Sequence[str], conclusion: str) -> str:
@@ -389,9 +446,14 @@ def build_caption(
     episodes: Sequence[str] = (),
 ) -> str:
     head = [CAPTION_HEAD]
-    line = notify.scopes_line(scopes.get("scopes"), label_of)
-    if line:
-        head.append(line)
+    layers = notify.layers_lines(scopes.get("layers"), label_of)
+    if layers:
+        head[0] = f"{CAPTION_HEAD} ({LAYERS_LEGEND})"
+        head.extend(layers)
+    else:
+        line = notify.scopes_line(scopes.get("scopes"), label_of)
+        if line:
+            head.append(line)
     stats = panel_lines(history, scopes)
     for scope in vpn_link.SCOPES:
         head.append(_best_line(scope, stats.get(scope, []), label_of))

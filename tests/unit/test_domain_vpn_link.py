@@ -1,5 +1,6 @@
 import pytest
 
+from sa_home_bot.domain import vpn_link
 from sa_home_bot.domain.vpn_link import (
     LEVEL_DOWN,
     LEVEL_OK,
@@ -160,3 +161,37 @@ def test_scope_levels_groups_by_scope():
 
 def test_scope_levels_empty():
     assert scope_levels([], [], []) == {SCOPE_GLOBAL: {}, SCOPE_RUSSIA: {}}
+
+
+def test_resource_bad_target_needs_two_working_links():
+    link_a, link_b, link_c = ("a", "s", "awg"), ("b", "s", "awg"), ("c", "s", "awg")
+    rows = [
+        (link_a, "one", True),
+        (link_a, "two", False),
+        (link_b, "one", True),
+        (link_b, "two", False),
+        (link_c, "one", False),
+        (link_c, "two", False),
+    ]
+    assert vpn_link.resource_bad_targets(rows) == {"two"}
+    assert vpn_link.resource_bad_targets(rows[:2] + rows[4:]) == set()
+    assert vpn_link.resource_bad_targets([*rows[:3], (link_b, "two", True)]) == set()
+
+
+def test_effective_scopes_put_outer_layers_over_vpn():
+    vpn = {"global": {"jeeves": "ok", "wooster": "partial"}, "russia": {"jeeves": "ok"}}
+    net = {"global": {"jeeves": "ok"}, "russia": {"jeeves": "down", "wooster": "down"}}
+    assert vpn_link.effective_scopes(vpn, net, {"wooster": "down"}) == {
+        "global": {"jeeves": "ok", "wooster": "down"},
+        "russia": {"jeeves": "down", "wooster": "down"},
+    }
+
+
+def test_layer_table_lists_three_layers_per_server():
+    table = vpn_link.layer_table(
+        {"global": {"jeeves": "ok"}, "russia": {}},
+        {"global": {}, "russia": {"jeeves": "down"}},
+        {"jeeves": "ok"},
+    )
+    assert table["global"]["jeeves"] == {"net": None, "node": "ok", "vpn": "ok"}
+    assert table["russia"]["jeeves"] == {"net": "down", "node": "ok", "vpn": None}

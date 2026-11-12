@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from sa_home_bot.bot import vpn_nodes
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.domain.vpn_check import (
     ALERTING as CHECK_ALERTING,
@@ -20,11 +21,20 @@ from sa_home_bot.domain.vpn_check import (
 )
 from sa_home_bot.domain.vpn_history import Sample, aggregate, median_ms
 from sa_home_bot.domain.vpn_link import (
+    LAYER_NET,
+    LAYER_NODE,
+    LAYER_VPN,
     LEVEL_DOWN,
+    LEVEL_OK,
+    SCOPE_GLOBAL,
     SCOPES,
     LinkState,
+    LinkTransition,
+    effective_scopes,
+    layer_table,
     link_level,
     reconcile_link,
+    resource_bad_targets,
     scope_levels,
     scope_of,
 )
@@ -57,9 +67,30 @@ from sa_home_bot.vpn.service_common import (
 )
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
+SERVER_MEMORY_H = 24
+RESOURCE_MEMORY_H = 24
+
+
+def _net_reports(raw: object) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    reports = {}
+    for server, probe in raw.items():
+        if isinstance(probe, dict) and isinstance(probe.get("ok"), bool):
+            reports[str(server)] = probe["ok"]
+    return reports
+
+
+def _settle_run(run: dict[str, Any], excluded: set[str]) -> None:
+    items = [item for item in run["items"] if item[0] not in excluded] or run["items"]
+    run["total"] = len(items)
+    run["bad_targets"] = [target for target, ok, _ms in items if not ok]
+    run["bad"] = len(run["bad_targets"])
+    run["ok_ms"] = [ms for _target, ok, ms in items if ok and ms is not None]
+
 
 class ChecksMixin:
-    async def _dispatch_checks(self) -> dict[str, Any]:
+    async def _dispatch_checks(self, server: str | None = None) -> dict[str, Any]:
         if self._node_link is None:
             log.warning("vpn: node_link не настроен — проверки доступности не разосланы")
             return {"dispatched_to": [], "unreachable": [], "skipped": []}
@@ -69,7 +100,11 @@ class ChecksMixin:
                 {
                     "service": vpn_check_protocol.SERVICE_NAME,
                     "action": vpn_check_protocol.ACTION_CHECK,
-                    "args": {"server": self._node, "targets": list(self._cfg.check_targets)},
+                    "args": {
+                        "server": server or self._node,
+                        "targets": list(self._cfg.check_targets),
+                        **({} if server else self._net_target_args()),
+                    },
                     "timeout_s": self._cfg.check_dispatch_timeout_s,
                 },
                 dst=Address(node=self._node, service=NODE_SERVICE),
@@ -84,11 +119,21 @@ class ChecksMixin:
             "skipped": result.get("skipped", []),
         }
 
+    def _net_target_args(self) -> dict[str, Any]:
+        reality = self._cfg.reality
+        if reality is None:
+            return {}
+        host = reality.endpoint_host or self._cfg.endpoint_host
+        if not host:
+            return {}
+        return {"net_target": {"host": host, "port": reality.port}}
+
     async def check_loop(self) -> None:
         while True:
             await asyncio.sleep(self._cfg.check_interval_s)
             try:
                 await self._dispatch_checks()
+                await self._watch_servers()
                 await self._prune_samples()
             except Exception:
                 log.exception("vpn: сбой цикла проверок доступности")
@@ -99,6 +144,7 @@ class ChecksMixin:
         if not node or not isinstance(results, list) or not results:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = utc_now()
+        net_reports = _net_reports(args.get("net"))
         runs: dict[tuple[str, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
@@ -113,23 +159,8 @@ class ChecksMixin:
             error_raw = raw.get("error")
             ok = bool(raw.get("ok"))
             error = str(error_raw) if error_raw else None
-            run = runs.setdefault(
-                (server, transport),
-                {
-                    "failed": [],
-                    "recovered": [],
-                    "total": 0,
-                    "bad": 0,
-                    "bad_targets": [],
-                    "ok_ms": [],
-                },
-            )
-            run["total"] += 1
-            run["bad"] += not ok
-            if not ok:
-                run["bad_targets"].append(str(target))
-            if ok and ms is not None:
-                run["ok_ms"].append(ms)
+            run = runs.setdefault((server, transport), {"failed": [], "recovered": [], "items": []})
+            run["items"].append((str(target), ok, ms))
             to_status = await self._apply_check_result(
                 node, server, transport, str(target), ok, ms, error, now
             )
@@ -137,9 +168,23 @@ class ChecksMixin:
                 run["failed"].append({"target": str(target), "error": error})
             elif to_status == CHECK_OK:
                 run["recovered"].append(str(target))
+        excluded = await self._resource_bad(now)
         before = await self._scope_levels()
+        before_net = await self._net_scope_levels()
+        node_levels = await self._node_levels()
+        for server, net_ok in net_reports.items():
+            await self._apply_layer(
+                LAYER_NET,
+                node,
+                server,
+                LEVEL_OK if net_ok else LEVEL_DOWN,
+                self._cfg.link_stable_threshold,
+                now,
+            )
+        after_net = await self._net_scope_levels()
         link_events: list[dict[str, Any]] = []
         for (server, transport), run in runs.items():
+            _settle_run(run, excluded)
             base = {"node": node, "server": server, "transport": transport, "total": run["total"]}
             if run["failed"] and self._cfg.check_target_events:
                 await self._emit(
@@ -161,30 +206,235 @@ class ChecksMixin:
                         "active": await self._active_check_problems(),
                     },
                 )
-            data = await self._apply_link_report(node, server, transport, run, now)
+            frozen = net_reports.get(server) is False or node_levels.get(server) == LEVEL_DOWN
+            if frozen:
+                await self._touch_link(node, server, transport, now)
+                data = None
+            else:
+                data = await self._apply_link_report(node, server, transport, run, now)
             await self._record_sample(node, server, transport, run, now)
             if data is not None:
                 link_events.append(data)
         after = await self._scope_levels()
+        effective = effective_scopes(after, after_net, node_levels)
+
+        def outer_broken(scope: str | None, server: str) -> bool:
+            if node_levels.get(server) == LEVEL_DOWN:
+                return True
+            if scope is None:
+                return False
+            return LEVEL_DOWN in (before_net[scope].get(server), after_net[scope].get(server))
+
         outages: list[dict[str, Any]] = []
         for scope in SCOPES:
+            for server, new in after_net[scope].items():
+                old = before_net[scope].get(server)
+                if old is not None and old != new:
+                    outages.append(
+                        {
+                            "layer": LAYER_NET,
+                            "scope": scope,
+                            "server": server,
+                            "from": old,
+                            "to": new,
+                            "scopes": effective,
+                        }
+                    )
             for server, new in after[scope].items():
                 old = before[scope].get(server)
-                if old is not None and old != new and LEVEL_DOWN in (old, new):
-                    outages.append(
-                        {"scope": scope, "server": server, "from": old, "to": new, "scopes": after}
-                    )
+                if old is None or old == new or LEVEL_DOWN not in (old, new):
+                    continue
+                if outer_broken(scope, server):
+                    continue
+                outages.append(
+                    {
+                        "layer": LAYER_VPN,
+                        "scope": scope,
+                        "server": server,
+                        "from": old,
+                        "to": new,
+                        "scopes": effective,
+                    }
+                )
         for data in outages:
             await self._emit(EVENT_VPN_OUTAGE, data)
         for data in link_events:
             scope = scope_of(data["node"], self._cfg.russia_observers, self._cfg.ignored_observers)
+            if outer_broken(scope, data["server"]):
+                continue
             if any(o["scope"] == scope and o["server"] == data["server"] for o in outages):
                 continue
             await self._emit(
                 EVENT_VPN_LINK_CHANGED,
-                {**data, "scope": scope, "scopes": after},
+                {**data, "scope": scope, "scopes": effective},
             )
         return {"accepted": True}
+
+    async def _resource_bad(self, now: datetime) -> set[str]:
+        stale_before = self._stale_before(now)
+        cur = await self._db.conn.execute(
+            "SELECT node, server, transport, target, last_ok FROM vpn_check_states "
+            "WHERE last_seen_at >= ?",
+            (stale_before,),
+        )
+        rows = await cur.fetchall()
+        bad = resource_bad_targets(
+            ((row["node"], row["server"], row["transport"]), row["target"], bool(row["last_ok"]))
+            for row in rows
+            if row["node"] not in self._cfg.ignored_observers
+        )
+        for target in sorted(bad):
+            await self._db.conn.execute(
+                "INSERT INTO vpn_resource_states (target, bad_since, last_bad_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(target) DO UPDATE SET "
+                "bad_since = CASE WHEN vpn_resource_states.last_bad_at < ? "
+                "THEN excluded.bad_since ELSE vpn_resource_states.bad_since END, "
+                "last_bad_at = excluded.last_bad_at",
+                (target, now.isoformat(), now.isoformat(), stale_before),
+            )
+        if bad:
+            await self._db.conn.commit()
+        return bad
+
+    def _stale_before(self, now: datetime) -> str:
+        return (
+            now - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+        ).isoformat()
+
+    async def _apply_layer(
+        self,
+        layer: str,
+        node: str,
+        server: str,
+        level: str,
+        threshold: int,
+        now: datetime,
+    ) -> LinkTransition | None:
+        cur = await self._db.conn.execute(
+            "SELECT level, candidate, candidate_count, announced FROM vpn_layer_states "
+            "WHERE layer = ? AND node = ? AND server = ?",
+            (layer, node, server),
+        )
+        row = await cur.fetchone()
+        known = None
+        if row is not None:
+            known = LinkState(
+                level=row["level"],
+                candidate=row["candidate"],
+                candidate_count=row["candidate_count"],
+                announced=row["announced"],
+            )
+        state, transition = reconcile_link(known, level, threshold)
+        await self._db.conn.execute(
+            "INSERT INTO vpn_layer_states ("
+            "layer, node, server, level, candidate, candidate_count, announced, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(layer, node, server) DO UPDATE SET "
+            "level = excluded.level, candidate = excluded.candidate, "
+            "candidate_count = excluded.candidate_count, announced = excluded.announced, "
+            "updated_at = excluded.updated_at",
+            (
+                layer,
+                node,
+                server,
+                state.level,
+                state.candidate,
+                state.candidate_count,
+                state.announced,
+                now.isoformat(),
+            ),
+        )
+        await self._db.conn.commit()
+        return transition
+
+    async def _net_scope_levels(self) -> dict[str, dict[str, str]]:
+        cur = await self._db.conn.execute(
+            "SELECT node, server, announced FROM vpn_layer_states "
+            "WHERE layer = ? AND updated_at >= ?",
+            (LAYER_NET, self._stale_before(utc_now())),
+        )
+        rows = await cur.fetchall()
+        return scope_levels(
+            [(row["node"], row["server"], row["announced"]) for row in rows],
+            self._cfg.russia_observers,
+            self._cfg.ignored_observers,
+        )
+
+    async def _node_levels(self) -> dict[str, str]:
+        cur = await self._db.conn.execute(
+            "SELECT server, announced FROM vpn_layer_states WHERE layer = ? AND updated_at >= ?",
+            (LAYER_NODE, self._stale_before(utc_now())),
+        )
+        return {row["server"]: row["announced"] for row in await cur.fetchall()}
+
+    async def _touch_link(self, node: str, server: str, transport: str, now: datetime) -> None:
+        await self._db.conn.execute(
+            "UPDATE vpn_link_states SET updated_at = ? "
+            "WHERE node = ? AND server = ? AND transport = ?",
+            (now.isoformat(), node, server, transport),
+        )
+        await self._db.conn.commit()
+
+    async def _watch_servers(self) -> None:
+        if self._node_link is None:
+            return
+        live = await vpn_nodes.live_vpn_nodes(self._node_link)
+        if self._node not in live:
+            return
+        now = utc_now()
+        cur = await self._db.conn.execute(
+            "SELECT DISTINCT server FROM vpn_link_states WHERE updated_at >= ? AND server != ?",
+            ((now - timedelta(hours=SERVER_MEMORY_H)).isoformat(), self._node),
+        )
+        servers = [row["server"] for row in await cur.fetchall()]
+        for server in servers:
+            alive = server in live
+            transition = await self._apply_layer(
+                LAYER_NODE,
+                "",
+                server,
+                LEVEL_OK if alive else LEVEL_DOWN,
+                self._cfg.link_stable_threshold + 1,
+                now,
+            )
+            if not alive:
+                await self._dispatch_checks(server)
+            if transition is not None:
+                await self._announce_node(server, transition)
+
+    async def _announce_node(self, server: str, transition: LinkTransition) -> None:
+        net = await self._net_scope_levels()
+        went_down = transition.to_announced == LEVEL_DOWN
+        if went_down:
+            notify = net[SCOPE_GLOBAL].get(server) != LEVEL_DOWN
+        else:
+            cur = await self._db.conn.execute(
+                "SELECT notified FROM vpn_layer_states "
+                "WHERE layer = ? AND node = '' AND server = ?",
+                (LAYER_NODE, server),
+            )
+            row = await cur.fetchone()
+            notify = bool(row is not None and row["notified"])
+        await self._db.conn.execute(
+            "UPDATE vpn_layer_states SET notified = ? WHERE layer = ? AND node = '' AND server = ?",
+            (int(went_down and notify), LAYER_NODE, server),
+        )
+        await self._db.conn.commit()
+        if not notify:
+            return
+        await self._emit(
+            EVENT_VPN_OUTAGE,
+            {
+                "layer": LAYER_NODE,
+                "scope": None,
+                "server": server,
+                "from": transition.from_announced,
+                "to": transition.to_announced,
+                "scopes": effective_scopes(
+                    await self._scope_levels(), net, await self._node_levels()
+                ),
+            },
+        )
 
     async def _apply_link_report(
         self,
@@ -324,8 +574,22 @@ class ChecksMixin:
             "ORDER BY server, transport, node"
         )
         rows = await cur.fetchall()
+        vpn = await self._scope_levels()
+        net = await self._net_scope_levels()
+        node = await self._node_levels()
+        cur = await self._db.conn.execute(
+            "SELECT target, bad_since, last_bad_at FROM vpn_resource_states "
+            "WHERE last_bad_at >= ? ORDER BY bad_since",
+            ((utc_now() - timedelta(hours=RESOURCE_MEMORY_H)).isoformat(),),
+        )
+        resources = [
+            {"target": row["target"], "since": row["bad_since"], "until": row["last_bad_at"]}
+            for row in await cur.fetchall()
+        ]
         return {
-            "scopes": await self._scope_levels(),
+            "scopes": effective_scopes(vpn, net, node),
+            "layers": layer_table(vpn, net, node),
+            "resources": resources,
             "russia": list(self._cfg.russia_observers),
             "ignored": list(self._cfg.ignored_observers),
             "links": [

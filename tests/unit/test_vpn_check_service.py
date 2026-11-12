@@ -682,3 +682,54 @@ async def test_sni_probe_string_input(monkeypatch):
     result = await service.run_command("sni_probe", {"domains": "a.example.com,b.example.com"})
     assert "results" in result
     assert len(result["results"]) == 2
+
+
+_NET_URL = "http://203.0.113.5:8443/"
+
+
+def _net_service(monkeypatch, node_link, probe: tuple[bytes, bytes, int]) -> VpnCheckService:
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0), _NET_URL: probe})
+    service = _service(node_link, slots=[_slot(), _reality_slot()])
+    service._remember_net_target(PROBE_SERVER, {"host": "203.0.113.5", "port": 8443})
+    return service
+
+
+async def test_check_command_remembers_net_target(monkeypatch):
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    service = _service(_FakeNodeLink())
+    args = {"server": PROBE_SERVER, "targets": ["https://1.1.1.1"]}
+    await service.run_command("check", {**args, "net_target": {"host": "h", "port": "8443"}})
+    await service.run_command("check", {**args, "net_target": {"host": "h"}})
+    await service.run_command("check", args)
+    assert service._net_targets[PROBE_SERVER].port == 8443
+
+
+@pytest.mark.parametrize(
+    ("probe", "ok", "ms"),
+    [((b"0.045000", b"", 52), True, 45), ((b"0.000000", b"", 28), False, None)],
+)
+async def test_report_carries_net_probe_from_reality_netns(monkeypatch, probe, ok, ms):
+    node_link = _FakeNodeLink()
+    service = _net_service(monkeypatch, node_link, probe)
+    await service._run_and_report(PROBE_SERVER, service._slots, ["https://1.1.1.1"])
+    net = node_link.calls[0]["args"]["net"][PROBE_SERVER]
+    assert (net["ok"], net["ms"]) == (ok, ms)
+
+
+async def test_net_probe_runs_in_netns_without_socks(monkeypatch):
+    node_link = _FakeNodeLink()
+    service = _net_service(monkeypatch, node_link, (b"0.045000", b"", 52))
+    calls = _patch_curl(
+        monkeypatch, {"https://1.1.1.1": (b"200", b"", 0), _NET_URL: (b"0.045000", b"", 52)}
+    )
+    await service._run_and_report(PROBE_SERVER, service._slots, ["https://1.1.1.1"])
+    cmd = next(c for c in calls if c[-1] == _NET_URL)
+    assert cmd[cmd.index("netns") + 2] == "vpn-probe-jeeves-reality"
+    assert "--socks5-hostname" not in cmd
+
+
+async def test_report_without_reality_slot_has_no_net(monkeypatch):
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
+    assert "net" not in node_link.calls[0]["args"]
