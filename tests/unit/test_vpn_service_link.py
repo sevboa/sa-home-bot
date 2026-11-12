@@ -93,6 +93,10 @@ def _links(events: list[tuple[str, dict]]) -> list[dict]:
     return [data for name, data in events if name == vpn_protocol.EVENT_VPN_LINK_CHANGED]
 
 
+def _outages(events: list[tuple[str, dict]]) -> list[dict]:
+    return [data for name, data in events if name == vpn_protocol.EVENT_VPN_OUTAGE]
+
+
 async def test_below_threshold_stays_quiet(env):
     svc, events, _ = env
     await _report(svc, "jeeves", True)
@@ -103,6 +107,7 @@ async def test_below_threshold_stays_quiet(env):
 
 async def test_down_reaching_threshold_announces_once(env):
     svc, events, _ = env
+    await _report(svc, "alfred", True)
     await _report(svc, "jeeves", True)
     for _ in range(3):
         await _report(svc, "jeeves", False, "timeout")
@@ -119,6 +124,7 @@ async def test_down_reaching_threshold_announces_once(env):
 
 async def test_recovery_announces_second_edge(env):
     svc, events, _ = env
+    await _report(svc, "alfred", True)
     await _report(svc, "jeeves", True)
     for _ in range(3):
         await _report(svc, "jeeves", False, "timeout")
@@ -185,6 +191,7 @@ async def test_target_events_can_be_switched_off(env):
         check_target_events=False,
     )
     svc = VpnService(Settings(vpn=cfg), svc._db, DummyAwg(), emit)
+    await _report(svc, "alfred", True)
     await _report(svc, "jeeves", True)
     for _ in range(3):
         await _report(svc, "jeeves", False, "timeout")
@@ -194,8 +201,102 @@ async def test_target_events_can_be_switched_off(env):
 
 async def test_target_events_on_by_default(env):
     svc, events, _ = env
+    await _report(svc, "alfred", True)
     await _report(svc, "jeeves", True)
     for _ in range(3):
         await _report(svc, "jeeves", False, "timeout")
     assert len(_links(events)) == 1
     assert any(name == vpn_protocol.EVENT_VPN_CHECK_FAILED for name, _ in events)
+
+
+@pytest_asyncio.fixture
+async def scope_env(tmp_path):
+    db = Database(tmp_path / "vpn.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type: str, data: dict) -> None:
+        events.append((event_type, data))
+
+    cfg = VpnConfig(
+        check_fail_threshold=2,
+        check_clear_threshold=1,
+        check_targets=[TARGET],
+        link_stable_threshold=3,
+        russia_observers=["osip"],
+        ignored_observers=["zakhar"],
+    )
+    node_link = FakeNodeLink()
+    svc = VpnService(Settings(vpn=cfg), db, DummyAwg(), emit, node_link=node_link)
+    yield svc, events, node_link
+    await db.close()
+
+
+async def test_russia_observer_edge_gives_outage_instead_of_link(scope_env):
+    svc, events, _ = scope_env
+    await _report(svc, "osip", True)
+    for _ in range(3):
+        await _report(svc, "osip", False, "timeout")
+    outages = _outages(events)
+    assert len(outages) == 1
+    assert outages[0]["scope"] == "russia"
+    assert outages[0]["from"] == "ok"
+    assert outages[0]["to"] == "down"
+    assert outages[0]["server"] == "jeeves"
+    assert outages[0]["scopes"]["russia"]["jeeves"] == "down"
+    assert not _links(events)
+
+
+async def test_russia_observer_recovery_gives_second_outage(scope_env):
+    svc, events, _ = scope_env
+    await _report(svc, "osip", True)
+    for _ in range(3):
+        await _report(svc, "osip", False, "timeout")
+    for _ in range(3):
+        await _report(svc, "osip", True)
+    outages = _outages(events)
+    assert len(outages) == 2
+    assert outages[1]["scope"] == "russia"
+    assert outages[1]["from"] == "down"
+    assert outages[1]["to"] == "ok"
+    assert not _links(events)
+
+
+async def test_live_second_link_keeps_scope_ok_and_emits_link(scope_env):
+    svc, events, _ = scope_env
+    await _report(svc, "alfred", True)
+    await _report(svc, "wooster", True)
+    for _ in range(3):
+        await _report(svc, "alfred", False, "timeout")
+    assert not _outages(events)
+    links = _links(events)
+    assert len(links) == 1
+    assert links[0]["node"] == "alfred"
+    assert links[0]["scope"] == "global"
+    assert links[0]["scopes"]["global"]["jeeves"] == "ok"
+
+
+async def test_ignored_observer_gives_no_events(scope_env):
+    svc, events, _ = scope_env
+    await _report(svc, "zakhar", True)
+    for _ in range(3):
+        await _report(svc, "zakhar", False, "timeout")
+    assert not _outages(events)
+    assert not _links(events)
+
+
+async def test_check_scopes_returns_scopes_and_links(scope_env):
+    svc, _, _ = scope_env
+    await _report(svc, "osip", True)
+    await _report(svc, "alfred", True)
+    result = await svc.run_command(vpn_protocol.ACTION_CHECK_SCOPES, {})
+    assert set(result["scopes"]) == {"global", "russia"}
+    assert result["scopes"]["russia"]["jeeves"] == "ok"
+    assert isinstance(result["links"], list)
+    row = result["links"][0]
+    assert row["node"] == "alfred"
+    assert row["server"] == "jeeves"
+    assert row["transport"] == "awg"
+    assert row["level"] == "ok"
+    assert "announced" in row

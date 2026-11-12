@@ -147,3 +147,11 @@ to, bad_targets, total}` только при устойчивом переход
 `link_stable_threshold` (3), `ignored_observers` (состояние пишется, события нет),
 `check_target_events` (false выключает `vpn_check_failed/recovered`; оставлено выключателем, чтобы
 вернуть старую схему одной строкой конфига).
+
+### Охваты и авария (65.2, 2026-11-12)
+Охват `russia` — наблюдатели из `[vpn] russia_observers`, `global` — все прочие, кроме
+`ignored_observers`. Уровень охвата по серверу: `ok`, если жива хотя бы одна связка, `down`, если
+все лежат, иначе `partial`; устаревшие строки связок (старше порога свежести) в охват не входят.
+Событие `vpn_outage {scope, server, from, to, scopes}` — охват вошёл в `down` или вышел из него;
+оно заменяет `vpn_link_changed` той же пары (охват, сервер) в том же отчёте. `vpn_link_changed`
+несёт `scope` и `scopes`. Действие `check_scopes` → `{scopes, links}`.
