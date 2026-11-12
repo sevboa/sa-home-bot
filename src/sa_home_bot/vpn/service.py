@@ -32,6 +32,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_APK_INFO,
     ACTION_APK_SET_FILE_ID,
     ACTION_CHECK_NOW,
+    ACTION_CHECK_SCOPES,
     ACTION_CHECK_STATUS,
     ACTION_DEVICE_ONLINE,
     ACTION_GET_SUBSCRIPTION,
@@ -272,7 +273,12 @@ class VpnService(
                     params=(ActionParam(name="telegram_file_id", type="string", title="file_id"),),
                 ),
             ]
-        capabilities += [ACTION_CHECK_NOW, ACTION_CHECK_STATUS, ACTION_TELEGRAM_EGRESS]
+        capabilities += [
+            ACTION_CHECK_NOW,
+            ACTION_CHECK_STATUS,
+            ACTION_CHECK_SCOPES,
+            ACTION_TELEGRAM_EGRESS,
+        ]
         actions += [
             ActionSpec(
                 id=ACTION_REPORT_CHECK,
@@ -292,6 +298,7 @@ class VpnService(
             ),
             ActionSpec(id=ACTION_CHECK_NOW, title="🛰 Проверить сеть сейчас"),
             ActionSpec(id=ACTION_CHECK_STATUS, title="🛰 Статус проверок сети"),
+            ActionSpec(id=ACTION_CHECK_SCOPES, title="🛰 Охваты VPN"),
             ActionSpec(
                 id=ACTION_TELEGRAM_EGRESS,
                 title="📡 Маршрут до Telegram через эту ноду",
@@ -430,6 +437,8 @@ class VpnService(
             return await self._dispatch_checks()
         if action == ACTION_CHECK_STATUS:
             return await self._check_status()
+        if action == ACTION_CHECK_SCOPES:
+            return await self._check_scopes()
         if action == ACTION_TELEGRAM_EGRESS:
             return await self._telegram_egress(args)
         if action == ACTION_PROXY_LINK:
