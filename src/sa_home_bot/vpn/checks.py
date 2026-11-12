@@ -18,6 +18,15 @@ from sa_home_bot.domain.vpn_check import (
     reconcile_vpn_check,
     rollup_status,
 )
+from sa_home_bot.domain.vpn_link import (
+    LEVEL_DOWN,
+    SCOPES,
+    LinkState,
+    link_level,
+    reconcile_link,
+    scope_levels,
+    scope_of,
+)
 from sa_home_bot.domain.vpn_series import (
     failure_at_bytes,
     reconcile_vpn_series,
@@ -32,6 +41,8 @@ from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_CHECK_FAILED,
     EVENT_VPN_CHECK_RECOVERED,
+    EVENT_VPN_LINK_CHANGED,
+    EVENT_VPN_OUTAGE,
     EVENT_VPN_SERIES_FAILED,
     EVENT_VPN_SERIES_RECOVERED,
     TELEGRAM_EGRESS_TARGET,
@@ -101,10 +112,13 @@ class ChecksMixin:
             ok = bool(raw.get("ok"))
             error = str(error_raw) if error_raw else None
             run = runs.setdefault(
-                (server, transport), {"failed": [], "recovered": [], "total": 0, "bad": 0}
+                (server, transport),
+                {"failed": [], "recovered": [], "total": 0, "bad": 0, "bad_targets": []},
             )
             run["total"] += 1
             run["bad"] += not ok
+            if not ok:
+                run["bad_targets"].append(str(target))
             to_status = await self._apply_check_result(
                 node, server, transport, str(target), ok, ms, error, now
             )
@@ -112,9 +126,11 @@ class ChecksMixin:
                 run["failed"].append({"target": str(target), "error": error})
             elif to_status == CHECK_OK:
                 run["recovered"].append(str(target))
+        before = await self._scope_levels()
+        link_events: list[dict[str, Any]] = []
         for (server, transport), run in runs.items():
             base = {"node": node, "server": server, "transport": transport, "total": run["total"]}
-            if run["failed"]:
+            if run["failed"] and self._cfg.check_target_events:
                 await self._emit(
                     EVENT_VPN_CHECK_FAILED,
                     {
@@ -124,7 +140,7 @@ class ChecksMixin:
                         "consecutive": self._cfg.check_fail_threshold,
                     },
                 )
-            if run["recovered"]:
+            if run["recovered"] and self._cfg.check_target_events:
                 await self._emit(
                     EVENT_VPN_CHECK_RECOVERED,
                     {
@@ -134,7 +150,121 @@ class ChecksMixin:
                         "active": await self._active_check_problems(),
                     },
                 )
+            data = await self._apply_link_report(node, server, transport, run, now)
+            if data is not None:
+                link_events.append(data)
+        after = await self._scope_levels()
+        outages: list[dict[str, Any]] = []
+        for scope in SCOPES:
+            for server, new in after[scope].items():
+                old = before[scope].get(server)
+                if old is not None and old != new and LEVEL_DOWN in (old, new):
+                    outages.append(
+                        {"scope": scope, "server": server, "from": old, "to": new, "scopes": after}
+                    )
+        for data in outages:
+            await self._emit(EVENT_VPN_OUTAGE, data)
+        for data in link_events:
+            scope = scope_of(data["node"], self._cfg.russia_observers, self._cfg.ignored_observers)
+            if any(o["scope"] == scope and o["server"] == data["server"] for o in outages):
+                continue
+            await self._emit(
+                EVENT_VPN_LINK_CHANGED,
+                {**data, "scope": scope, "scopes": after},
+            )
         return {"accepted": True}
+
+    async def _apply_link_report(
+        self,
+        node: str,
+        server: str,
+        transport: str,
+        run: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        level = link_level(run["total"], run["bad"])
+        cur = await self._db.conn.execute(
+            "SELECT level, candidate, candidate_count, announced FROM vpn_link_states "
+            "WHERE node = ? AND server = ? AND transport = ?",
+            (node, server, transport),
+        )
+        row = await cur.fetchone()
+        known = None
+        if row is not None:
+            known = LinkState(
+                level=row["level"],
+                candidate=row["candidate"],
+                candidate_count=row["candidate_count"],
+                announced=row["announced"],
+            )
+        state, transition = reconcile_link(known, level, self._cfg.link_stable_threshold)
+        await self._db.conn.execute(
+            "INSERT INTO vpn_link_states ("
+            "node, server, transport, level, candidate, candidate_count, announced, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(node, server, transport) DO UPDATE SET "
+            "level = excluded.level, candidate = excluded.candidate, "
+            "candidate_count = excluded.candidate_count, announced = excluded.announced, "
+            "updated_at = excluded.updated_at",
+            (
+                node,
+                server,
+                transport,
+                state.level,
+                state.candidate,
+                state.candidate_count,
+                state.announced,
+                now.isoformat(),
+            ),
+        )
+        await self._db.conn.commit()
+        if transition is None or node in self._cfg.ignored_observers:
+            return None
+        return {
+            "node": node,
+            "server": server,
+            "transport": transport,
+            "from": transition.from_announced,
+            "to": transition.to_announced,
+            "bad_targets": run["bad_targets"],
+            "total": run["total"],
+        }
+
+    async def _scope_levels(self) -> dict[str, dict[str, str]]:
+        stale_before = (
+            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
+        ).isoformat()
+        cur = await self._db.conn.execute(
+            "SELECT node, server, level FROM vpn_link_states WHERE updated_at >= ?",
+            (stale_before,),
+        )
+        rows = await cur.fetchall()
+        return scope_levels(
+            [(row["node"], row["server"], row["level"]) for row in rows],
+            self._cfg.russia_observers,
+            self._cfg.ignored_observers,
+        )
+
+    async def _check_scopes(self) -> dict[str, Any]:
+        cur = await self._db.conn.execute(
+            "SELECT node, server, transport, level, announced, updated_at FROM vpn_link_states "
+            "ORDER BY server, transport, node"
+        )
+        rows = await cur.fetchall()
+        return {
+            "scopes": await self._scope_levels(),
+            "links": [
+                {
+                    "node": row["node"],
+                    "server": row["server"],
+                    "transport": row["transport"],
+                    "level": row["level"],
+                    "announced": row["announced"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ],
+        }
 
     async def _report_series(self, args: dict[str, Any]) -> dict[str, Any]:
         node = str(args.get("node", "")).strip()

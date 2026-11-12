@@ -8,7 +8,14 @@ from collections.abc import Callable
 
 from aiogram.types import InlineKeyboardMarkup
 
-from sa_home_bot.bot import commands, vpn_check_view, vpn_devices, vpn_nodes, vpn_notify
+from sa_home_bot.bot import (
+    commands,
+    vpn_check_view,
+    vpn_devices,
+    vpn_link_notify,
+    vpn_nodes,
+    vpn_notify,
+)
 from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.ai_lines import (
     ALBERT_ASLEEP,
@@ -27,7 +34,7 @@ from sa_home_bot.bot.ai_lines import (
 from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.handlers.vpn import resolve_request_callback
 from sa_home_bot.bot.lifecycle import broadcast_all, broadcast_system, notify_tool_call
-from sa_home_bot.bot.notifier import Notifier, notify_admins
+from sa_home_bot.bot.notifier import Notifier, broadcast, notify_admins
 from sa_home_bot.bot.pending_actions import PendingActions
 from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
@@ -69,6 +76,7 @@ _VPN_CHECK_EVENTS = (
     vpn_protocol.EVENT_VPN_CHECK_FAILED,
     vpn_protocol.EVENT_VPN_CHECK_RECOVERED,
 )
+_VPN_LINK_EVENTS = (vpn_protocol.EVENT_VPN_LINK_CHANGED, vpn_protocol.EVENT_VPN_OUTAGE)
 _VPN_SERIES_EVENTS = (
     vpn_protocol.EVENT_VPN_SERIES_FAILED,
     vpn_protocol.EVENT_VPN_SERIES_RECOVERED,
@@ -80,6 +88,18 @@ VPN_EVENT_DEDUP_S = 120.0
 def _vpn_event_key(name: str, data: dict) -> str:
     filtered = {k: v for k, v in data.items() if k != "active"}
     return name + json.dumps(filtered, sort_keys=True, default=str)
+
+
+def _seen_recently(recent: dict[str, float], key: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - VPN_EVENT_DEDUP_S
+    for known in list(recent.keys()):
+        if recent[known] < cutoff:
+            del recent[known]
+    if key in recent:
+        return True
+    recent[key] = now
+    return False
 
 
 def _format_alfred_reply(raw: str) -> str:
@@ -694,16 +714,17 @@ def build_node_event_handler(
         elif name in _VPN_GUEST_EVENTS or name in _VPN_ADMIN_EVENTS:
             node_link = get_node_link() if get_node_link else None
             await _handle_vpn_event(name, data, book, notifier, store, node_link)
-        elif name in _VPN_CHECK_EVENTS or name in _VPN_SERIES_EVENTS:
-            now = time.monotonic()
-            cutoff = now - VPN_EVENT_DEDUP_S
-            for k in list(recent_vpn_events.keys()):
-                if recent_vpn_events[k] < cutoff:
-                    del recent_vpn_events[k]
-            key = _vpn_event_key(name, data)
-            if key in recent_vpn_events:
+        elif name in _VPN_LINK_EVENTS:
+            if _seen_recently(recent_vpn_events, vpn_link_notify.dedup_key(name, data)):
                 return
-            recent_vpn_events[key] = now
+            text = vpn_link_notify.render(name, data, vpn_nodes.known_server_label)
+            if text is not None:
+                node_id = data.get("node") or data.get("server")
+                await store.record_event(name, node_id, text, utc_now())
+                await broadcast(book.accepting(name), notifier, text)
+        elif name in _VPN_CHECK_EVENTS or name in _VPN_SERIES_EVENTS:
+            if _seen_recently(recent_vpn_events, _vpn_event_key(name, data)):
+                return
             render = render_vpn_check if name in _VPN_CHECK_EVENTS else render_vpn_series
             check_text = render(name, data)
             if check_text is not None:
