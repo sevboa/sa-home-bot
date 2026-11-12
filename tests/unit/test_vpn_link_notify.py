@@ -17,7 +17,7 @@ SCOPES = {
     "global": {"jeeves": "ok", "wooster": "ok"},
     "russia": {"jeeves": "down", "wooster": "partial"},
 }
-SCOPES_LINE = "🌍 jeeves 🇳🇱🟢 · wooster 🇺🇸🟢\n🇷🇺 jeeves 🇳🇱🔴 · wooster 🇺🇸🟡"
+SCOPES_LINE = "🌍🟢 🇷🇺🔴 | 🇳🇱 jeeves\n🌍🟢 🇷🇺🟡 | 🇺🇸 wooster"
 LINK_BASE = {"node": "osip", "server": "jeeves", "transport": "awg"}
 OUTAGE_BASE = {"scope": "russia", "server": "jeeves"}
 
@@ -38,8 +38,8 @@ def test_scopes_line_in_scope_order():
 
 
 def test_scopes_line_uses_server_name_without_label():
-    assert notify.scopes_line({"global": {"x&y": "down"}}, label_of) == "🌍 x&amp;y🔴"
-    assert notify.scopes_line({"global": {"x": "maybe"}}, label_of) == "🌍 x⚪"
+    assert notify.scopes_line({"global": {"x&y": "down"}}, label_of) == "🌍🔴 | x&amp;y"
+    assert notify.scopes_line({"global": {"x": "maybe"}}, label_of) == "🌍⚪ | x"
 
 
 def test_scopes_line_empty_for_non_dict():
@@ -141,7 +141,7 @@ def test_layers_lines_mute_layers_under_the_broken_one():
         },
     }
     assert notify.layers_lines(layers, label_of) == [
-        "🌍 jeeves 🇳🇱 🟢🟢🟡",
-        "🇷🇺 jeeves 🇳🇱 🔴⚪⚪ · wooster 🇺🇸 ⚪🔴⚪",
+        "🌍🟢🟢🟡 🇷🇺🔴⚪⚪ | 🇳🇱 jeeves",
+        "🌍⚪⚪⚪ 🇷🇺⚪🔴⚪ | 🇺🇸 wooster",
     ]
     assert notify.layers_lines(None, label_of) == []

@@ -24,6 +24,7 @@ LAYER_UP_TEXT = {
     vpn_link.LAYER_VPN: "VPN снова доступен",
 }
 PARTIAL_NOTE = " (частично)"
+SERVER_SEPARATOR = "|"
 
 
 def server_flag(label: str) -> str:
@@ -39,23 +40,43 @@ def server_title(server: str, label: str) -> str:
 def server_mark(server: object, label_of: Callable[[str], str]) -> str:
     name = html.escape(str(server))
     flag = server_flag(label_of(str(server)))
-    return f"{name} {flag}" if flag else name
+    return f"{flag} {name}" if flag else name
+
+
+def _by_server(table: object) -> dict[str, dict[str, object]]:
+    if not isinstance(table, dict):
+        return {}
+    rows: dict[str, dict[str, object]] = {}
+    for scope in vpn_link.SCOPES:
+        servers = table.get(scope)
+        if not isinstance(servers, dict):
+            continue
+        for server, value in servers.items():
+            rows.setdefault(str(server), {})[scope] = value
+    return rows
+
+
+def _server_rows(
+    table: object, label_of: Callable[[str], str], icons_of: Callable[[object], str]
+) -> list[str]:
+    rows = _by_server(table)
+    scopes = [scope for scope in vpn_link.SCOPES if any(scope in row for row in rows.values())]
+    return [
+        " ".join(
+            [
+                *(f"{SCOPE_ICON[scope]}{icons_of(rows[server].get(scope))}" for scope in scopes),
+                SERVER_SEPARATOR,
+                server_mark(server, label_of),
+            ]
+        )
+        for server in rows
+    ]
 
 
 def scopes_line(scopes: object, label_of: Callable[[str], str]) -> str:
-    if not isinstance(scopes, dict):
-        return ""
-    parts = []
-    for scope in vpn_link.SCOPES:
-        servers = scopes.get(scope)
-        if not isinstance(servers, dict) or not servers:
-            continue
-        marks = []
-        for server in servers:
-            icon = LEVEL_ICON.get(servers[server], UNKNOWN_LEVEL_ICON)
-            marks.append(f"{server_mark(server, label_of)}{icon}")
-        parts.append(f"{SCOPE_ICON[scope]} {' · '.join(marks)}")
-    return "\n".join(parts)
+    return "\n".join(
+        _server_rows(scopes, label_of, lambda level: LEVEL_ICON.get(level, UNKNOWN_LEVEL_ICON))
+    )
 
 
 def link_changed_text(data: dict, label_of: Callable[[str], str]) -> str | None:
@@ -75,31 +96,20 @@ def link_changed_text(data: dict, label_of: Callable[[str], str]) -> str | None:
     return f"{head}\n{line}" if line else head
 
 
+def layer_icons(by_layer: object) -> str:
+    if not isinstance(by_layer, dict):
+        return UNKNOWN_LEVEL_ICON * len(vpn_link.LAYERS)
+    icons = []
+    broken = False
+    for layer in vpn_link.LAYERS:
+        level = by_layer.get(layer)
+        icons.append(MUTED_LEVEL_ICON if broken else LEVEL_ICON.get(level, UNKNOWN_LEVEL_ICON))
+        broken = broken or level == vpn_link.LEVEL_DOWN
+    return "".join(icons)
+
+
 def layers_lines(layers: object, label_of: Callable[[str], str]) -> list[str]:
-    if not isinstance(layers, dict):
-        return []
-    lines = []
-    for scope in vpn_link.SCOPES:
-        servers = layers.get(scope)
-        if not isinstance(servers, dict) or not servers:
-            continue
-        marks = []
-        for server, by_layer in servers.items():
-            if not isinstance(by_layer, dict):
-                continue
-            icons = []
-            broken = False
-            for layer in vpn_link.LAYERS:
-                level = by_layer.get(layer)
-                if broken:
-                    icons.append(MUTED_LEVEL_ICON)
-                    continue
-                icons.append(LEVEL_ICON.get(level, UNKNOWN_LEVEL_ICON))
-                broken = level == vpn_link.LEVEL_DOWN
-            marks.append(f"{server_mark(server, label_of)} {''.join(icons)}")
-        if marks:
-            lines.append(f"{SCOPE_ICON[scope]} {' · '.join(marks)}")
-    return lines
+    return _server_rows(layers, label_of, layer_icons)
 
 
 def outage_text(data: dict, label_of: Callable[[str], str]) -> str | None:
