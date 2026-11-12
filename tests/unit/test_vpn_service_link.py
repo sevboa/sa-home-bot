@@ -485,3 +485,11 @@ async def test_own_dispatch_carries_net_target_and_foreign_does_not(tmp_path):
     own, foreign = (call["args"]["args"] for call in node_link.calls)
     assert own["net_target"] == {"host": "203.0.113.5", "port": 8443}
     assert "net_target" not in foreign
+
+
+async def test_own_node_layer_is_ok(scope_env):
+    svc, _, _ = scope_env
+    svc._node = "jeeves"
+    await _report(svc, "alfred", True)
+    result = await svc.run_command(vpn_protocol.ACTION_CHECK_SCOPES, {})
+    assert result["layers"]["global"]["jeeves"]["node"] == "ok"

@@ -365,7 +365,8 @@ class ChecksMixin:
             "SELECT server, announced FROM vpn_layer_states WHERE layer = ? AND updated_at >= ?",
             (LAYER_NODE, self._stale_before(utc_now())),
         )
-        return {row["server"]: row["announced"] for row in await cur.fetchall()}
+        levels = {row["server"]: row["announced"] for row in await cur.fetchall()}
+        return {**levels, self._node: LEVEL_OK}
 
     async def _touch_link(self, node: str, server: str, transport: str, now: datetime) -> None:
         await self._db.conn.execute(
