@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 
 from sa_home_bot.bot import vpn_callbacks, vpn_devices, vpn_keyboards
+from sa_home_bot.bot.notifier import MAX_LEN
 from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.domain import vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
@@ -20,6 +21,8 @@ SERIES_VERDICT_TEXT = {
     "error": "ошибка замера",
 }
 LEGEND = "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни одному наблюдателю."
+NOTHING_OPENED = "не открылось ничего"
+TRUNCATED_NOTE = "… не влезло в сообщение"
 
 
 def transport_icons(server: dict) -> dict[str, str]:
@@ -106,9 +109,24 @@ def _series_lines(series: list[dict]) -> list[str]:
     return lines
 
 
+def _latency_span(rows: list[dict]) -> str:
+    latencies = [row["last_latency_ms"] for row in rows if row.get("last_latency_ms") is not None]
+    if not latencies:
+        return ""
+    low, high = min(latencies), max(latencies)
+    return f"{low} мс" if low == high else f"{low}–{high} мс"
+
+
 def _observer_line(node: str, rows: list[dict]) -> str:
     rows = sorted(rows, key=lambda r: r["target"])
-    icon = "🔴" if any(r["status"] == vpn_check.ALERTING for r in rows) else "🟢"
+    failed = [row for row in rows if row["status"] == vpn_check.ALERTING]
+    head = f"<code>{html.escape(node)}</code> — "
+    if not failed:
+        span = _latency_span(rows)
+        return f"  🟢 {head}{len(rows)}/{len(rows)}{f', {span}' if span else ''}"
+    if len(failed) == len(rows):
+        errors = sorted({short_error(row.get("last_error")) for row in failed})
+        return f"  🔴 {head}{NOTHING_OPENED} ({html.escape(', '.join(errors))})"
     parts = []
     for row in rows:
         label = html.escape(target_label(row["target"]))
@@ -117,7 +135,23 @@ def _observer_line(node: str, rows: list[dict]) -> str:
         else:
             latency = row.get("last_latency_ms")
             parts.append(f"{label}{f' {latency} мс' if latency is not None else ''}")
-    return f"  {icon} <code>{html.escape(node)}</code> — " + ", ".join(parts)
+    return f"  🔴 {head}" + ", ".join(parts)
+
+
+def _fit(lines: list[str], tail: list[str]) -> str:
+    text = "\n".join([*lines, *tail])
+    if len(text) <= MAX_LEN:
+        return text
+    tail = ["", TRUNCATED_NOTE, *tail]
+    budget = MAX_LEN - len("\n".join(tail)) - 1
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > budget:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join([*kept, *tail])
 
 
 def status_text(
@@ -153,10 +187,10 @@ def status_text(
             lines.extend(_observer_line(node, by_node[node]) for node in sorted(by_node))
     if series:
         lines.extend(_series_lines(series))
+    tail: list[str] = []
     if pending:
-        lines.append("")
-        lines.append("⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат.")
-    return "\n".join(lines)
+        tail = ["", "⏳ Проверка запущена — жмите «↻ Обновить», пока не увидите свежий результат."]
+    return _fit(lines, tail)
 
 
 def status_keyboard():
