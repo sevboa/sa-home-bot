@@ -15,6 +15,7 @@ from sa_home_bot.bot import (
 )
 from sa_home_bot.bot.handlers import vpn as vpn_handlers
 from sa_home_bot.bot.handlers.vpn import context as hctx
+from sa_home_bot.bot.notifier import MAX_LEN
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -257,6 +258,44 @@ def test_check_status_text_collapses_multiple_targets_per_observer():
     assert "telegram 628 мс" in text
     assert "youtube — таймаут" in text
     assert "🔴 <code>alfred</code>" in text
+
+
+def _state(node, target, *, ok=True, latency=None, error=None, server="jeeves", transport="awg"):
+    return {
+        "node": node,
+        "server": server,
+        "transport": transport,
+        "target": target,
+        "status": "ok" if ok else "alerting",
+        "last_latency_ms": latency,
+        "last_error": error,
+    }
+
+
+def test_check_status_text_compacts_fully_ok_and_fully_failed_observers():
+    states = [
+        _state("alfred", "https://1.1.1.1", latency=363),
+        _state("alfred", "https://www.youtube.com", latency=1320),
+        _state("osip", "https://1.1.1.1", ok=False, error="curl exit 28"),
+        _state("osip", "https://www.youtube.com", ok=False, error="curl exit 7"),
+    ]
+    text = vpn_check_view.status_text(states, rollup=[_check("awg", "partial", server="jeeves")])
+    assert "🟢 <code>alfred</code> — 2/2, 363–1320 мс" in text
+    assert "🔴 <code>osip</code> — не открылось ничего (curl exit 7, таймаут)" in text
+    assert "youtube" not in text
+
+
+def test_check_status_text_fits_telegram_limit():
+    states = [
+        _state(f"node{n}", f"https://site{t}.example.com", latency=100, server=f"srv{s}")
+        for s in range(30)
+        for n in range(10)
+        for t in range(2)
+    ]
+    text = vpn_check_view.status_text(states, pending=True)
+    assert len(text) <= MAX_LEN
+    assert vpn_check_view.TRUNCATED_NOTE in text
+    assert text.endswith("свежий результат.")
 
 
 def test_target_label_shortens_known_hosts():
