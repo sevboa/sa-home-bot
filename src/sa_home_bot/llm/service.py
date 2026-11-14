@@ -18,6 +18,7 @@ from PIL import Image
 from sa_home_bot import __version__
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm import (
+    backend,
     image_prompt,
     imagegen,
     item_paste,
@@ -782,7 +783,7 @@ class LlmService:
             chat_id = args.get("chat_id")
             await self._touch(chat_id)
             speaker = self._speech_target(args)
-            result = await ollama.generate(self._cfg, prompt, self._persona_prompt)
+            result = await backend.generate(self._cfg, prompt, self._persona_prompt)
             _log_ollama_timings("ask", result)
             cleaned = strip_math_notation(result.get("response", ""))
             response, remark, just_cured = self._speech.process(cleaned, chat_id, speaker)
@@ -837,7 +838,9 @@ class LlmService:
                     request_id, messages, system, tools=tools, think=think
                 )
             else:
-                result = await ollama.chat(self._cfg, messages, system, tools=tools, think=think)
+                result = await backend.chat(
+                    self._cfg, messages, system, tools=tools, think=think
+                )
             _log_ollama_timings(f"chat/{role}", result)
             message = result.get("message", {})
             tool_calls = message.get("tool_calls")
@@ -882,7 +885,7 @@ class LlmService:
                 stored_b64 = await asyncio.to_thread(vision.load_stored, photo_key, self._cfg)
             if stored_b64 is None:
                 return {"response": PHOTO_NOT_FOUND_TEXT, "model": self._cfg.model}
-            result = await ollama.chat(
+            result = await backend.chat(
                 self._cfg,
                 [{"role": "user", "content": question, "images": [stored_b64]}],
                 self._persona_prompt,
@@ -1027,8 +1030,8 @@ class LlmService:
             await self._sleep_now(quiet=bool(args.get("quiet")))
             return {"asleep": True}
         if action == ACTION_WARMUP:
-            await ollama.ensure_running(self._cfg)
-            await ollama.preload(self._cfg)
+            await backend.ensure_running(self._cfg)
+            await backend.preload(self._cfg)
             await self._touch()
             return {"asleep": False}
         raise undeclared_action(action)
@@ -1093,7 +1096,7 @@ class LlmService:
     async def _desk_placement(self, scene: Image.Image, place: str) -> item_paste.Placement | None:
         try:
             image_b64 = await asyncio.to_thread(vision.jpeg_b64, scene)
-            result = await ollama.chat(
+            result = await backend.chat(
                 self._cfg,
                 [{"role": "user", "content": item_paste.DESK_BOX_QUESTION, "images": [image_b64]}],
                 item_paste.DESK_BOX_SYSTEM,
@@ -1409,7 +1412,7 @@ class LlmService:
                 entry["partial"] = text
 
         try:
-            return await ollama.chat_stream(
+            return await backend.chat_stream(
                 self._cfg, messages, system, _on_chunk, tools=tools, think=think
             )
         finally:
@@ -1420,7 +1423,7 @@ class LlmService:
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=director нужен непустой system")
         await self._touch(args.get("chat_id"))
-        result = await ollama.chat(
+        result = await backend.chat(
             self._cfg,
             messages,
             system,
@@ -1439,7 +1442,7 @@ class LlmService:
         if not isinstance(system, str) or not system:
             raise ProtoError(ERR_BAD_REQUEST, "для role=summarizer нужен непустой system")
         await self._touch(args.get("chat_id"))
-        result = await ollama.chat(
+        result = await backend.chat(
             self._cfg,
             messages,
             system,
@@ -1461,7 +1464,7 @@ class LlmService:
             log.exception("llm: не удалось эмитить %s", EVENT_LLM_SPEECH_CURED)
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
-        await ollama.stop(self._cfg)
+        await backend.stop(self._cfg)
         if self._cfg.container_backend == "wsl-docker":
             await self._keepalive.stop()
         self._asleep = True

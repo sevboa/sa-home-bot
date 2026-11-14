@@ -4,6 +4,7 @@ import textwrap
 
 import pytest
 
+from sa_home_bot.llm import openai_chat
 from sa_home_bot.llm.model_profiles import (
     REASON_LEVELS,
     ModelProfile,
@@ -42,6 +43,34 @@ def test_num_ctx_default_from_packaged_profile():
     reg = load_profiles(None)
     gemma, _ = reg.resolve("gemma-4-26B")
     assert gemma.num_ctx == 14336
+
+
+def test_strata_alfred_profile_resolves_by_alias():
+    reg = load_profiles(None)
+    profile, matched = reg.resolve("alfred")
+    assert matched is True
+    assert profile.name == "strata-alfred"
+    assert profile.think_control == "effort"
+    assert profile.router is True
+    assert profile.num_ctx == 32768
+    assert profile.thinking_hidden is True
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_think", "expected_fields"),
+    [
+        ("off", False, {"chat_template_kwargs": {"enable_thinking": False}}),
+        ("low", "low", {"reasoning_budget_tokens": 1024}),
+        ("medium", "medium", {"reasoning_budget_tokens": 4096}),
+        ("high", "high", {"reasoning_budget_tokens": 8192}),
+    ],
+)
+def test_strata_alfred_think_arg_feeds_openai_think_fields(reason, expected_think, expected_fields):
+    reg = load_profiles(None)
+    profile, _ = reg.resolve("alfred")
+    think = profile.think_arg(reason)
+    assert think == expected_think
+    assert openai_chat.think_fields(think) == expected_fields
 
 
 @pytest.mark.parametrize(

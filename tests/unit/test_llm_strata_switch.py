@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import aiohttp
@@ -13,6 +14,7 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_IDLE_S,
     DEFAULT_MAX_WAIT_S,
     DEFAULT_POLL_S,
+    DEFAULT_PRIORITY_GRACE_S,
     MODELS_PATH,
     UPSTREAM_CONNECT_S,
     UPSTREAM_TIMEOUT,
@@ -23,6 +25,7 @@ from sa_home_bot.llm.strata_switch import (
     UnknownModel,
     build_app,
     load_settings,
+    resolve,
 )
 
 LAUNCHERS = {"iq3": ["/models/sa-home/stand/iq3-on.sh"], "qw2": ["/models/sa-home/stand/qw2-on.sh"]}
@@ -388,3 +391,339 @@ def test_load_settings_rejects_default_outside_launchers(tmp_path: Path):
     path.write_text('default = "qw2"\n[launchers]\niq3 = ["/models/iq3-on.sh"]\n', encoding="utf-8")
     with pytest.raises(UnknownModel, match="qw2"):
         load_settings(path)
+
+
+class ScratchUpstream:
+    def __init__(self, delay: float = 0.3) -> None:
+        self.delay = delay
+        self.arrived = 0
+        self.aborted: list[str] = []
+        self.completed: list[str] = []
+
+    async def chat(self, request: web.Request) -> web.StreamResponse:
+        self.arrived += 1
+        model = str((await request.json()).get("model"))
+        try:
+            await asyncio.sleep(self.delay)
+        except asyncio.CancelledError:
+            self.aborted.append(model)
+            raise
+        except ConnectionError as exc:
+            self.aborted.append(f"{model}:{type(exc).__name__}")
+            raise
+        self.completed.append(model)
+        return web.json_response({"choices": [{"message": {"content": "привет"}}]})
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_post(CHAT_PATH, self.chat)
+        return app
+
+
+class ScratchStreamUpstream:
+    def __init__(self, chunks: int = 4, gap: float = 0.1) -> None:
+        self.chunks = chunks
+        self.gap = gap
+        self.arrived = 0
+        self.aborted: list[str] = []
+        self.completed: list[str] = []
+
+    async def chat(self, request: web.Request) -> web.StreamResponse:
+        self.arrived += 1
+        payload = await request.json()
+        model = "поток" if payload.get("stream") else str(payload.get("model"))
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        try:
+            for _ in range(self.chunks):
+                await asyncio.sleep(self.gap)
+                await resp.write(b"data: chunk\n\n")
+            await resp.write_eof()
+        except (asyncio.CancelledError, ConnectionError) as exc:
+            self.aborted.append(f"{model}:{type(exc).__name__}")
+            raise
+        self.completed.append(model)
+        return resp
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_post(CHAT_PATH, self.chat)
+        return app
+
+
+def priority_settings(**overrides) -> SwitchSettings:
+    options = {
+        "aliases": {"alfred": "qw2"},
+        "priority": frozenset({"alfred"}),
+        "priority_grace_s": 0.0,
+        "idle_s": 0.05,
+    }
+    options.update(overrides)
+    return settings(**options)
+
+
+async def test_priority_interrupts_normal_request_and_retries_it():
+    switch = StrataSwitch(priority_settings(), FakeRun())
+    upstream = ScratchUpstream(delay=0.3)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        normal = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.1)
+        assert upstream.arrived == 1
+        priority_resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        priority_body = await priority_resp.json()
+        assert priority_resp.status == 200
+        assert priority_body["choices"][0]["message"]["content"] == "привет"
+        assert upstream.completed == ["qw2"]
+        assert upstream.aborted == ["iq3"]
+        normal_resp = await normal
+        normal_body = await normal_resp.json()
+        assert normal_resp.status == 200
+        assert normal_body["choices"][0]["message"]["content"] == "привет"
+        assert upstream.arrived == 3
+        assert upstream.completed == ["qw2", "iq3"]
+        assert upstream.aborted == ["iq3"]
+        assert switch.active == 0
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_two_normal_requests_without_priority_are_not_interrupted():
+    switch = StrataSwitch(priority_settings(), FakeRun())
+    upstream = ScratchUpstream(delay=0.2)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        first = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.05)
+        second = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        first_resp = await first
+        second_resp = await second
+        assert first_resp.status == 200
+        assert second_resp.status == 200
+        assert await first_resp.json() == await second_resp.json()
+        assert upstream.arrived == 2
+        assert upstream.aborted == []
+        assert upstream.completed == ["iq3", "iq3"]
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_normal_request_waits_for_priority_grace():
+    switch = StrataSwitch(priority_settings(priority_grace_s=0.4), FakeRun())
+    upstream = ScratchUpstream(delay=0.1)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        priority_resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        await priority_resp.read()
+        normal = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.15)
+        assert upstream.arrived == 1
+        normal_resp = await normal
+        assert normal_resp.status == 200
+        await normal_resp.read()
+        assert upstream.arrived == 2
+        assert upstream.aborted == []
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_started_stream_is_not_interrupted_and_priority_waits_it():
+    switch = StrataSwitch(priority_settings(aliases={"alfred": "iq3"}), FakeRun())
+    upstream = ScratchStreamUpstream(chunks=4, gap=0.1)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        normal = asyncio.create_task(
+            router.post(
+                CHAT_PATH, json={"model": "iq3", "messages": [], "stream": True}, headers=AUTH
+            )
+        )
+        await asyncio.sleep(0.15)
+        priority_resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        await priority_resp.read()
+        normal_resp = await normal
+        text = await normal_resp.text()
+        assert normal_resp.status == 200
+        assert [line for line in text.splitlines() if line] == ["data: chunk"] * 4
+        assert upstream.aborted == []
+        assert upstream.completed == ["поток", "iq3"]
+        assert upstream.arrived == 2
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_stream_without_bytes_to_client_is_interrupted_and_retried():
+    switch = StrataSwitch(priority_settings(aliases={"alfred": "iq3"}), FakeRun())
+    upstream = ScratchStreamUpstream(chunks=3, gap=0.3)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        normal = asyncio.create_task(
+            router.post(
+                CHAT_PATH, json={"model": "iq3", "messages": [], "stream": True}, headers=AUTH
+            )
+        )
+        await asyncio.sleep(0.1)
+        priority_resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        await priority_resp.read()
+        normal_resp = await normal
+        text = await normal_resp.text()
+        assert normal_resp.status == 200
+        assert [line for line in text.splitlines() if line] == ["data: chunk"] * 3
+        assert upstream.arrived == 3
+        assert upstream.completed == ["iq3", "поток"]
+        assert len(upstream.aborted) == 1
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_client_abort_of_streaming_normal_request_is_not_retried():
+    switch = StrataSwitch(priority_settings(aliases={"alfred": "iq3"}), FakeRun())
+    upstream = ScratchStreamUpstream(chunks=6, gap=0.1)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        session = aiohttp.ClientSession()
+
+        async def fetch_partial() -> None:
+            resp = await session.post(
+                router.make_url(CHAT_PATH),
+                json={"model": "iq3", "messages": [], "stream": True},
+                headers=AUTH,
+            )
+            try:
+                await resp.content.read(12)
+            finally:
+                resp.close()
+
+        try:
+            client = asyncio.create_task(fetch_partial())
+            await asyncio.sleep(0.25)
+            await client
+            await asyncio.sleep(0.5)
+        finally:
+            await session.close()
+        assert upstream.arrived == 1
+        assert upstream.completed == []
+        assert switch.active == 0
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_priority_switches_model_without_waiting_idle_gap():
+    switch = StrataSwitch(priority_settings(idle_s=30.0), FakeRun())
+    upstream = ScratchUpstream(delay=0.1)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        first = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        await first.read()
+        started = time.monotonic()
+        priority_resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        await priority_resp.read()
+        assert priority_resp.status == 200
+        assert time.monotonic() - started < 2.0
+        assert upstream.aborted == []
+        assert upstream.completed == ["iq3", "qw2"]
+    finally:
+        await close(router, upstream_server)
+
+
+def test_load_settings_reads_aliases_and_priority(tmp_path: Path):
+    path = tmp_path / "aliases.toml"
+    path.write_text(
+        'default = "iq3"\n'
+        'priority_grace_s = 4.0\n'
+        'priority = ["alfred"]\n'
+        "[aliases]\n"
+        'alfred = "qwen3.8"\n'
+        "[launchers]\n"
+        'iq3 = ["/models/iq3-on.sh"]\n'
+        '"qwen3.8" = ["/models/qwen-on.sh"]\n',
+        encoding="utf-8",
+    )
+    loaded = load_settings(path)
+    assert loaded.aliases == {"alfred": "qwen3.8"}
+    assert loaded.priority == frozenset({"alfred"})
+    assert loaded.priority_grace_s == 4.0
+    assert resolve(loaded, "alfred") == "qwen3.8"
+    assert resolve(loaded, "iq3") == "iq3"
+
+
+def test_load_settings_defaults_for_aliases_and_priority(tmp_path: Path):
+    path = tmp_path / "minimal.toml"
+    path.write_text('default = "iq3"\n[launchers]\niq3 = ["/models/iq3-on.sh"]\n', encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.aliases == {}
+    assert loaded.priority == frozenset()
+    assert loaded.priority_grace_s == DEFAULT_PRIORITY_GRACE_S
+    assert DEFAULT_PRIORITY_GRACE_S == 10.0
+
+
+def test_load_settings_rejects_alias_to_unknown_launcher(tmp_path: Path):
+    path = tmp_path / "bad_alias.toml"
+    path.write_text(
+        'default = "iq3"\n'
+        "[aliases]\n"
+        'alfred = "qwen3.8"\n'
+        "[launchers]\n"
+        'iq3 = ["/models/iq3-on.sh"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(UnknownModel, match="qwen3.8"):
+        load_settings(path)
+
+
+def test_resolve_rejects_unknown_name():
+    with pytest.raises(UnknownModel, match="нет-такой"):
+        resolve(settings(aliases={"alfred": "iq3"}), "нет-такой")
+
+
+async def test_models_lists_launchers_and_aliases():
+    run = FakeRun()
+    switch = StrataSwitch(settings(aliases={"alfred": "qw2"}, priority=frozenset({"alfred"})), run)
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.get(MODELS_PATH)
+        body = await resp.json()
+    finally:
+        await close(router, upstream_server)
+    assert resp.status == 200
+    assert [item["id"] for item in body["data"]] == ["iq3", "qw2", "alfred"]
+    assert run.calls == []
+    assert switch.current is None
+
+
+async def test_chat_by_alias_reaches_upstream_with_launcher_name():
+    run = FakeRun()
+    switch = StrataSwitch(settings(aliases={"alfred": "qw2"}, priority=frozenset({"alfred"})), run)
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(
+            CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
+        )
+        body = await resp.json()
+    finally:
+        await close(router, upstream_server)
+    assert resp.status == 200
+    assert body["choices"][0]["message"]["content"] == "привет"
+    assert upstream.bodies[0] == {"model": "qw2", "messages": []}
+    assert run.calls == [LAUNCHERS["qw2"]]
+    assert switch.current == "qw2"
+    assert switch.active == 0

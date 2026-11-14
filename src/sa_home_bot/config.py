@@ -373,6 +373,9 @@ class LlmConfig(BaseModel):
     container_backend: str = "wsl-docker"
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "qwen3:14b"
+    backend: Literal["ollama", "openai"] = "ollama"
+    openai_base_url: str = "http://127.0.0.1:8090/v1"
+    openai_api_key_file: Path | None = None
     wsl_distro: str = "Docker"
     ollama_container: str = "ollama"
     request_timeout_s: float = Field(default=240.0, gt=0)

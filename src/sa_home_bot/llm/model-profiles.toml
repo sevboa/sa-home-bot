@@ -52,6 +52,15 @@ num_ctx = 16384
 notes = "reasoning-level модели: Ollama think принимает строку low/medium/high"
 
 [[profile]]
+name = "strata-alfred"
+match = ["alfred"]
+think_control = "effort"
+router = true
+num_ctx = 32768
+thinking_hidden = true
+notes = "Qwen3.8 в Strata через маршрутизатор (псевдоним alfred): транспорт openai, reasoning-level модель"
+
+[[profile]]
 name = "_default"
 match = []
 think_control = "flag"
