@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm.ollama import _append_error_body, _is_transient_connection_error
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
 from sa_home_bot.utils.http import JSON_FETCH_ERRORS
 
@@ -187,18 +188,6 @@ def from_openai_response(data: dict[str, Any], model: str, elapsed_s: float) -> 
     }
 
 
-def _append_error_body(exc: urllib.error.HTTPError) -> None:
-    detail = exc.read().decode("utf-8", "replace").strip()
-    try:
-        parsed = json.loads(detail)
-    except ValueError:
-        parsed = None
-    if isinstance(parsed, dict) and parsed.get("error"):
-        detail = str(parsed["error"])
-    if detail:
-        exc.msg = f"{exc.msg}: {detail}"
-
-
 def _read_api_key(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -230,12 +219,6 @@ def _post_json_sync(
     except urllib.error.HTTPError as exc:
         _append_error_body(exc)
         raise
-
-
-def _is_transient_connection_error(exc: Exception) -> bool:
-    if isinstance(exc, urllib.error.HTTPError):
-        return False
-    return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
 
 
 async def _post_with_retry(
