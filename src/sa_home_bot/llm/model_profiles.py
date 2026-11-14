@@ -10,7 +10,9 @@ log = logging.getLogger(__name__)
 
 REASON_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
 
-_THINK_CONTROLS = frozenset({"flag", "flag_implicit_on", "effort", "none"})
+THINK_MINIMAL = "minimal"
+
+_THINK_CONTROLS = frozenset({"flag", "flag_implicit_on", "effort", "effort_min", "none"})
 
 _HARDCODED_DEFAULT = "_default"
 
@@ -34,6 +36,8 @@ class ModelProfile:
             return None if on else False
         if ctl == "effort":
             return reason if on else False
+        if ctl == "effort_min":
+            return reason if on else THINK_MINIMAL
         return on
 
     def summary(self) -> ModelProfileSummary:
