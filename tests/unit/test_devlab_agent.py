@@ -23,11 +23,15 @@ from sa_home_bot.devlab.agent.loop import (
 )
 from sa_home_bot.devlab.agent.model import (
     MODEL_TIMEOUT_S,
+    REASONING_FIELD,
+    REASONING_KEEP_LAST,
+    REASONING_MAX_CHARS,
     GatewayChat,
     ModelError,
     ModelReply,
     ToolCall,
     parse_reply,
+    with_reasoning,
 )
 from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, SandboxPathError
@@ -334,6 +338,45 @@ async def test_gateway_chat_request_and_parse():
     assert reply.tool_calls[0].name == "grep"
     assert (reply.tokens_in, reply.tokens_out) == (7, 3)
     assert reply.as_message()["tool_calls"][0]["function"]["name"] == "grep"
+
+
+async def test_gateway_chat_returns_own_reasoning_on_next_request():
+    bodies = []
+
+    async def handler(request):
+        bodies.append(await request.json())
+        call = {"id": f"k{len(bodies)}", "type": "function", "function": {"name": "grep"}}
+        body = reply_body("", [call])
+        body["choices"][0]["message"][REASONING_FIELD] = f"план {len(bodies)}"
+        return web.json_response(body)
+
+    server, chat = await run_gateway(handler)
+    try:
+        history = [{"role": "user", "content": "x"}]
+        first = await chat.complete(history, [])
+        history += [first.as_message(), {"role": "tool", "tool_call_id": "k1", "content": "ok"}]
+        await chat.complete(history, [])
+    finally:
+        await chat.close()
+        await server.close()
+    assert first.reasoning == "план 1"
+    assert REASONING_FIELD not in first.as_message()
+    assert REASONING_FIELD not in bodies[0]["messages"][0]
+    assert bodies[1]["messages"][1][REASONING_FIELD] == "план 1"
+
+
+def assistant(key):
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": key}]}
+
+
+def test_reasoning_goes_to_last_replies_within_budget():
+    keys = [f"k{i}" for i in range(REASONING_KEEP_LAST + 2)]
+    messages = [assistant(key) for key in keys]
+    memory = {key: "r" for key in keys}
+    memory[keys[-2]] = "x" * REASONING_MAX_CHARS
+    view = with_reasoning(messages, memory)
+    assert [REASONING_FIELD in m for m in view] == [False] * (len(keys) - 1) + [True]
+    assert REASONING_FIELD not in messages[-1]
 
 
 async def test_gateway_chat_timeout_and_http_error():

@@ -16,6 +16,9 @@ MODEL_TIMEOUT_S = 1800.0
 ERROR_SNIPPET_CHARS = 300
 RAW_LOG_CHARS = 1500
 FINISH_ERROR = "error"
+REASONING_FIELD = "reasoning_content"
+REASONING_KEEP_LAST = 4
+REASONING_MAX_CHARS = 60_000
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class ModelReply:
     tokens_out: int = 0
     cost_usd: float | None = None
     paid_free: bool = False
+    reasoning: str = ""
 
     def as_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
@@ -84,6 +88,7 @@ class GatewayChat:
         self._temperature = temperature
         self._owns_session = session is None
         self._session = session or aiohttp.ClientSession()
+        self._reasoning: dict[str, str] = {}
 
     async def close(self) -> None:
         if self._owns_session:
@@ -94,7 +99,7 @@ class GatewayChat:
     ) -> ModelReply:
         body = {
             "model": self._model,
-            "messages": with_flow_reminder(messages),
+            "messages": with_flow_reminder(with_reasoning(messages, self._reasoning)),
             "tools": tools,
             "temperature": self._temperature,
         }
@@ -113,7 +118,38 @@ class GatewayChat:
             raise ModelError(f"модель не ответила за {self._timeout.total:g} с") from exc
         except aiohttp.ClientError as exc:
             raise ModelError(f"шлюз недоступен: {type(exc).__name__}", transient=True) from exc
-        return parse_reply(data, len(messages))
+        reply = parse_reply(data, len(messages))
+        self._remember_reasoning(reply)
+        return reply
+
+    def _remember_reasoning(self, reply: ModelReply) -> None:
+        if not (reply.reasoning and reply.tool_calls):
+            return
+        self._reasoning[reply.tool_calls[0].id] = reply.reasoning
+        while len(self._reasoning) > REASONING_KEEP_LAST:
+            del self._reasoning[next(iter(self._reasoning))]
+
+
+def reply_key(message: dict[str, Any]) -> str | None:
+    calls = message.get("tool_calls") or ()
+    return str(calls[0].get("id")) if calls else None
+
+
+def with_reasoning(messages: list[dict[str, Any]], memory: dict[str, str]) -> list[dict[str, Any]]:
+    keyed = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "assistant" and reply_key(message) in memory
+    ][-REASONING_KEEP_LAST:]
+    view = list(messages)
+    budget = REASONING_MAX_CHARS
+    for index in reversed(keyed):
+        reasoning = memory[str(reply_key(view[index]))]
+        if len(reasoning) > budget:
+            break
+        budget -= len(reasoning)
+        view[index] = {**view[index], REASONING_FIELD: reasoning}
+    return view
 
 
 def error_text(body: str) -> str:
@@ -186,6 +222,7 @@ def parse_reply(data: Any, step: int = 0) -> ModelReply:
                 tokens_in=int(usage.get("prompt_tokens") or 0),
                 tokens_out=int(usage.get("completion_tokens") or 0),
                 cost_usd=usage_cost(usage),
+                reasoning=str(message.get(REASONING_FIELD) or ""),
             )
         except ModelError as exc:
             failure = exc
