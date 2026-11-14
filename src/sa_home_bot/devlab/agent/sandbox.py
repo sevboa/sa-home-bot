@@ -12,6 +12,8 @@ from sa_home_bot.utils.process import run
 IGNORED_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
 NOT_FOUND_EXIT_CODE = 127
 TIMEOUT_EXIT_CODE = -1
+EXIT_HEAD = "[код {code}]"
+OK_HEAD = EXIT_HEAD.format(code=0)
 
 
 class SandboxPathError(Exception):
@@ -32,7 +34,11 @@ class ExecResult:
         text = self.output
         if len(text) > limit:
             text = f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
-        head = f"[таймаут {timeout_s:g} с]" if self.timed_out else f"[код {self.exit_code}]"
+        head = (
+            f"[таймаут {timeout_s:g} с]"
+            if self.timed_out
+            else EXIT_HEAD.format(code=self.exit_code)
+        )
         return f"{head}\n{text}".rstrip()
 
 

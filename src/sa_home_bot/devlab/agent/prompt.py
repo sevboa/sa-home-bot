@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
@@ -21,6 +22,12 @@ SYSTEM_INTRO = (
     f"зелёных тестах и стражах проекта. Закончив часть работы, вызови {TOOL_STEP_DONE}. "
     f"Если без решения владельца нельзя двигаться дальше, вызови {TOOL_ASK_OWNER}. "
     "Ответ без вызова инструмента не засчитывается."
+)
+FLOW_REMINDER = (
+    "[Reminder] Follow the task's steps («Шаги») in order. When a step's check is green, call "
+    f"{TOOL_STEP_DONE} for it and move on to the next step, including the docs step. When all "
+    "steps are done, run the task's final check («Финальный прогон») and ruff check on the changed "
+    f"files, then call {TOOL_FINISH} in the same reply as soon as they are green."
 )
 RULES_TITLE = "Правила проекта (обязательны):"
 CONTINUATION_TITLE = (
@@ -57,3 +64,10 @@ def build_task(
             shown.append(f"- ... и ещё {len(changed) - CONTINUATION_LIMIT}")
         parts += [CONTINUATION_TITLE, "\n".join(shown)]
     return "\n\n".join(parts)
+
+
+def with_flow_reminder(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    view = list(messages)
+    if view and isinstance(view[-1].get("content"), str):
+        view[-1] = {**view[-1], "content": f"{view[-1]['content']}\n\n{FLOW_REMINDER}"}
+    return view

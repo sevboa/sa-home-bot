@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import aiohttp
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent.prompt import with_flow_reminder
 from sa_home_bot.devlab.usage import usage_cost
 
 MODEL_TIMEOUT_S = 1800.0
@@ -93,7 +94,7 @@ class GatewayChat:
     ) -> ModelReply:
         body = {
             "model": self._model,
-            "messages": messages,
+            "messages": with_flow_reminder(messages),
             "tools": tools,
             "temperature": self._temperature,
         }

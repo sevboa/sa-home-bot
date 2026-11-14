@@ -18,7 +18,7 @@ from sa_home_bot.utils.process import run
 
 log = logging.getLogger(__name__)
 
-UPSTREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
+UPSTREAM_CONNECT_S = 15
 BEARER = "Bearer "
 FALLBACK_FIELDS = frozenset({"models", "route"})
 LOCAL_HOST = "127.0.0.1"
@@ -62,7 +62,11 @@ class ModelBackend(abc.ABC):
 class HttpBackend(ModelBackend):
     def __init__(self, name: str, spec: DevlabModelConfig) -> None:
         super().__init__(name, spec)
-        self._session = aiohttp.ClientSession(timeout=UPSTREAM_TIMEOUT)
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=None, sock_connect=UPSTREAM_CONNECT_S, sock_read=spec.read_timeout_s
+            )
+        )
 
     async def _post(
         self, url: str, payload: dict[str, Any], headers: dict[str, str], proxy: str | None = None
@@ -79,7 +83,10 @@ class OpenAiBackend(HttpBackend):
         if self.spec.api_key:
             headers["Authorization"] = BEARER + self.spec.api_key
         url = self.spec.base_url.rstrip("/") + "/chat/completions"
-        body = {k: v for k, v in payload.items() if k not in FALLBACK_FIELDS}
+        body = {
+            **self.spec.params,
+            **{k: v for k, v in payload.items() if k not in FALLBACK_FIELDS},
+        }
         if self.spec.report_cost:
             body["usage"] = {"include": True}
         return await self._post(

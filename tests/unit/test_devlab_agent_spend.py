@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits
 from sa_home_bot.devlab.agent.model import GatewayChat, ModelError, ModelReply
+from sa_home_bot.devlab.agent.prompt import with_flow_reminder
 from sa_home_bot.devlab.agent.spend import JobSpend, SpendState
 from sa_home_bot.devlab.executor.agent_worker import AGENT_STATE_FILE, AgentState
 from sa_home_bot.devlab.executor.hub import ExecutorHub
@@ -110,7 +111,7 @@ async def test_failover_switches_gateway_keeping_dialog():
     assert first.content == "ок" and (first.tokens_in, first.tokens_out) == (5, 2)
     assert len(dead_bodies) == 1
     assert len(alive_bodies) == 2
-    assert alive_bodies[0]["messages"] == dead_bodies[0]["messages"] == MESSAGES
+    assert alive_bodies[0]["messages"] == dead_bodies[0]["messages"] == with_flow_reminder(MESSAGES)
     assert second.content == "ок"
 
 

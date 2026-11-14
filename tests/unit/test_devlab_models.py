@@ -205,6 +205,28 @@ async def test_provider_fallback_fields_are_not_forwarded(setup, provider):
     assert provider.received[0]["temperature"] == 0.2
 
 
+@pytest.mark.parametrize(
+    ("request_extra", "expected"),
+    [({}, 8192), ({"reasoning_budget_tokens": 512}, 512)],
+)
+async def test_model_params_are_defaults_under_request_fields(
+    setup, provider, request_extra, expected
+):
+    _, client = await setup(params={"reasoning_budget_tokens": 8192})
+    resp = await client.post(protocol.HTTP_CHAT_PATH, json={**CHAT, **request_extra}, headers=AUTH)
+    await resp.read()
+    assert provider.received[0]["reasoning_budget_tokens"] == expected
+
+
+@pytest.mark.parametrize(("configured", "expected"), [({}, 300), ({"read_timeout_s": 900}, 900)])
+async def test_upstream_read_timeout_comes_from_model_config(configured, expected):
+    backend = build_backend(MODEL, DevlabModelConfig(**configured))
+    try:
+        assert backend._session.timeout.sock_read == expected
+    finally:
+        await backend.close()
+
+
 @pytest.mark.parametrize(("report_cost", "expected"), [(True, {"include": True}), (False, None)])
 async def test_usage_cost_is_requested_only_when_configured(setup, provider, report_cost, expected):
     _, client = await setup(report_cost=report_cost)

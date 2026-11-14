@@ -13,6 +13,7 @@ from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import (
+    REPEAT_GREEN_HINT,
     REPEAT_HINT,
     REPEAT_SKIPPED,
     AgentLimits,
@@ -28,6 +29,7 @@ from sa_home_bot.devlab.agent.model import (
     ToolCall,
     parse_reply,
 )
+from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, SandboxPathError
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
@@ -327,6 +329,7 @@ async def test_gateway_chat_request_and_parse():
     assert seen["headers"]["Authorization"] == "Bearer tok"
     assert seen["headers"][protocol.HEADER_JOB] == "job-1"
     assert seen["body"]["model"] == "flint" and seen["body"]["tools"] == [{"type": "function"}]
+    assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{FLOW_REMINDER}"}]
     assert reply.content == "мысль"
     assert reply.tool_calls[0].name == "grep"
     assert (reply.tokens_in, reply.tokens_out) == (7, 3)
@@ -625,6 +628,17 @@ def repeat_spec():
     return AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), allowed_commands=("echo",))
 
 
+async def test_repeat_of_red_check_gets_try_otherwise_hint(tmp_path):
+    model = ScriptedChatModel(*(lint_call(c, "false x.py") for c in "abc"))
+    spec = AgentSpec(
+        test_argv=GREEN_TEST, diff_prefixes=("src/",), allowed_commands=("echo", "false")
+    )
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    result = await loop.run("правила", "задача")
+    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
+    assert tool_results[1].endswith(REPEAT_HINT)
+
+
 async def test_repeated_call_gets_hint_then_crane(tmp_path):
     entries = []
     model = ScriptedChatModel(lint_call("a"), lint_call("b"), lint_call("c"), lint_call("d"))
@@ -636,8 +650,8 @@ async def test_repeated_call_gets_hint_then_crane(tmp_path):
     assert result.reason == "модель повторяет run_command echo x.py"
     assert result.dialog.call_id is None
     tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
-    assert REPEAT_HINT not in tool_results[0]
-    assert tool_results[1].endswith(REPEAT_HINT)
+    assert REPEAT_GREEN_HINT not in tool_results[0]
+    assert tool_results[1].endswith(REPEAT_GREEN_HINT)
     assert tool_results[2] == REPEAT_SKIPPED
     assert entries[-1]["event"] == "end"
     assert entries[-1]["crane"] == "repeat"
