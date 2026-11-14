@@ -28,6 +28,7 @@
 - [devlab/](devlab/hub.md) — мастерская роя: хаб `devlab_hub` (токены, очередь и ящик, git, API
   исполнителя и MCP, будильник), оповещения владельцу (`devlab/notify.md`), чек-лист выката на alfred, шлюз моделей `devlab_models`, исполнитель и выкат (`devlab/deploy.md`).
 - [vpn-services/](vpn-services/README.md) — служба `vpn`, `vpn_check`, `reality/`, подписка Hiddify.
-- [platform-llm/](platform-llm/README.md) — служба `llm`: Ollama, STT/TTS, генерация картинок.
+- [platform-llm/](platform-llm/README.md) — служба `llm`: Ollama, STT/TTS, генерация картинок,
+  маршрутизатор моделей Strata (`platform-llm/strata-switch.md`).
 - [platform/](platform/README.md) — конфиг, база данных, здоровье и пороги, бэкапы, торренты, задачи.
 - [deploy/extras.md](deploy/extras.md) — extras в `pyproject.toml` и причины пинов зависимостей.
