@@ -31,7 +31,7 @@ def test_fit_prompt_short_prompt_untouched():
 async def test_compose_parses_json_keeps_light_and_camera(monkeypatch):
     seen = {}
 
-    async def fake_chat(cfg, messages, system, *, tools, think, response_format):
+    async def fake_chat(cfg, messages, system, *, think, response_format):
         seen.update(messages=messages, format=response_format, think=think)
         content = json.dumps(
             {"prompt": "ginger cat, blue sofa, cinematic lighting", "negative": "dogs"}

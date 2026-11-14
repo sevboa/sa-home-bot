@@ -6,7 +6,7 @@ from typing import Any
 from PIL import Image
 
 from sa_home_bot.config import LlmConfig
-from sa_home_bot.llm import ollama, vision
+from sa_home_bot.llm import backend, ollama, vision
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ async def inspect(
     image_b64: str, expect: list[str], cfg: LlmConfig, *, think: Any = None
 ) -> dict[str, Any] | None:
     try:
-        result = await ollama.chat(
+        result = await backend.chat(
             cfg,
             [{"role": "user", "content": build_question(expect), "images": [image_b64]}],
             SYSTEM_PROMPT,

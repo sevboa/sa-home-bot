@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import urllib.error
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -235,6 +238,178 @@ def test_from_openai_response_without_usage_and_choices():
     }
 
 
+def sse_chunk(**fields):
+    return f"data: {json.dumps(fields)}\n\n"
+
+
+def delta_chunk(content=None, reasoning=None, calls=None, finish=None, model=None, usage=None):
+    fields: dict[str, object] = {}
+    if model is not None:
+        fields["model"] = model
+    delta: dict[str, object] = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning is not None:
+        delta["reasoning_content"] = reasoning
+    if calls is not None:
+        delta["tool_calls"] = calls
+    choice: dict[str, object] = {"index": 0, "delta": delta}
+    if finish is not None:
+        choice["finish_reason"] = finish
+    fields["choices"] = [choice]
+    if usage is not None:
+        fields["usage"] = usage
+    return fields
+
+
+def test_parse_stream_collects_content_and_reports_accumulated_text():
+    seen: list[str] = []
+    lines = [
+        sse_chunk(**delta_chunk(content="Доброго", model="qwen3.8")),
+        "\n",
+        sse_chunk(**delta_chunk(content=" дня")),
+        sse_chunk(**delta_chunk(finish="stop", usage={"prompt_tokens": 9, "completion_tokens": 3})),
+        "data: [DONE]\n\n",
+    ]
+    data = openai_chat.parse_stream(lines, seen.append)
+
+    assert seen == ["Доброго", "Доброго дня"]
+    assert data["model"] == "qwen3.8"
+    assert data["choices"][0]["message"] == {"role": "assistant", "content": "Доброго дня"}
+    assert data["choices"][0]["finish_reason"] == "stop"
+    assert data["usage"] == {"prompt_tokens": 9, "completion_tokens": 3}
+
+
+def test_parse_stream_collects_reasoning_into_message():
+    lines = [
+        sse_chunk(**delta_chunk(reasoning="план")),
+        sse_chunk(**delta_chunk(reasoning=" действий")),
+        sse_chunk(**delta_chunk(content="готово", finish="stop")),
+        "data: [DONE]\n",
+    ]
+    data = openai_chat.parse_stream(lines, lambda text: None)
+    assert data["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "готово",
+        "reasoning_content": "план действий",
+    }
+
+
+def test_parse_stream_glues_tool_call_pieces_by_index():
+    lines = [
+        sse_chunk(
+            **delta_chunk(
+                calls=[
+                    {"index": 0, "id": "call_1", "function": {"name": "remind", "arguments": ""}}
+                ]
+            )
+        ),
+        sse_chunk(**delta_chunk(calls=[{"index": 0, "function": {"arguments": '{"text"'}}])),
+        sse_chunk(**delta_chunk(calls=[{"index": 0, "function": {"arguments": ':"раз"}'}}])),
+        sse_chunk(
+            **delta_chunk(
+                calls=[{"index": 1, "function": {"name": "web_search", "arguments": '{"q":"x"}'}}],
+                finish="tool_calls",
+            )
+        ),
+        "data: [DONE]\n",
+    ]
+    data = openai_chat.parse_stream(lines, lambda text: None)
+    message = data["choices"][0]["message"]
+
+    assert message["content"] == ""
+    assert message["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "remind", "arguments": '{"text":"раз"}'},
+        },
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": '{"q":"x"}'},
+        },
+    ]
+    assert data["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_parse_stream_numbers_tool_calls_without_id_by_position():
+    lines = [
+        sse_chunk(
+            **delta_chunk(
+                calls=[
+                    {"index": 3, "id": "call_9", "function": {"name": "remind", "arguments": "{}"}},
+                    {"index": 7, "function": {"name": "web_search", "arguments": "{}"}},
+                ]
+            )
+        ),
+        "data: [DONE]\n",
+    ]
+    data = openai_chat.parse_stream(lines, lambda text: None)
+    calls = data["choices"][0]["message"]["tool_calls"]
+    assert [call["id"] for call in calls] == ["call_9", "call_2"]
+
+
+def test_parse_stream_keeps_finish_reason_length():
+    lines = [
+        sse_chunk(**delta_chunk(content="обрезано")),
+        sse_chunk(**delta_chunk(finish="length")),
+        "data: [DONE]\n",
+    ]
+    data = openai_chat.parse_stream(lines, lambda text: None)
+    assert data["choices"][0]["finish_reason"] == "length"
+
+
+def test_parse_stream_ignores_junk_and_stops_at_done():
+    lines = [
+        ": keep-alive\n",
+        "data: не json\n\n",
+        sse_chunk(**delta_chunk(content="ok")),
+        "data: [DONE]\n",
+        sse_chunk(**delta_chunk(content="после done")),
+    ]
+    seen: list[str] = []
+    data = openai_chat.parse_stream(lines, seen.append)
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert data["choices"][0]["finish_reason"] is None
+    assert seen == ["ok"]
+
+
+def test_parse_stream_handles_bytes_lines():
+    lines = [
+        b'data: {"choices": [{"delta": {"content": "\xd0\x94\xd0\xbd"}}]}\n',
+        b"data: [DONE]\n",
+    ]
+    seen: list[str] = []
+    data = openai_chat.parse_stream(lines, seen.append)
+    assert data["choices"][0]["message"]["content"] == "Дн"
+    assert seen == ["Дн"]
+
+
+def test_chat_stream_result_matches_from_openai_response():
+    lines = [
+        sse_chunk(**delta_chunk(content="ответ", model="qwen3.8")),
+        sse_chunk(
+            **delta_chunk(
+                finish="length",
+                usage={"prompt_tokens": 11, "completion_tokens": 4},
+            )
+        ),
+        "data: [DONE]\n",
+    ]
+    result = openai_chat.from_openai_response(
+        openai_chat.parse_stream(lines, lambda text: None), "qwen3.8", 2.5
+    )
+    assert result == {
+        "model": "qwen3.8",
+        "message": {"role": "assistant", "content": "ответ"},
+        "done_reason": "length",
+        "prompt_eval_count": 11,
+        "eval_count": 4,
+        "total_duration": 2_500_000_000,
+    }
+
+
 async def run_server(handler, **cfg_overrides):
     app = web.Application()
     app.router.add_post(CHAT_ROUTE, handler)
@@ -352,4 +527,132 @@ async def test_chat_http_error_keeps_body_and_hides_key(tmp_path):
         await server.close()
     assert excinfo.value.code == ERR_INTERNAL
     assert "модель не найдена" in str(excinfo.value)
+    assert "secret-key-42" not in str(excinfo.value)
+
+
+def sse_handler(seen, chunks, fail_first=False):
+    async def handler(request):
+        seen.setdefault("bodies", []).append(await request.json())
+        seen.setdefault("headers", []).append(dict(request.headers))
+        if fail_first and len(seen["bodies"]) == 1:
+            request.transport.close()
+            return web.json_response({})
+        response = web.StreamResponse()
+        response.headers["Content-Type"] = "text/event-stream"
+        await response.prepare(request)
+        for chunk in chunks:
+            await response.write(chunk.encode())
+        await response.write(b"data: [DONE]\n\n")
+        await response.write_eof()
+        return response
+
+    return handler
+
+
+async def test_chat_stream_posts_stream_body_and_streams_chunks(tmp_path):
+    key_file = tmp_path / "key.txt"
+    key_file.write_text("secret-key-42")
+    seen: dict[str, list] = {}
+    chunks = [
+        sse_chunk(**delta_chunk(content="Доброго", model="qwen3.8")),
+        sse_chunk(**delta_chunk(reasoning="короткий план")),
+        sse_chunk(**delta_chunk(content=" дня")),
+        sse_chunk(
+            **delta_chunk(
+                finish="stop",
+                usage={"prompt_tokens": 13, "completion_tokens": 5},
+            )
+        ),
+    ]
+    server, cfg = await run_server(
+        sse_handler(seen, chunks), openai_api_key_file=key_file
+    )
+    collected: list[str] = []
+    try:
+        result = await openai_chat.chat_stream(
+            cfg,
+            [{"role": "user", "content": "привет"}],
+            "персона",
+            collected.append,
+            tools=[{"type": "function", "function": {"name": "remind"}}],
+            think="medium",
+        )
+    finally:
+        await server.close()
+
+    body = seen["bodies"][0]
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+    assert body["reasoning_budget_tokens"] == 4096
+    assert body["tools"] == [{"type": "function", "function": {"name": "remind"}}]
+    assert "options" not in body and "keep_alive" not in body
+    assert seen["headers"][0]["Authorization"] == "Bearer secret-key-42"
+    assert collected == ["Доброго", "Доброго дня"]
+    assert result["message"] == {
+        "role": "assistant",
+        "content": "Доброго дня",
+        "thinking": "короткий план",
+    }
+    assert result["done_reason"] == "stop"
+    assert result["prompt_eval_count"] == 13
+    assert result["eval_count"] == 5
+    assert result["model"] == "qwen3.8"
+
+
+async def test_chat_stream_retries_when_no_chunk_arrived_yet():
+    seen: dict[str, list] = {}
+    chunks = [sse_chunk(**delta_chunk(content="ответ", finish="stop"))]
+    server, cfg = await run_server(sse_handler(seen, chunks, fail_first=True))
+    collected: list[str] = []
+    try:
+        result = await openai_chat.chat_stream(
+            cfg, [{"role": "user", "content": "привет"}], "персона", collected.append
+        )
+    finally:
+        await server.close()
+    assert len(seen["bodies"]) == 2
+    assert collected == ["ответ"]
+    assert result["message"]["content"] == "ответ"
+
+
+async def test_chat_stream_does_not_retry_once_a_chunk_arrived(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post_stream(url, payload, headers, timeout, on_chunk):
+        calls["n"] += 1
+        on_chunk("начало")
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(openai_chat, "_post_json_stream_sync", fake_post_stream)
+    collected: list[str] = []
+    with pytest.raises(ProtoError) as excinfo:
+        await openai_chat.chat_stream(
+            LlmConfig(model="qwen3.8", backend="openai", request_timeout_s=5.0),
+            [{"role": "user", "content": "привет"}],
+            "персона",
+            collected.append,
+        )
+
+    assert calls["n"] == 1
+    assert collected == ["начало"]
+    assert excinfo.value.code == ERR_INTERNAL
+
+
+async def test_chat_stream_http_error_keeps_body_and_hides_key(tmp_path):
+    key_file = tmp_path / "key.txt"
+    key_file.write_text("secret-key-42")
+
+    async def handler(request):
+        return web.json_response({"error": "нет модели"}, status=500)
+
+    server, cfg = await run_server(handler, openai_api_key_file=key_file)
+    try:
+        with pytest.raises(ProtoError) as excinfo:
+            await openai_chat.chat_stream(
+                cfg, [{"role": "user", "content": "привет"}], "персона", lambda text: None
+            )
+    finally:
+        await server.close()
+    assert excinfo.value.code == ERR_INTERNAL
+    assert "нет модели" in str(excinfo.value)
     assert "secret-key-42" not in str(excinfo.value)

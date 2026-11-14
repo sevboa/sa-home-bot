@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
-from sa_home_bot.llm import ollama
+from sa_home_bot.llm import backend, ollama
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def _parse(content: str) -> tuple[str, str]:
 
 async def compose(description: str, cfg: LlmConfig, think: Any = None) -> tuple[str, str]:
     try:
-        result = await ollama.chat(
+        result = await backend.chat(
             cfg,
             [{"role": "user", "content": description}],
             SYSTEM_PROMPT,

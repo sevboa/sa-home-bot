@@ -5,6 +5,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,9 @@ _SAMPLING_FIELDS: tuple[str, ...] = ("temperature", "top_p", "seed")
 _TOOL_CALL_ID_PREFIX = "call_"
 _IMAGE_URL_PREFIX = "data:image/jpeg;base64,"
 _FINISH_LENGTH = "length"
+_SSE_DATA_PREFIX = "data:"
+_SSE_DONE = "[DONE]"
+_STREAM_OPTIONS: dict[str, Any] = {"include_usage": True}
 
 
 def _text_part(text: str) -> dict[str, Any]:
@@ -175,6 +179,92 @@ def _first_choice(data: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _delta_of(choice: dict[str, Any]) -> dict[str, Any]:
+    delta = choice.get("delta")
+    return delta if isinstance(delta, dict) else {}
+
+
+def _merge_stream_tool_call(calls: dict[int, dict[str, str]], raw: Any) -> None:
+    if not isinstance(raw, dict):
+        return
+    raw_index = raw.get("index")
+    number = raw_index if isinstance(raw_index, int) else len(calls)
+    entry = calls.setdefault(number, {"id": "", "name": "", "arguments": ""})
+    call_id = raw.get("id")
+    if call_id:
+        entry["id"] = str(call_id)
+    function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+    name = function.get("name")
+    if isinstance(name, str):
+        entry["name"] = f"{entry['name']}{name}"
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        entry["arguments"] = f"{entry['arguments']}{arguments}"
+
+
+def _stream_tool_calls(calls: dict[int, dict[str, str]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for position, (_, entry) in enumerate(sorted(calls.items()), 1):
+        out.append(
+            {
+                "id": entry["id"] or f"{_TOOL_CALL_ID_PREFIX}{position}",
+                "type": "function",
+                "function": {"name": entry["name"], "arguments": entry["arguments"]},
+            }
+        )
+    return out
+
+
+def parse_stream(lines: Iterable[bytes | str], on_chunk: Callable[[str], None]) -> dict[str, Any]:
+    content_parts: list[str] = []
+    thinking_parts: list[str] = []
+    tool_calls: dict[int, dict[str, str]] = {}
+    model = ""
+    finish_reason: Any = None
+    usage: dict[str, Any] = {}
+    for raw_line in lines:
+        line = raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else raw_line
+        line = line.strip()
+        if not line.startswith(_SSE_DATA_PREFIX):
+            continue
+        body = line[len(_SSE_DATA_PREFIX) :].strip()
+        if body == _SSE_DONE:
+            break
+        try:
+            data = json.loads(body)
+        except ValueError:
+            log.warning("llm: openai stream — строка не разбирается как JSON, пропускаю")
+            continue
+        if not isinstance(data, dict):
+            continue
+        model = str(data.get("model") or model)
+        if isinstance(data.get("usage"), dict):
+            usage = data["usage"]
+        choice = _first_choice(data)
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+        delta = _delta_of(choice)
+        thought = delta.get("reasoning_content")
+        if isinstance(thought, str) and thought:
+            thinking_parts.append(thought)
+        piece = delta.get("content")
+        if isinstance(piece, str) and piece:
+            content_parts.append(piece)
+            on_chunk("".join(content_parts))
+        for raw_call in delta.get("tool_calls") or []:
+            _merge_stream_tool_call(tool_calls, raw_call)
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if thinking_parts:
+        message["reasoning_content"] = "".join(thinking_parts)
+    if tool_calls:
+        message["tool_calls"] = _stream_tool_calls(tool_calls)
+    return {
+        "model": model,
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
+
 def from_openai_response(data: dict[str, Any], model: str, elapsed_s: float) -> dict[str, Any]:
     choice = _first_choice(data)
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
@@ -221,9 +311,35 @@ def _post_json_sync(
         raise
 
 
-async def _post_with_retry(
-    cfg: LlmConfig, url: str, payload: dict[str, Any], headers: dict[str, str]
+def _post_json_stream_sync(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+    on_chunk: Callable[[str], None],
 ) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return parse_stream(resp, on_chunk)
+    except urllib.error.HTTPError as exc:
+        _append_error_body(exc)
+        raise
+
+
+async def _post_with_retry(
+    cfg: LlmConfig,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    on_chunk: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    streaming = on_chunk is not None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + cfg.request_timeout_s
     last_exc: Exception | None = None
@@ -231,18 +347,30 @@ async def _post_with_retry(
         left = deadline - loop.time()
         if left <= 0:
             break
+        sent_any = False
+
+        def _mark_chunk(text: str) -> None:
+            nonlocal sent_any
+            sent_any = True
+            on_chunk(text)
+
         try:
+            if streaming:
+                return await asyncio.to_thread(
+                    _post_json_stream_sync, url, payload, headers, left, _mark_chunk
+                )
             return await asyncio.to_thread(_post_json_sync, url, payload, headers, left)
         except JSON_FETCH_ERRORS as exc:
             last_exc = exc
             out_of_attempts = attempt >= _POST_RETRY_ATTEMPTS
-            if out_of_attempts or not _is_transient_connection_error(exc):
+            if sent_any or out_of_attempts or not _is_transient_connection_error(exc):
                 break
             if deadline - loop.time() <= _POST_RETRY_DELAY_S:
                 break
             log.warning(
-                "llm: %s оборвался (%s) — повтор через %.0fс (попытка %d/%d)",
+                "llm: %s%s оборвался (%s) — повтор через %.0fс (попытка %d/%d)",
                 url,
+                " (стрим)" if streaming else "",
                 exc,
                 _POST_RETRY_DELAY_S,
                 attempt,
@@ -276,6 +404,30 @@ async def chat(
     loop = asyncio.get_running_loop()
     started = loop.time()
     data = await _post_with_retry(cfg, url, payload, _auth_headers(cfg))
+    return from_openai_response(data, cfg.model, loop.time() - started)
+
+
+async def chat_stream(
+    cfg: LlmConfig,
+    messages: list[dict[str, Any]],
+    system: str,
+    on_chunk: Callable[[str], None],
+    tools: list[dict[str, Any]] | None = None,
+    think: bool | str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": cfg.model,
+        "messages": to_openai_messages(messages, system),
+        "stream": True,
+        "stream_options": _STREAM_OPTIONS,
+        **think_fields(think),
+    }
+    if tools:
+        payload["tools"] = tools
+    url = f"{cfg.openai_base_url}{CHAT_COMPLETIONS_PATH}"
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    data = await _post_with_retry(cfg, url, payload, _auth_headers(cfg), on_chunk)
     return from_openai_response(data, cfg.model, loop.time() - started)
 
 

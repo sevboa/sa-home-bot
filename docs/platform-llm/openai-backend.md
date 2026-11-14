@@ -1,12 +1,12 @@
 # Транспорт OpenAI для службы llm (llm/openai_chat.py)
 
-Запись 2026-11-15. Альфред переезжает на Qwen3.8 в Strata — у неё OpenAI-совместимый API
-(`POST <openai_base_url>/chat/completions`), тогда как `llm/ollama.py` говорит с родным API Ollama
-(`/api/chat`). Модуль `llm/openai_chat.py` даёт `chat` и `generate` той же сигнатуры и возвращает
-словарь того же вида, что Ollama, поэтому читающий ответ код (`llm/service.py::_log_ollama_timings`,
-обработка `ACTION_CHAT`, `llm/photo_check.py`, `llm/image_prompt.py`) не меняется. Подключение к службе
-и потоковый режим — отдельные следующие задачи: сейчас модуль ни к чему не подключён, `ollama.py` и
-`service.py` не тронуты.
+Запись 2026-11-15, продолжение 2026-11-16 (поток и подключение к службе). Альфред переезжает на
+Qwen3.8 в Strata — у неё OpenAI-совместимый API (`POST <openai_base_url>/chat/completions`), тогда
+как `llm/ollama.py` говорит с родным API Ollama (`/api/chat`). Модуль `llm/openai_chat.py` даёт
+`chat`, `chat_stream` и `generate` той же сигнатуры и возвращает словарь того же вида, что Ollama,
+поэтому читающий ответ код (`llm/service.py::_log_ollama_timings`, обработка `ACTION_CHAT`,
+`llm/photo_check.py`, `llm/image_prompt.py`) не меняется. Служба выбирает транспорт через фасад
+`llm/backend.py` и поле `[llm] backend` (запись ниже).
 
 ## Почему свой клиент, а не библиотека
 
@@ -80,6 +80,79 @@ Ollama и OpenAI совпадает), плюс поля из `think_fields` и `
 Ключ не логируется и не попадает в текст ошибок: в `ProtoError` попадают только URL и причина
 соединения/тело HTTP-ошибки.
 
+## Поток (`chat_stream`, `parse_stream`)
+
+`chat_stream` собирает то же тело, что `chat`, но со `stream: true` и
+`stream_options: {"include_usage": true}`: без `include_usage` Strata в потоке не отдаёт `usage`, и
+`prompt_eval_count`/`eval_count` в `_log_ollama_timings` и в статистике окна (`_usage_stats`) были бы
+пустыми. `options` у потока нет — сэмплинг служебных проходов (`temperature`, `num_predict`) нужен
+только обычным вызовам, а потоком служба ходит лишь в персонажном проходе.
+
+Разбор потока вынесен в чистую `parse_stream(lines, on_chunk)`: она работает над итератором строк
+(её тестируют без сети), а `_post_json_stream_sync` лишь открывает `urllib`-ответ и передаёт ей
+строки. Строки SSE: `data: {json}`, последняя `data: [DONE]`. Строки без префикса `data:` (keep-alive
+комментарии) и неразбираемый JSON пропускаются с WARNING — обрыв одной строки не должен обрывать
+ответ; после `[DONE]` чтение прекращается, хвост игнорируется.
+
+Из `choices[0].delta`: `content` накапливается и `on_chunk` получает весь накопленный текст (не
+кусок) — ровно как у Ollama, поэтому буфер `chat_progress` и `bot/ai_flow.py` не менялись;
+`reasoning_content` накапливается отдельно; `tool_calls` склеиваются по `index` (`id` и
+`function.name` приходят один раз, `function.arguments` — кусками). `finish_reason` берётся из
+последнего куска с ним. Отдельный кусок с `usage` (у него пустые `choices`) даёт счётчики.
+`parse_stream` возвращает ответ в форме **не-стримового** OpenAI-ответа (`choices[0].message` с
+`content`/`reasoning_content`/`tool_calls`, `finish_reason`, `usage`), поэтому `from_openai_response`
+служит одна и та же функция обоим режимам, а `tool_calls` в форме Ollama получаются тем же
+`_ollama_tool_call`. Куски `tool_calls` без `id` получают `call_<позиция>` — та же нумерация, что
+`to_openai_messages` выдаёт вызовам в истории.
+
+Повтор при обрыве — только пока не пришло ни одного куска (`sent_any` в `_post_with_retry`), как у
+Ollama: половину ответа второй попыткой не повторяем, пользователь уже видит текст. HTTP-ошибка
+обогащается телом (`_append_error_body`) и наружу идёт как `ProtoError(ERR_INTERNAL, ...)`.
+
+## Фасад транспорта (`llm/backend.py`)
+
+`service.py`, `photo_check.py` и `image_prompt.py` зовут модель через `backend.chat`,
+`backend.chat_stream`, `backend.generate` — те же сигнатуры, что у `ollama.*`. Фасад берёт модуль
+транспорта по `cfg.backend` и вызывает функцию **атрибутом модуля в момент вызова**, а не своим
+импортом: подмена `ollama.chat` в тестах службы продолжает работать.
+
+`backend.preload`, `backend.ensure_running` и `backend.stop` при `backend = "openai"` не делают
+ничего. Strata — всегда поднятый HTTP-сервер на чужой машине: прогревать нечего (`ensure_running`
+у Ollama поднимает WSL/контейнер и ждёт `/api/version`), модель не выгружается по нашему запросу
+(`preload` у Ollama — находка 2026-07-27: без явной загрузки первый запрос платит десятки секунд),
+и выключать её нельзя — ею пользуются другие клиенты, а `stop` у Ollama гасит контейнер. Поэтому
+`ACTION_WARMUP` при openai остаётся быстрым no-op (служба лишь снимает флаг «спит»), а `sleep` не
+трогает чужую машину: усыпление службы llm при openai сводится к её собственному состоянию и
+остановке WSL-keepalive, которого при openai и так нет (`container_backend` при таком транспорте не
+используется).
+
+`ollama.parse_json_object` и `ollama.WslKeepalive` остаются в `ollama.py`: их берут по имени там же,
+где они живут, фасад их не перекладывает.
+
+## Профиль `strata-alfred` (`model-profiles.toml`)
+
+`name = "alfred"` — псевдоним Qwen3.8 в Strata, его и пишет `[llm] model`. Профиль
+`think_control = "effort"`, `router = true`, `num_ctx = 32768`, `thinking_hidden = true`:
+
+- `effort` → `think_arg` отдаёт `False` для `off` и строки `low`/`medium`/`high` для уровней —
+  ровно то, что понимает `openai_chat.think_fields` (`False` → `chat_template_kwargs.enable_thinking`,
+  уровень → `reasoning_budget_tokens` 1024/4096/8192);
+- `num_ctx = 32768` — окно запроса боту; в самой Strata окно задаётся запуском модели, запросом его
+  не передать (`options_fields` отбрасывает `num_ctx`), но по этому числу бот считает страховку
+  переполнения и сжатие истории;
+- `thinking_hidden = true` — рассуждение приходит в невидимый `message.thinking`, бот показывает
+  «задумался».
+
+## Пример `[llm]` для mycraft
+
+```toml
+[llm]
+backend = "openai"
+openai_base_url = "http://127.0.0.1:8090/v1"
+model = "alfred"
+openai_api_key_file = "secrets/strata_key.txt"
+```
+
 ## Новые поля конфига (`[llm]`)
 
 - `backend` — `Literal["ollama", "openai"]`, по умолчанию `"ollama"`: выбор транспорта, существующие
@@ -89,6 +162,13 @@ Ollama и OpenAI совпадает), плюс поля из `think_fields` и `
 
 Тесты: `tests/unit/test_llm_openai_chat.py` — перевод сообщений (картинка, два вызова инструмента с
 двумя ответами, все значения `think`), перевод ответа (обычный, с рассуждением, с вызовом инструмента,
-с обрезкой по длине) и сеть на фейковом сервере aiohttp: тело запроса, заголовок с ключом из
-временного файла, отсутствие заголовка без файла, разбор ответа, повтор после обрыва соединения,
-HTTP 500 как `ProtoError`.
+с обрезкой по длине), разбор потока (`parse_stream` на списке строк: накопленный текст в `on_chunk`,
+рассуждение, склейка `tool_calls` по `index` и нумерация без `id`, `usage`, `finish_reason: length`,
+мусорные строки и хвост после `[DONE]`, байтовые строки) и сеть на фейковом сервере aiohttp: тело
+запроса, заголовок с ключом из временного файла, отсутствие заголовка без файла, разбор ответа,
+повтор после обрыва соединения, HTTP 500 как `ProtoError`, а для потока — тело со `stream: true` и
+`stream_options`, SSE-ответ с чанками и `usage`, повтор пока не пришёл ни один кусок и отказ
+повторять после первого куска. `tests/unit/test_llm_backend.py` — выбор транспорта для обоих
+значений `backend`, проброс именованных аргументов и то, что при openai `preload`/`ensure_running`/
+`stop` не зовут ничего. `tests/unit/test_model_profiles.py` — разрешение профиля по имени `alfred` и
+что `think_arg` этого профиля отдаёт значения, которые принимает `openai_chat.think_fields`.
