@@ -183,6 +183,22 @@ async def test_request_to_old_model_waits_while_switch_runs():
     assert switch.active == 0
 
 
+async def test_queued_request_for_new_model_does_not_relaunch_it():
+    gate = asyncio.Event()
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=0.0), run, StepClock())
+    run.gate = gate
+    first = asyncio.create_task(switch.acquire("qw2"))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(switch.acquire("qw2"))
+    await asyncio.sleep(0.05)
+    gate.set()
+    await first
+    await second
+    assert run.calls == [LAUNCHERS["qw2"]]
+    assert switch.active == 2
+
+
 def test_upstream_timeout_has_no_read_limit():
     assert UPSTREAM_TIMEOUT.total is None
     assert UPSTREAM_TIMEOUT.sock_read is None

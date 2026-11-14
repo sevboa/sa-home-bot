@@ -78,6 +78,9 @@ class StrataSwitch:
             self.active += 1
             return
         async with self._lock:
+            if model == self.current:
+                self.active += 1
+                return
             await self._wait_until_free()
             code = await self._run(launcher)
             if code != 0:
