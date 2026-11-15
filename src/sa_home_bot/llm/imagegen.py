@@ -304,7 +304,7 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig, device: str) -> Any:
         pipe.fuse_lora()
         pipe.unload_lora_weights()
         if device == "cuda":
-            pipe.enable_model_cpu_offload()
+            pipe.enable_sequential_cpu_offload()
     pipe.set_progress_bar_config(disable=True)
     log.info("imagegen: %s загружен за %.1fс", spec.repo, time.monotonic() - started)
     return pipe
@@ -413,7 +413,7 @@ def _generate_sync(
     ref = job.get("ref")
     wants_ip = ref is not None and ip_scale is not None
     if loaded.ip_loaded and not wants_ip:
-        pipe.unload_ip_adapter()
+        _without_offload(loaded, pipe.unload_ip_adapter)
         loaded.ip_loaded = False
     common = {
         "negative_prompt": negative or None,
@@ -428,8 +428,6 @@ def _generate_sync(
                 from diffusers import StableDiffusionImg2ImgPipeline as Img2Img
 
             loaded.img2img = Img2Img.from_pipe(pipe)
-            if loaded.device == "cuda":
-                loaded.img2img.enable_model_cpu_offload()
         return loaded.img2img(
             prompt, image=ref, strength=job["strength"],
             num_inference_steps=job["steps"], **common,
@@ -437,12 +435,13 @@ def _generate_sync(
     if wants_ip:
         if not loaded.ip_loaded:
             started = time.monotonic()
-            pipe.load_ip_adapter(
-                _IP_REPO, subfolder="models", weight_name=_IP_WEIGHT,
-                cache_dir=str(cfg.imagegen_model_dir),
+            _without_offload(
+                loaded,
+                lambda: pipe.load_ip_adapter(
+                    _IP_REPO, subfolder="models", weight_name=_IP_WEIGHT,
+                    cache_dir=str(cfg.imagegen_model_dir),
+                ),
             )
-            if loaded.device == "cuda":
-                pipe.enable_model_cpu_offload()
             loaded.ip_loaded = True
             log.info("imagegen: IP-Adapter загружен за %.1fс", time.monotonic() - started)
         pipe.set_ip_adapter_scale(ip_scale)
@@ -455,6 +454,15 @@ def _generate_sync(
         del common["negative_prompt"]
         return _txt2img(loaded, cfg, job, **_prompt_kwargs(loaded, prompt, negative, job), **common)
     return _txt2img(loaded, cfg, job, prompt=prompt, **common)
+
+
+def _without_offload(loaded: _Loaded, change: Callable[[], Any]) -> None:
+    if loaded.device != "cuda":
+        change()
+        return
+    loaded.pipe.remove_all_hooks()
+    change()
+    loaded.pipe.enable_sequential_cpu_offload()
 
 
 def is_out_of_memory(exc: BaseException) -> bool:
