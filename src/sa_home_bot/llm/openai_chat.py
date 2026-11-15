@@ -281,7 +281,7 @@ def from_openai_response(data: dict[str, Any], model: str, elapsed_s: float) -> 
     }
 
 
-def _read_api_key(path: Path) -> str:
+def read_api_key(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -291,7 +291,7 @@ def _read_api_key(path: Path) -> str:
 def _auth_headers(cfg: LlmConfig) -> dict[str, str]:
     if cfg.openai_api_key_file is None:
         return {}
-    key = _read_api_key(cfg.openai_api_key_file)
+    key = read_api_key(cfg.openai_api_key_file)
     if not key:
         return {}
     return {"Authorization": f"Bearer {key}"}
