@@ -7,6 +7,7 @@ from typing import Any
 from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
 
 CHARS_PER_TOKEN = 3
+REASONING_FIELD = "reasoning_content"
 FOLDED_OUTPUT_PREFIX = "[вывод свёрнут"
 FOLDED_OUTPUT = FOLDED_OUTPUT_PREFIX + ": {size} симв.]"
 ARGUMENT_KEEP_CHARS = 200
@@ -23,6 +24,7 @@ DROPPED_STEPS = "[свёрнуто {count} шагов]"
 DROPPED_STEPS_PATTERN = re.compile(r"\n\n\[свёрнуто (\d+) шагов\]$")
 MARKER_RESERVE_CHARS = 60
 SEPARATOR_CHARS = 2
+FOLD_TARGET_SHARE = 0.6
 
 
 def estimate_tokens(value: Any) -> int:
@@ -63,6 +65,15 @@ def _old_boundary(messages: list[dict[str, Any]], keep_recent: int) -> int:
     if len(tool_indexes) <= keep_recent:
         return PINNED_MESSAGES
     return tool_indexes[-keep_recent] if keep_recent else len(messages)
+
+
+def _fold_reasoning(window: _Window, boundary: int) -> bool:
+    for index in range(PINNED_MESSAGES, boundary):
+        if window.messages[index].pop(REASONING_FIELD, None) is not None:
+            window.touch(index)
+            if window.fits():
+                return True
+    return False
 
 
 def _fold_tool_outputs(window: _Window, boundary: int) -> bool:
@@ -215,6 +226,10 @@ def _trim_last_unit(window: _Window) -> bool:
     start, end = units[-1]
     for index in range(start, end):
         message = window.messages[index]
+        if message.pop(REASONING_FIELD, None) is not None:
+            window.touch(index)
+            if window.fits():
+                return True
         for call in message.get("tool_calls") or ():
             function = call["function"]
             if len(function["arguments"]) > RECENT_OUTPUT_CHARS:
@@ -235,9 +250,13 @@ def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_re
     if window.fits():
         return window.tokens()
     boundary = _old_boundary(messages, keep_recent)
-    for stage in (_fold_tool_outputs, _fold_arguments, _fold_replies):
+    window.limit = max(1, int(budget_tokens * FOLD_TARGET_SHARE))
+    for stage in (_fold_reasoning, _fold_tool_outputs, _fold_arguments, _fold_replies):
         if stage(window, boundary):
             return window.tokens()
+    window.limit = budget_tokens
+    if window.fits():
+        return window.tokens()
     if _truncate_messages(window, ("tool",)):
         return window.tokens()
     if _truncate_messages(window, ("user",)):
