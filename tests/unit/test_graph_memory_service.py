@@ -6,7 +6,13 @@ import pytest_asyncio
 from sa_home_bot.config import GraphMemoryConfig, LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.graph_memory.service import GraphMemoryService
+from sa_home_bot.graph_memory.service import (
+    NO_THINKING_BODY,
+    OLLAMA_API_KEY,
+    OLLAMA_OPENAI_URL,
+    GraphMemoryService,
+    extraction_endpoint,
+)
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 
 CHAT_A = 1
@@ -43,6 +49,26 @@ async def test_extraction_model_override_wins_over_persona_model(tmp_path):
     svc = GraphMemoryService(settings, db)
     assert svc._extraction_model() == "qwen3:8b"
     await db.close()
+
+
+def test_extraction_endpoint_stays_on_ollama_for_ollama_backend():
+    assert extraction_endpoint(LlmConfig()) == (OLLAMA_OPENAI_URL, OLLAMA_API_KEY, {})
+
+
+def test_extraction_endpoint_follows_openai_backend_with_key_and_no_thinking(tmp_path):
+    key_file = tmp_path / "key.txt"
+    key_file.write_text("k-123\n", encoding="utf-8")
+    llm = LlmConfig(
+        backend="openai",
+        openai_base_url="http://127.0.0.1:8090/v1",
+        openai_api_key_file=key_file,
+    )
+    assert extraction_endpoint(llm) == ("http://127.0.0.1:8090/v1", "k-123", NO_THINKING_BODY)
+
+
+def test_extraction_endpoint_openai_without_key_file_uses_placeholder_key():
+    llm = LlmConfig(backend="openai", openai_base_url="http://127.0.0.1:8090/v1")
+    assert extraction_endpoint(llm)[1] == OLLAMA_API_KEY
 
 
 async def test_add_episode_queues_and_reports_in_queue_status(svc):

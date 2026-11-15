@@ -7,7 +7,7 @@ from typing import Any
 
 from sa_home_bot import __version__
 from sa_home_bot.chat_scope import require_chat_id
-from sa_home_bot.config import Settings
+from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.graph_memory.people import (
     ClaimError,
@@ -26,6 +26,7 @@ from sa_home_bot.graph_memory.protocol import (
     PEOPLE_GROUP_ID,
     SERVICE_NAME,
 )
+from sa_home_bot.llm.openai_chat import read_api_key
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_UNAVAILABLE,
@@ -59,6 +60,16 @@ _CYPHER_PERSON_CARDS = (
 EXTRACTION_REASONING_EFFORT = "none"
 EXTRACTION_MAX_TOKENS = 4096
 EXTRACTION_TEMPERATURE = 0.0
+OLLAMA_OPENAI_URL = "http://127.0.0.1:11434/v1"
+OLLAMA_API_KEY = "ollama"
+NO_THINKING_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def extraction_endpoint(llm: LlmConfig) -> tuple[str, str, dict[str, Any]]:
+    if llm.backend != "openai":
+        return OLLAMA_OPENAI_URL, OLLAMA_API_KEY, {}
+    key = read_api_key(llm.openai_api_key_file) if llm.openai_api_key_file else ""
+    return llm.openai_base_url, key or OLLAMA_API_KEY, NO_THINKING_BODY
 
 
 class GraphMemoryService:
@@ -166,6 +177,8 @@ class GraphMemoryService:
         from graphiti_core.llm_client import LLMConfig
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
+        base_url, api_key, extra_body = extraction_endpoint(self._settings.llm)
+
         class _ExtractionClient(OpenAIGenericClient):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 super().__init__(*args, **kwargs)
@@ -174,6 +187,8 @@ class GraphMemoryService:
 
                 async def create_no_thinking(**params: Any) -> Any:
                     params.setdefault("reasoning_effort", EXTRACTION_REASONING_EFFORT)
+                    if extra_body:
+                        params.setdefault("extra_body", extra_body)
                     return await create(**params)
 
                 completions.create = create_no_thinking
@@ -194,11 +209,10 @@ class GraphMemoryService:
                     **kwargs,
                 )
 
-        base_url = "http://127.0.0.1:11434/v1"
         model = self._extraction_model()
         llm_client = _ExtractionClient(
             config=LLMConfig(
-                api_key="ollama",
+                api_key=api_key,
                 model=model,
                 small_model=model,
                 base_url=base_url,
@@ -208,15 +222,15 @@ class GraphMemoryService:
         )
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
-                api_key="ollama",
+                api_key=OLLAMA_API_KEY,
                 embedding_model=self._cfg.embedding_model,
                 embedding_dim=768,
-                base_url=base_url,
+                base_url=OLLAMA_OPENAI_URL,
             )
         )
         reranker = OpenAIRerankerClient(
             config=LLMConfig(
-                api_key="ollama",
+                api_key=api_key,
                 model=model,
                 small_model=model,
                 base_url=base_url,
