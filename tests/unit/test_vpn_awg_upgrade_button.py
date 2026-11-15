@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.bot import vpn_callbacks
+from sa_home_bot.bot import vpn_callbacks, vpn_screens, vpn_settings
 from sa_home_bot.bot import vpn_devices as vd
-from sa_home_bot.bot.handlers.vpn import manage
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 from .vpn_support import (
@@ -13,7 +12,6 @@ from .vpn_support import (
     KEY,
     LABEL,
     FakeNodeLink,
-    all_buttons,
     button_texts,
     make_conn,
     make_srv,
@@ -121,38 +119,66 @@ def test_legacy_awg_nodes_empty_when_no_legacy():
     assert device.legacy_awg_nodes() == []
 
 
-async def test_device_card_keyboard_without_legacy_unchanged(_fanout):
-    _fanout["servers"] = _servers(legacy_awg=False)
+@pytest.mark.parametrize("legacy_awg", [True, False])
+async def test_device_card_has_no_awg_upgrade_button(_fanout, legacy_awg):
+    _fanout["servers"] = _servers(legacy_awg=legacy_awg)
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
-    markup = cb.message.edit_markups[-1]
-    texts = button_texts(markup)
+    texts = button_texts(cb.message.edit_markups[-1])
     assert not any("AmneziaWG 2.0" in t for t in texts)
-    assert "🔧 Починить 🇺🇸" not in texts
 
 
-async def test_device_card_keyboard_with_legacy_has_upgrade_button(_fanout):
+@pytest.mark.parametrize("has_page", [True, False])
+def test_card_text_legacy_awg_hint(has_page):
+    device = vd.build_devices(_servers(legacy_awg=True))[0]
+    text = vd.card_text(device, _servers(legacy_awg=True), has_page=has_page)
+    assert "🇺🇸 AmneziaVPN (версия 1) —" in text
+    assert "🇺🇸 AmneziaVPN —" not in text
+    assert (
+        "⚠️ AmneziaVPN (🇺🇸 США) работает на старой версии AmneziaWG — её легче заблокировать."
+        in text
+    )
+    assert "Чтобы перейти на версию 2:" in text
+    assert "1. Обновите приложение AmneziaVPN." in text
+    assert (
+        "3. Когда убедитесь, что новое подключение работает, "
+        "удалите старое в приложении AmneziaVPN." in text
+    )
+    assert "Если перевыпуск выдаёт ошибку — включите Hiddify и попробуйте ещё раз." in text
+    if has_page:
+        assert (
+            f"2. Нажмите «{vpn_settings.PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
+            f"все ключи AmneziaVPN («{vd.PAGE_REISSUE_BUTTON}»), добавьте новые ключи "
+            "в приложение." in text
+        )
+    else:
+        assert (
+            f"2. Нажмите «{vpn_screens.REISSUE_BUTTON}» ниже и выберите все ключи AmneziaVPN, "
+            "добавьте новые ключи в приложение." in text
+        )
+
+
+def test_card_text_without_legacy_awg_has_no_hint():
+    servers = _servers(legacy_awg=False)
+    device = vd.build_devices(servers)[0]
+    text = vd.card_text(device, servers, has_page=True)
+    assert "версия 1" not in text
+    assert "Чтобы перейти на версию 2" not in text
+    assert "🇺🇸 AmneziaVPN —" in text
+
+
+def test_card_text_hint_names_unknown_node_by_id():
+    servers = _servers(legacy_awg=True)
+    device = vd.build_devices(servers)[0]
+    text = vd.card_text(device, [])
+    assert "⚠️ AmneziaVPN (wooster) работает на старой версии AmneziaWG" in text
+
+
+async def test_show_screen_card_without_page_uses_reissue_button(_fanout):
     _fanout["servers"] = _servers(legacy_awg=True)
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
-    markup = cb.message.edit_markups[-1]
-    texts = button_texts(markup)
-    assert any("⬆️ AmneziaWG 2.0 🇺🇸" in t for t in texts)
-    upgrade_btn = next(b for b in all_buttons(markup) if "AmneziaWG 2.0" in b.text)
-    assert vpn_callbacks.KIND_UPGRADE_AWG in upgrade_btn.callback_data
-
-
-async def test_expert_reissue_upgrade_awg_sends_keep_old(_fanout):
-    _fanout["servers"] = _servers(legacy_awg=True)
-    link = Link(_fanout["servers"])
-    cb, _, _ = await _press(
-        f"act:vpn:reissue:~{vpn_callbacks.KIND_UPGRADE_AWG}{KEY}:wooster",
-        link=link,
-    )
-    reissue_calls = [c for c in link.calls if c[0] == vpn_protocol.ACTION_REISSUE]
-    assert len(reissue_calls) == 1
-    args = reissue_calls[0][1]
-    assert args["keep_old"] is True
-    assert args["transport"] == vpn_protocol.TRANSPORT_AWG
-    assert cb.message.answers[-1] == manage.UPGRADE_AWG_NOTE
+    text = cb.message.edits[-1]
+    assert vpn_screens.REISSUE_BUTTON in text
+    assert vpn_settings.PAGE_CARD_BUTTON not in text
 
 
 async def test_expert_reissue_fix_does_not_send_keep_old(_fanout):
@@ -166,29 +192,3 @@ async def test_expert_reissue_fix_does_not_send_keep_old(_fanout):
     assert len(reissue_calls) == 1
     args = reissue_calls[0][1]
     assert "keep_old" not in args
-
-
-async def test_expert_reissue_upgrade_awg_without_legacy_shows_alert(_fanout):
-    _fanout["servers"] = _servers(legacy_awg=False)
-    link = Link(_fanout["servers"])
-    cb, _, _ = await _press(
-        f"act:vpn:reissue:~{vpn_callbacks.KIND_UPGRADE_AWG}{KEY}:wooster",
-        link=link,
-    )
-    assert cb.answered[0][1].get("show_alert")
-    assert "Тут нечего перевыпускать." in cb.answered[0][0][0]
-    reissue_calls = [c for c in link.calls if c[0] == vpn_protocol.ACTION_REISSUE]
-    assert len(reissue_calls) == 0
-
-
-async def test_expert_reissue_upgrade_awg_without_connection_shows_alert(_fanout):
-    _fanout["servers"] = _servers(legacy_awg=False)
-    link = Link(_fanout["servers"])
-    cb, _, _ = await _press(
-        f"act:vpn:reissue:~{vpn_callbacks.KIND_UPGRADE_AWG}{KEY}:jeeves",
-        link=link,
-    )
-    assert cb.answered[0][1].get("show_alert")
-    assert "Тут нечего перевыпускать." in cb.answered[0][0][0]
-    reissue_calls = [c for c in link.calls if c[0] == vpn_protocol.ACTION_REISSUE]
-    assert len(reissue_calls) == 0

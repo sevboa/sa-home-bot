@@ -126,8 +126,8 @@ async def show_screen(ctx: Ctx, screen: str, key: str = "", *, answered: bool = 
     if not answered:
         await callback.answer()
     if screen == _cb.SCREEN_DEVICE:
-        text = vpn_devices.card_text(device, servers)
         page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
+        text = vpn_devices.card_text(device, servers, has_page=page_url is not None)
         keyboard = vpn_screens.device_card_keyboard(
             device, servers, subscription=ctx.subscription, page_url=page_url
         )

@@ -14,6 +14,9 @@ AWG = vpn_protocol.TRANSPORT_AWG
 TRANSPORT_ORDER = (AWG, REALITY)
 TRANSPORT_NAME = {REALITY: "VLESS · Hiddify", AWG: "AmneziaVPN"}
 TECHNICAL_TRANSPORT_NAME = {AWG: "AmneziaVPN", REALITY: "VLESS (Reality)"}
+AWG_LEGACY_TRANSPORT_NAME = "AmneziaVPN (версия 1)"
+AWG_TECH_NAME = "AmneziaWG"
+PAGE_REISSUE_BUTTON = "🔄 Перевыпустить"
 
 
 @dataclass(frozen=True)
@@ -302,12 +305,46 @@ def list_text(devices: list[Device], *, tz: tzinfo | None = None) -> str:
     return "\n".join(lines)
 
 
+def legacy_awg_country_names(device: Device, countries: dict[str, Country]) -> str:
+    names = []
+    for node in device.legacy_awg_nodes():
+        country = countries.get(node)
+        names.append(country.label if country else node)
+    return ", ".join(html.escape(name) for name in names)
+
+
+def legacy_awg_hint(device: Device, countries: dict[str, Country], has_page: bool) -> list[str]:
+    from sa_home_bot.bot import vpn_screens, vpn_settings
+
+    awg = TRANSPORT_NAME[AWG]
+    if has_page:
+        step = (
+            f"2. Нажмите «{vpn_settings.PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
+            f"все ключи {awg} («{PAGE_REISSUE_BUTTON}»), добавьте новые ключи в приложение."
+        )
+    else:
+        step = (
+            f"2. Нажмите «{vpn_screens.REISSUE_BUTTON}» ниже и выберите все ключи {awg}, "
+            "добавьте новые ключи в приложение."
+        )
+    return [
+        f"⚠️ {awg} ({legacy_awg_country_names(device, countries)}) "
+        f"работает на старой версии {AWG_TECH_NAME} — её легче заблокировать.",
+        "Чтобы перейти на версию 2:",
+        f"1. Обновите приложение {awg}.",
+        step,
+        f"3. Когда убедитесь, что новое подключение работает, удалите старое в приложении {awg}.",
+        "Если перевыпуск выдаёт ошибку — включите Hiddify и попробуйте ещё раз.",
+    ]
+
+
 def card_text(
     device: Device,
     servers: list[dict],
     *,
     now: datetime | None = None,
     tz: tzinfo | None = None,
+    has_page: bool = False,
 ) -> str:
     now = now or datetime.now(UTC)
     countries = countries_of(servers)
@@ -324,6 +361,8 @@ def card_text(
         country = countries.get(conn.node)
         where = country.short if country else conn.node
         name = TRANSPORT_NAME.get(conn.transport, conn.transport)
+        if conn.transport == AWG and conn.awg_legacy:
+            name = AWG_LEGACY_TRANSPORT_NAME
         tail = ""
         server = by_node.get(conn.node)
         if server is not None and transport_health(server, conn.transport) not in (
@@ -332,6 +371,9 @@ def card_text(
         ):
             tail = " · ⚠️ сервер сейчас может не работать"
         lines.append(f"{where} {name} — {conn_status(conn, tz=tz)}{tail}")
+    if device.legacy_awg_nodes():
+        lines.append("")
+        lines.extend(legacy_awg_hint(device, countries, has_page))
     return "\n".join(lines)
 
 

@@ -28,7 +28,6 @@ KIND_REISSUE_REALITY = "r"
 KIND_REISSUE_AWG = "a"
 KIND_FIX = "f"
 KIND_DELETE = "d"
-KIND_UPGRADE_AWG = "u"
 
 
 def is_probe(chat_id: int) -> bool:
