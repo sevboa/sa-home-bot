@@ -40,6 +40,7 @@ def test_build_system_without_model_matches_legacy():
 def test_build_system_with_non_glm_model_matches_legacy(model):
     assert build_system((), model) == legacy_system(())
     assert build_system(RULES, model) == legacy_system(RULES)
+    assert intro_for(model) == SYSTEM_INTRO
 
 
 @pytest.mark.parametrize("model", GLM_MODELS)
@@ -50,10 +51,6 @@ def test_build_system_with_glm_model_starts_with_glm_intro(model):
     assert build_system(RULES, model) == legacy_system(RULES).replace(
         SYSTEM_INTRO, GLM_INTRO, 1
     )
-
-
-def test_intro_for_empty_model_is_system_intro():
-    assert intro_for("") == SYSTEM_INTRO
 
 
 def test_rules_title_and_format_kept_for_glm():
@@ -81,3 +78,4 @@ def test_glm_intro_is_markdown_with_positive_rules():
     assert "## Процесс анализа" in GLM_INTRO
     assert "Один инструмент за ход" in GLM_INTRO
     assert "нельзя" not in GLM_INTRO
+    assert "только\nчерез" not in GLM_INTRO
