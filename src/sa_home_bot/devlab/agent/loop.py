@@ -58,6 +58,10 @@ REPEAT_GREEN_HINT = (
     "\n\nэтот вызов уже был, результат тот же и зелёный: не повторяй проверку; "
     f"если все шаги сделаны, вызови {TOOL_FINISH}"
 )
+REPEAT_READ_HINT = (
+    "\n\nэтот фрагмент ты уже читал, и он не менялся: не перечитывай его, используй то, что узнал, "
+    f"и переходи к правке, проверке или {TOOL_FINISH}; ещё один такой же вызов остановит задание"
+)
 REPEAT_REASON = "модель повторяет {call}"
 REPEAT_SKIPPED = "не выполнено: стоп-кран на повторах"
 RECENT_CALLS_WINDOW = 6
@@ -133,6 +137,12 @@ class Segment:
     recent_calls: list[tuple[str, str]] = field(default_factory=list)
     repeat_reason: str | None = None
     tree_fingerprint: str | None = None
+
+
+def _repeat_hint(name: str, text: str) -> str:
+    if name in READ_ONLY_TOOLS:
+        return REPEAT_READ_HINT
+    return REPEAT_GREEN_HINT if text.startswith(OK_HEAD) else REPEAT_HINT
 
 
 def _call_label(name: str, args: dict[str, Any]) -> str:
@@ -360,7 +370,7 @@ class AgentLoop:
         if call.name not in READ_ONLY_TOOLS:
             seg.tree_fingerprint = None
         if repeats:
-            text += REPEAT_GREEN_HINT if text.startswith(OK_HEAD) else REPEAT_HINT
+            text += _repeat_hint(call.name, text)
         return text, summary
 
     async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:

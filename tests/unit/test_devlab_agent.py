@@ -15,6 +15,7 @@ from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import (
     REPEAT_GREEN_HINT,
     REPEAT_HINT,
+    REPEAT_READ_HINT,
     REPEAT_SKIPPED,
     AgentLimits,
     AgentLoop,
@@ -725,6 +726,17 @@ async def test_repeated_call_gets_hint_then_crane(tmp_path):
     assert tool_results[2] == REPEAT_SKIPPED
     assert entries[-1]["event"] == "end"
     assert entries[-1]["crane"] == "repeat"
+
+
+async def test_repeated_read_gets_read_hint_then_crane(tmp_path):
+    model = ScriptedChatModel(*(tool_reply(TOOL_READ_FILE, c, path="src/app.py") for c in "abc"))
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
+    result = await loop.run("правила", "задача")
+    assert result.crane is Crane.REPEAT
+    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
+    assert REPEAT_READ_HINT not in tool_results[0]
+    assert tool_results[1].endswith(REPEAT_READ_HINT)
+    assert tool_results[2] == REPEAT_SKIPPED
 
 
 async def test_repeat_after_file_change_is_not_a_crane(tmp_path):
