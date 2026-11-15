@@ -138,9 +138,10 @@ _MAX_EXTRA_MODELS = 2
 
 
 class _Loaded:
-    def __init__(self, pipe: Any, spec: ModelSpec) -> None:
+    def __init__(self, pipe: Any, spec: ModelSpec, device: str = "cpu") -> None:
         self.pipe = pipe
         self.spec = spec
+        self.device = device
         self.img2img: Any = None
         self.ip_loaded = False
         self.loras: set[str] = set()
@@ -215,7 +216,7 @@ def _preview_sync(
     def on_step_end(pipe_: Any, index: int, _t: Any, kwargs: dict) -> dict:
         if index == 0 and seen["x0"] is not None:
             with torch.no_grad():
-                x = loaded.taesd.decode(seen["x0"]).sample[0]
+                x = loaded.taesd.decode(seen["x0"].float().cpu()).sample[0]
             x = ((x.clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).numpy()
             if not preview(Image.fromarray(x)):
                 seen["rejected"] = True
@@ -243,7 +244,7 @@ def _preview_sync(
     return pipe.image_processor.postprocess(image, output_type="pil")[0]
 
 
-_pipelines: dict[str, _Loaded] = {}
+_pipelines: dict[tuple[str, str], _Loaded] = {}
 _load_lock = asyncio.Lock()
 _generate_lock = asyncio.Lock()
 
@@ -260,16 +261,23 @@ def resolve_model(name: str | None, cfg: LlmConfig) -> tuple[str, ModelSpec]:
     return name, MODELS[name]
 
 
-def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
+def pipeline_device(spec: ModelSpec, cfg: LlmConfig) -> str:
+    if cfg.imagegen_device == "cuda" and spec.kind == "sd15":
+        return "cuda"
+    return "cpu"
+
+
+def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig, device: str) -> Any:
     import torch
 
     torch.set_num_threads(cfg.imagegen_threads)
     cfg.imagegen_model_dir.mkdir(parents=True, exist_ok=True)
-    log.info("imagegen: загрузка %s (%s, CPU)...", spec.repo, spec.kind)
+    log.info("imagegen: загрузка %s (%s, %s)...", spec.repo, spec.kind, device.upper())
     started = time.monotonic()
+    dtype = torch.float16 if device == "cuda" else torch.float32
     common = {
         "variant": spec.variant,
-        "torch_dtype": torch.float32,
+        "torch_dtype": dtype,
         "cache_dir": str(cfg.imagegen_model_dir),
     }
     if spec.kind == "sdxl-turbo":
@@ -284,7 +292,7 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
 
             path = hf_hub_download(spec.repo, spec.file, cache_dir=common["cache_dir"])
             pipe = StableDiffusionPipeline.from_single_file(
-                path, torch_dtype=torch.float32, safety_checker=None,
+                path, torch_dtype=dtype, safety_checker=None,
                 requires_safety_checker=False,
             )
         else:
@@ -295,24 +303,33 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig) -> Any:
         pipe.load_lora_weights(cfg.imagegen_lcm_lora, cache_dir=str(cfg.imagegen_model_dir))
         pipe.fuse_lora()
         pipe.unload_lora_weights()
+        if device == "cuda":
+            pipe.enable_model_cpu_offload()
     pipe.set_progress_bar_config(disable=True)
     log.info("imagegen: %s загружен за %.1fс", spec.repo, time.monotonic() - started)
     return pipe
 
 
-async def _get_pipeline(spec: ModelSpec, cfg: LlmConfig) -> _Loaded:
-    loaded = _pipelines.get(spec.repo)
+async def _get_pipeline(spec: ModelSpec, cfg: LlmConfig, device: str | None = None) -> _Loaded:
+    if device is None:
+        device = pipeline_device(spec, cfg)
+    key = (spec.repo, device)
+    loaded = _pipelines.get(key)
     if loaded is not None:
         return loaded
     async with _load_lock:
-        loaded = _pipelines.get(spec.repo)
+        loaded = _pipelines.get(key)
         if loaded is None:
-            pipe = await asyncio.to_thread(_load_pipeline_sync, spec, cfg)
-            loaded = _pipelines[spec.repo] = _Loaded(pipe, spec)
-            extra = [repo for repo in _pipelines if repo not in (cfg.imagegen_model, spec.repo)]
-            for repo in extra[: max(0, len(extra) - _MAX_EXTRA_MODELS)]:
-                del _pipelines[repo]
-                log.info("imagegen: %s выгружен из RAM", repo)
+            pipe = await asyncio.to_thread(_load_pipeline_sync, spec, cfg, device)
+            loaded = _pipelines[key] = _Loaded(pipe, spec, device)
+            extra = [
+                entry
+                for entry in _pipelines
+                if entry[0] not in (cfg.imagegen_model, spec.repo)
+            ]
+            for stale in extra[: max(0, len(extra) - _MAX_EXTRA_MODELS)]:
+                del _pipelines[stale]
+                log.info("imagegen: %s выгружен из RAM", stale[0])
             gc.collect()
     return loaded
 
@@ -351,15 +368,14 @@ def _fit_ref(ref: Image.Image) -> Image.Image:
 def _decode_fast(loaded: _Loaded, latents: Any, cfg: LlmConfig) -> Image.Image:
     import torch
 
-    vae = loaded.pipe.vae
     if loaded.taesd_sd is None:
         from diffusers import AutoencoderTiny
 
         loaded.taesd_sd = AutoencoderTiny.from_pretrained(
-            _TAESD_REPO, torch_dtype=vae.dtype, cache_dir=str(cfg.imagegen_model_dir)
-        ).to(vae.device)
+            _TAESD_REPO, torch_dtype=torch.float32, cache_dir=str(cfg.imagegen_model_dir)
+        )
     with torch.no_grad():
-        image = loaded.taesd_sd.decode(latents.to(vae.dtype)).sample
+        image = loaded.taesd_sd.decode(latents.float().cpu()).sample
     return loaded.pipe.image_processor.postprocess(image, output_type="pil")[0]
 
 
@@ -412,6 +428,8 @@ def _generate_sync(
                 from diffusers import StableDiffusionImg2ImgPipeline as Img2Img
 
             loaded.img2img = Img2Img.from_pipe(pipe)
+            if loaded.device == "cuda":
+                loaded.img2img.enable_model_cpu_offload()
         return loaded.img2img(
             prompt, image=ref, strength=job["strength"],
             num_inference_steps=job["steps"], **common,
@@ -423,6 +441,8 @@ def _generate_sync(
                 _IP_REPO, subfolder="models", weight_name=_IP_WEIGHT,
                 cache_dir=str(cfg.imagegen_model_dir),
             )
+            if loaded.device == "cuda":
+                pipe.enable_model_cpu_offload()
             loaded.ip_loaded = True
             log.info("imagegen: IP-Adapter загружен за %.1fс", time.monotonic() - started)
         pipe.set_ip_adapter_scale(ip_scale)
@@ -435,6 +455,23 @@ def _generate_sync(
         del common["negative_prompt"]
         return _txt2img(loaded, cfg, job, **_prompt_kwargs(loaded, prompt, negative, job), **common)
     return _txt2img(loaded, cfg, job, prompt=prompt, **common)
+
+
+def is_out_of_memory(exc: BaseException) -> bool:
+    return type(exc).__name__ == "OutOfMemoryError"
+
+
+def release_gpu() -> int:
+    stale = [key for key, loaded in _pipelines.items() if loaded.device == "cuda"]
+    for key in stale:
+        del _pipelines[key]
+    gc.collect()
+    if stale:
+        import torch
+
+        torch.cuda.empty_cache()
+        log.info("imagegen: %d CUDA-конвейеров выгружено из видеопамяти", len(stale))
+    return len(stale)
 
 
 async def generate_image(
@@ -510,7 +547,20 @@ async def generate_image(
     }
     async with _generate_lock:
         started = time.monotonic()
-        image = await asyncio.to_thread(_generate_sync, loaded, prompt, negative, cfg, job)
+        device = loaded.device
+        try:
+            image = await asyncio.to_thread(_generate_sync, loaded, prompt, negative, cfg, job)
+        except Exception as exc:
+            if device != "cuda" or not is_out_of_memory(exc):
+                raise
+            log.warning("imagegen: %s не влез в видеопамять, кадр пересчитывается на CPU", model)
+            torch.cuda.empty_cache()
+            loaded = await _get_pipeline(spec, cfg, "cpu")
+            device = loaded.device
+            image = await asyncio.to_thread(_generate_sync, loaded, prompt, negative, cfg, job)
+        finally:
+            if device == "cuda":
+                torch.cuda.empty_cache()
         seconds = time.monotonic() - started
     size = size or cfg.imagegen_size
     colors = cfg.imagegen_colors if colors is None else colors
@@ -524,5 +574,6 @@ async def generate_image(
         "original": image,
         "full_prompt": prompt, "full_negative": negative, "tokens": count_tokens(prompt),
         "seed": seed, "steps": steps, "colors": colors, "model": model,
+        "device": device,
         "loras": [f"{name}:{weight:g}" for name, weight in loras],
     }

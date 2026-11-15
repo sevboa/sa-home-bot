@@ -1465,6 +1465,7 @@ class LlmService:
 
     async def _sleep_now(self, *, quiet: bool = False) -> None:
         await backend.stop(self._cfg)
+        imagegen.release_gpu()
         if self._cfg.container_backend == "wsl-docker":
             await self._keepalive.stop()
         self._asleep = True

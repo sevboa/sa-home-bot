@@ -714,6 +714,12 @@ Ollama и sa-home-bot держат модель тёплой одинаково�
   TAESD вместо полного VAE при декодировании SD1.5 без образца (−16% времени
   кадра на CPU, на 64 px неотличимо; см. platform-llm/imagegen.md).
 
+- `imagegen_device: Literal["cpu", "cuda"] = "cpu"`
+  `"cuda"` — SD1.5-модели считаются на видеокарте в fp16 с поочерёдной
+  выгрузкой модулей (пик ~1,8 ГБ VRAM, 1,3-1,7 с на кадр против ~30 с на
+  CPU); SDXL-turbo, TAESD и превью остаются на CPU, при нехватке видеопамяти
+  кадр молча пересчитывается на CPU (см. platform-llm/imagegen.md).
+
 - `imagegen_display_px: int = Field(default=512, ge=64, le=2048)`
   Сторона бота (тулы generate_image/find_image): до какого размера
   растягивать картинку при отправке (nearest-neighbor, целым множителем —
