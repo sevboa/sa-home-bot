@@ -35,6 +35,7 @@ from sa_home_bot.llm.strata_switch import (
     Waiter,
     build_app,
     build_companion,
+    client_label,
     load_settings,
     resolve,
     switch_status,
@@ -363,6 +364,52 @@ async def test_queued_request_for_new_model_does_not_relaunch_it():
     assert switch.active == 2
 
 
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"user": "агент devlab v2y5xn"}, "агент devlab v2y5xn"),
+        ({"user": "х" * 100}, "х" * 80),
+        ({}, ""),
+        ({"user": ""}, ""),
+        ({"user": None}, ""),
+        ({"user": 17}, ""),
+    ],
+)
+def test_client_label_reads_user_field(payload, expected):
+    assert client_label(payload) == expected
+
+
+async def test_acquire_and_release_track_client_in_serving():
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=0.05), run, StepClock())
+    await switch.acquire("iq3", client="чат владелец")
+    assert switch.serving == ["чат владелец"]
+    switching = asyncio.create_task(switch.acquire("qw2", client="агент devlab v2y5xn"))
+    await wait_until(lambda: len(switch.waiting) == 1)
+    assert switch.waiting[0].client == "агент devlab v2y5xn"
+    assert switch.serving == ["чат владелец"]
+    switch.release("сторонняя подпись")
+    assert switch.serving == ["чат владелец"]
+    switch.release("чат владелец")
+    assert switch.serving == []
+    await switching
+    assert switch.serving == ["агент devlab v2y5xn"]
+    switch.release("агент devlab v2y5xn")
+    assert switch.serving == []
+    assert switch.active == 0
+
+
+async def test_acquire_without_client_keeps_empty_label():
+    run = FakeRun()
+    switch = StrataSwitch(settings(), run, StepClock(step=0.0))
+    await switch.start()
+    assert switch.serving == []
+    await switch.acquire("iq3")
+    assert switch.serving == [""]
+    switch.release()
+    assert switch.serving == []
+
+
 def test_upstream_timeout_has_no_read_limit():
     assert UPSTREAM_TIMEOUT.total is None
     assert UPSTREAM_TIMEOUT.sock_read is None
@@ -522,6 +569,7 @@ def test_switch_status_without_companion_and_without_activity():
         "current": None,
         "launching": None,
         "active": 0,
+        "serving": [],
         "idle_for_s": None,
         "idle_s": 2.0,
         "waiting": [],
@@ -539,17 +587,22 @@ def test_switch_status_rounds_times_to_tenth():
     switch.launching = "qw2"
     switch.launch_started = now - 1.234
     switch.last_request_end = now - 5.0
-    switch.waiting = [Waiter("qw2", now - 0.06, True), Waiter("iq3", now - 12.0, False)]
+    switch.waiting = [
+        Waiter("qw2", now - 0.06, True, "агент devlab v2y5xn"),
+        Waiter("iq3", now - 12.0, False),
+    ]
+    switch.serving = ["чат владелец"]
     gate.priority_active = 2
     status = switch_status(switch, gate, None)
     assert status["current"] == "iq3"
     assert status["active"] == 1
     assert status["launching"] == {"model": "qw2", "for_s": 1.2}
+    assert status["serving"] == ["чат владелец"]
     assert status["idle_for_s"] == 5.0
     assert status["idle_s"] == 2.0
     assert status["waiting"] == [
-        {"model": "qw2", "for_s": 0.1, "priority": True},
-        {"model": "iq3", "for_s": 12.0, "priority": False},
+        {"model": "qw2", "for_s": 0.1, "priority": True, "client": "агент devlab v2y5xn"},
+        {"model": "iq3", "for_s": 12.0, "priority": False, "client": ""},
     ]
     assert status["priority_active"] == 2
 
@@ -568,13 +621,14 @@ def test_switch_status_shows_companion_fields():
         max_wait_s=switch.settings.max_wait_s,
     )
     companion.running = True
-    companion.begin_request(AUTH)
+    companion.begin_request(AUTH, "чат владелец")
     companion.last_request = switch.clock() - 3.0
     status = switch_status(switch, gate, companion)
     assert status["companion"] == {
         "name": COMPANION.name,
         "running": True,
         "active": 1,
+        "serving": ["чат владелец"],
         "idle_for_s": 3.0,
         "idle_stop_s": COMPANION.idle_stop_s,
     }
@@ -624,6 +678,7 @@ async def test_status_route_answers_without_authorization():
         "current": "iq3",
         "launching": None,
         "active": 0,
+        "serving": [],
         "idle_for_s": None,
         "idle_s": 1.0,
         "waiting": [],
@@ -660,6 +715,54 @@ async def test_status_route_shows_active_and_waiting_requests():
         await close(router, upstream_server)
 
 
+async def test_status_route_shows_client_labels_of_waiting_and_serving_requests():
+    switch = StrataSwitch(settings(idle_s=0.05), FakeRun())
+    upstream = ScratchUpstream(delay=0.3)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        normal = asyncio.create_task(
+            router.post(
+                CHAT_PATH,
+                json={"model": "iq3", "messages": [], "user": "чат владелец"},
+                headers=AUTH,
+            )
+        )
+        await wait_until(lambda: upstream.arrived == 1)
+        switching = asyncio.create_task(
+            router.post(
+                CHAT_PATH,
+                json={"model": "qw2", "messages": [], "user": "агент devlab v2y5xn"},
+                headers=AUTH,
+            )
+        )
+        await wait_until(lambda: len(switch.waiting) == 1)
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["serving"] == ["чат владелец"]
+        assert body["waiting"][0]["client"] == "агент devlab v2y5xn"
+        assert (await normal).status == 200
+        assert (await switching).status == 200
+        assert switch.serving == []
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["serving"] == []
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_status_route_without_user_field_has_empty_labels():
+    switch = StrataSwitch(settings(idle_s=0.05), FakeRun())
+    upstream = ScratchUpstream(delay=0.3)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        await resp.read()
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["serving"] == []
+        assert body["waiting"] == []
+        assert switch.serving == []
+    finally:
+        await close(router, upstream_server)
+
+
 async def test_status_route_reports_companion_state():
     journal: list[str] = []
     run = JournalRun(journal)
@@ -673,16 +776,20 @@ async def test_status_route_reports_companion_state():
             "name": COMPANION.name,
             "running": False,
             "active": 0,
+            "serving": [],
             "idle_for_s": None,
             "idle_stop_s": companion.idle_stop_s,
         }
         resp = await router.post(
-            CHAT_PATH, json={"model": COMPANION.name, "messages": []}, headers=AUTH
+            CHAT_PATH,
+            json={"model": COMPANION.name, "messages": [], "user": "агент devlab v2y5xn"},
+            headers=AUTH,
         )
         await resp.read()
         body = await (await router.get(STATUS_PATH)).json()
         assert body["companion"]["running"] is True
         assert body["companion"]["active"] == 0
+        assert body["companion"]["serving"] == []
         assert body["companion"]["idle_for_s"] >= 0.0
         assert journal == [ACTIVE_RESERVE, LAUNCH]
     finally:
@@ -815,6 +922,29 @@ async def companion_router(
     router = TestClient(TestServer(app))
     await router.start_server()
     return app, router, [main_server, partner_server], companion
+
+
+async def test_companion_serving_holds_client_label_until_request_ends():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock())
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        companion.begin_request(AUTH, "агент devlab v2y5xn")
+        assert companion.serving == ["агент devlab v2y5xn"]
+        companion.begin_request(AUTH)
+        assert companion.serving == ["агент devlab v2y5xn", ""]
+        companion.end_request("сторонняя подпись")
+        assert companion.serving == ["агент devlab v2y5xn", ""]
+        companion.end_request("агент devlab v2y5xn")
+        assert companion.serving == [""]
+        companion.end_request()
+        assert companion.serving == []
+        assert companion.active == 0
+    finally:
+        await close(main_server)
 
 
 async def test_companion_request_interrupts_normal_request_and_uses_own_upstream():

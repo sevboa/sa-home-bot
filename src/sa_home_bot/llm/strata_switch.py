@@ -45,6 +45,9 @@ VRAM_TIMEOUT = aiohttp.ClientTimeout(total=60.0)
 VRAM_OK_STATUS = 200
 VRAM_BUSY_STATUS = 409
 
+CLIENT_FIELD = "user"
+CLIENT_LABEL_MAX_CHARS = 80
+
 
 class UnknownModel(ValueError):
     pass
@@ -66,11 +69,19 @@ class MainUnreachable(VramFailed):
     pass
 
 
+def client_label(payload: dict[str, object]) -> str:
+    raw = payload.get(CLIENT_FIELD)
+    if not isinstance(raw, str) or not raw:
+        return ""
+    return raw[:CLIENT_LABEL_MAX_CHARS]
+
+
 @dataclass
 class Waiter:
     model: str
     since: float
     priority: bool
+    client: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,19 +202,23 @@ class Companion:
         self.max_wait_s = max_wait_s
         self.running = False
         self.active = 0
+        self.serving: list[str] = []
         self.last_request: float | None = None
         self.headers: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._idle_task: asyncio.Task | None = None
 
-    def begin_request(self, headers: dict[str, str]) -> None:
+    def begin_request(self, headers: dict[str, str], client: str = "") -> None:
         self.active += 1
+        self.serving.append(client)
         self.last_request = self.clock()
         if headers:
             self.headers = dict(headers)
 
-    def end_request(self) -> None:
+    def end_request(self, client: str = "") -> None:
         self.active = max(0, self.active - 1)
+        if client in self.serving:
+            self.serving.remove(client)
         self.last_request = self.clock()
 
     def is_idle(self) -> bool:
@@ -297,24 +312,28 @@ class StrataSwitch:
         self.launching: str | None = None
         self.launch_started: float | None = None
         self.waiting: list[Waiter] = []
+        self.serving: list[str] = []
         self._lock = asyncio.Lock()
 
-    async def acquire(self, model: str, immediate: bool = False) -> None:
+    async def acquire(self, model: str, immediate: bool = False, client: str = "") -> None:
         model = resolve(self.settings, model)
         launcher = self.settings.launchers[model]
         if model == self.current and self.launching is None:
             self.active += 1
+            self.serving.append(client)
             return
-        waiter = Waiter(model, self.clock(), immediate)
+        waiter = Waiter(model, self.clock(), immediate, client)
         self.waiting.append(waiter)
         try:
             async with self._lock:
                 if model == self.current:
                     self.active += 1
+                    self.serving.append(client)
                     return
                 await self._wait_until_free(0.0 if immediate else self.settings.idle_s)
                 await self._launch(model, launcher)
                 self.active += 1
+                self.serving.append(client)
         finally:
             self.waiting.remove(waiter)
 
@@ -330,8 +349,10 @@ class StrataSwitch:
     def _remember_launch(self, model: str, code: int) -> None:
         self.current = model if code == 0 else None
 
-    def release(self) -> None:
+    def release(self, client: str = "") -> None:
         self.active = max(0, self.active - 1)
+        if client in self.serving:
+            self.serving.remove(client)
         self.last_request_end = self.clock()
 
     async def start(self) -> None:
@@ -486,9 +507,10 @@ async def relay_priority(
     gate: PriorityGate,
 ) -> web.StreamResponse:
     await gate.enter_priority()
+    label = client_label(payload)
     try:
         try:
-            await switch.acquire(str(payload.get("model")), immediate=True)
+            await switch.acquire(str(payload.get("model")), immediate=True, client=label)
         except SwitchBusy as exc:
             return json_error(503, str(exc))
         except LaunchFailed as exc:
@@ -498,7 +520,7 @@ async def relay_priority(
         except (aiohttp.ClientError, TimeoutError) as exc:
             return json_error(502, f"Strata недоступна: {type(exc).__name__}")
         finally:
-            switch.release()
+            switch.release(label)
     finally:
         gate.leave_priority()
 
@@ -510,7 +532,8 @@ async def relay_companion(
     gate: PriorityGate,
 ) -> web.StreamResponse:
     await gate.enter_priority()
-    companion.begin_request(auth_headers(request))
+    label = client_label(payload)
+    companion.begin_request(auth_headers(request), label)
     try:
         try:
             await companion.ensure_running()
@@ -523,7 +546,7 @@ async def relay_companion(
         except (aiohttp.ClientError, TimeoutError) as exc:
             return json_error(502, f"PolyStrata недоступна: {type(exc).__name__}")
     finally:
-        companion.end_request()
+        companion.end_request(label)
         gate.leave_priority()
 
 
@@ -535,8 +558,9 @@ async def run_normal_attempt(
     gate: PriorityGate,
     attempt: NormalAttempt,
 ) -> web.StreamResponse:
+    label = client_label(payload)
     try:
-        await switch.acquire(str(payload.get("model")))
+        await switch.acquire(str(payload.get("model")), client=label)
     except SwitchBusy as exc:
         return json_error(503, str(exc))
     except LaunchFailed as exc:
@@ -544,7 +568,7 @@ async def run_normal_attempt(
     try:
         return await relay_chat(request, payload, upstream, gate, attempt)
     finally:
-        switch.release()
+        switch.release(label)
 
 
 async def relay_normal(
@@ -593,6 +617,7 @@ def switch_status(
             "name": companion.settings.name,
             "running": companion.running,
             "active": companion.active,
+            "serving": list(companion.serving),
             "idle_for_s": elapsed_since(companion.last_request, now),
             "idle_stop_s": companion.settings.idle_stop_s,
         }
@@ -600,6 +625,7 @@ def switch_status(
         "current": switch.current,
         "launching": launching,
         "active": switch.active,
+        "serving": list(switch.serving),
         "idle_for_s": elapsed_since(switch.last_request_end, now),
         "idle_s": switch.settings.idle_s,
         "waiting": [
@@ -607,6 +633,7 @@ def switch_status(
                 "model": waiter.model,
                 "for_s": elapsed_since(waiter.since, now),
                 "priority": waiter.priority,
+                "client": waiter.client,
             }
             for waiter in switch.waiting
         ],

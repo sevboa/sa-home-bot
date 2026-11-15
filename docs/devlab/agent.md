@@ -9,7 +9,9 @@
 - `model.py` — `ChatModel` (`complete(messages, tools) -> ModelReply`) и `GatewayChat`:
   `POST <base_url>/v1/chat/completions` к шлюзу `devlab_models` без stream, с
   `Authorization: Bearer <токен исполнителя>` и `X-Devlab-Job: <id задания>` (по нему шлюз пишет
-  расход). Токены `usage` возвращаются в `ModelReply`. Таймаут запроса `MODEL_TIMEOUT_S` = 30 мин
+  расход). В теле запроса поле `user` — `devlab <id задания>`: по нему маршрутизатор Strata
+  подписывает, кто держит модель (см. `docs/platform-llm/strata-switch.md`, раздел «Состояние»).
+  Токены `usage` возвращаются в `ModelReply`. Таймаут запроса `MODEL_TIMEOUT_S` = 30 мин
   (стенд 60.2: на CPU один запрос с большим окном идёт десятки минут). Любая беда транспорта и
   разбора — `ModelError`; тело ошибки шлюза (`{"error": ...}`) приводится к тексту.
 - `sandbox.py` — интерфейс `Sandbox`: `read_bytes`, `write_bytes`, `list_files`,
