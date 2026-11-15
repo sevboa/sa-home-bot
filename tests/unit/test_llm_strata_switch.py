@@ -569,8 +569,7 @@ async def test_companion_request_interrupts_normal_request_and_uses_own_upstream
         normal = asyncio.create_task(
             router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
         )
-        await asyncio.sleep(0.1)
-        assert main.arrived == 1
+        await wait_until(lambda: main.arrived == 1)
         partner_resp = await router.post(
             CHAT_PATH, json={"model": COMPANION.name, "messages": []}, headers=AUTH
         )
@@ -876,7 +875,7 @@ async def test_companion_idle_guard_stops_it_and_is_cancelled_on_cleanup():
         companion.end_request()
         companion.start_idle_guard()
         clock_after_request(companion, companion_settings.idle_stop_s)
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: len(journal) >= 4)
         assert companion.running is False
         assert journal == [ACTIVE_RESERVE, LAUNCH, STOP, IDLE_RESERVE]
     finally:
@@ -897,7 +896,7 @@ async def test_companion_idle_guard_keeps_running_after_failed_stop():
         companion.last_request = companion.clock()
         companion.start_idle_guard()
         clock_after_request(companion, companion_settings.idle_stop_s)
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: len(run.calls) >= 2)
         assert companion.running is True
         assert companion._idle_task is not None
         assert not companion._idle_task.done()
@@ -933,8 +932,7 @@ async def test_priority_interrupts_normal_request_and_retries_it():
         normal = asyncio.create_task(
             router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
         )
-        await asyncio.sleep(0.1)
-        assert upstream.arrived == 1
+        await wait_until(lambda: upstream.arrived == 1)
         priority_resp = await router.post(
             CHAT_PATH, json={"model": "alfred", "messages": []}, headers=AUTH
         )
