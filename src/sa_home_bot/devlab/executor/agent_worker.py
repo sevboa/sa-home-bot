@@ -474,7 +474,7 @@ class AgentWorker(WorkerLoops):
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
         )
-        system = build_system(rules, job.model)
+        system = build_system(rules, job.model, spec.allowed_commands)
         dialog = self._answered_dialog(run)
         if dialog is not None:
             return await loop.run(system, job.task, resume=dialog)
