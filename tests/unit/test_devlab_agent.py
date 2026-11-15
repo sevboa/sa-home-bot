@@ -334,6 +334,7 @@ async def test_gateway_chat_request_and_parse():
     assert seen["headers"][protocol.HEADER_JOB] == "job-1"
     assert seen["body"]["model"] == "flint" and seen["body"]["tools"] == [{"type": "function"}]
     assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{FLOW_REMINDER}"}]
+    assert seen["body"]["user"] == "devlab job-1"
     assert reply.content == "мысль"
     assert reply.tool_calls[0].name == "grep"
     assert (reply.tokens_in, reply.tokens_out) == (7, 3)

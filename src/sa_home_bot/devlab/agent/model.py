@@ -84,6 +84,7 @@ class GatewayChat:
         self._url = base_url.rstrip("/") + protocol.HTTP_CHAT_PATH
         self._headers = {"Authorization": f"Bearer {token}", protocol.HEADER_JOB: job_id}
         self._model = model
+        self._job_id = job_id
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
         self._temperature = temperature
         self._owns_session = session is None
@@ -102,6 +103,7 @@ class GatewayChat:
             "messages": with_flow_reminder(with_reasoning(messages, self._reasoning)),
             "tools": tools,
             "temperature": self._temperature,
+            "user": f"devlab {self._job_id}",
         }
         try:
             async with self._session.post(
