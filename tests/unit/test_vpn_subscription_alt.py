@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
-from sa_home_bot.config import RealityTransportConfig
+from sa_home_bot.config import AwgAltConfig, RealityTransportConfig, VpnConfig
 from sa_home_bot.reality.client_config import RealityParams
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.protocol import PROBE_CHAT_ID
+from sa_home_bot.vpn.subweb import AWG2_KEY_SUFFIX, SubscriptionWeb
 
 
 def _params(port: int = 8443, sni: str = "www.google.com") -> RealityParams:
@@ -512,3 +514,23 @@ def test_reality_artifacts_without_alt_uses_original_and_no_alt_share_url():
     assert "198.51.100.1:8443" in artifacts["share_url"]
     assert "www.google.com" in artifacts["share_url"]
     assert "alt_share_url" not in artifacts
+
+
+def _awg_conf(address: str) -> str:
+    return (
+        "[Interface]\n"
+        f"PrivateKey = cHJpdg==\nAddress = {address}\n\n"
+        "[Peer]\nPublicKey = cHVi\nEndpoint = 192.0.2.1:8443\nAllowedIPs = 0.0.0.0/0\n"
+    )
+
+
+def test_awg2_key_name_marks_alt_subnet_only():
+    found = SimpleNamespace(device_label="📱 iPhone")
+    node = SimpleNamespace(name="🇳🇱 Нидерланды")
+    web = SubscriptionWeb(VpnConfig(sub_port=0, awg_alt=AwgAltConfig()), lambda _t: None)
+    alt_name = web._awg_key_name(_awg_conf("10.9.1.5/32"), found, node)
+    old_name = web._awg_key_name(_awg_conf("10.9.0.5/32"), found, node)
+    assert alt_name == f"🇳🇱 📱 iPhone · {AWG2_KEY_SUFFIX}"
+    assert old_name == "🇳🇱 📱 iPhone"
+    plain = SubscriptionWeb(VpnConfig(sub_port=0), lambda _t: None)
+    assert plain._awg_key_name(_awg_conf("10.9.1.5/32"), found, node) == "🇳🇱 📱 iPhone"

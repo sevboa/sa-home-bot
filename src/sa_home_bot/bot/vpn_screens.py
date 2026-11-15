@@ -128,7 +128,7 @@ def device_card_keyboard(
     countries = vpn_devices.countries_of(servers)
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
-        rows.append([InlineKeyboardButton(text=vpn_settings.PAGE_CARD_BUTTON, url=page_url)])
+        rows.append([InlineKeyboardButton(text=vpn_devices.PAGE_CARD_BUTTON, url=page_url)])
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_ISSUE):
         rows.append(
             [
@@ -143,7 +143,9 @@ def device_card_keyboard(
                 [button(vpn_settings.OTHER_WAYS_BUTTON, _cb.card_cb(_cb.SCREEN_PICK, device.key))]
             )
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_REISSUE):
-        rows.append([button("🔄 Перевыпустить ключи", _cb.card_cb(_cb.SCREEN_REISSUE, device.key))])
+        rows.append(
+            [button(vpn_devices.REISSUE_BUTTON, _cb.card_cb(_cb.SCREEN_REISSUE, device.key))]
+        )
         for node in device.broken_nodes():
             country = countries.get(node)
             rows.append(
@@ -151,18 +153,6 @@ def device_card_keyboard(
                     button(
                         f"🔧 Починить {country.short if country else node}",
                         _cb.expert_cb(vpn_protocol.ACTION_REISSUE, _cb.KIND_FIX, device.key, node),
-                    )
-                ]
-            )
-        for node in device.legacy_awg_nodes():
-            country = countries.get(node)
-            rows.append(
-                [
-                    button(
-                        f"⬆️ AmneziaWG 2.0 {country.short if country else node}",
-                        _cb.expert_cb(
-                            vpn_protocol.ACTION_REISSUE, _cb.KIND_UPGRADE_AWG, device.key, node
-                        ),
                     )
                 ]
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import secrets
@@ -14,7 +15,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from sa_home_bot.config import VpnConfig
-from sa_home_bot.vpn import amnezia_key, qr
+from sa_home_bot.vpn import amnezia_key, awg_conf, qr
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn import subscription as sub
 
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 
 RELOAD_EVERY_S = 600.0
 DEFAULT_TLS_DIR = Path("~/.config/sa-home-bot/sub-tls")
+AWG2_KEY_SUFFIX = "AmneziaWG (версия 2)"
 
 Resolver = Callable[[str], Awaitable[sub.Subscription | None]]
 AwgIssuer = Callable[..., Awaitable[dict]]
@@ -371,6 +373,23 @@ class SubscriptionWeb:
             charset="utf-8",
         )
 
+    def _awg_key_name(self, conf: str, found: sub.Subscription, node: sub.NodeInfo) -> str:
+        base = f"{vpn_protocol.country_flag(node.name)} {found.device_label}".strip()
+        if self._is_awg2_conf(conf):
+            return f"{base} · {AWG2_KEY_SUFFIX}"
+        return base
+
+    def _is_awg2_conf(self, conf: str) -> bool:
+        alt = self._cfg.awg_alt
+        if alt is None:
+            return False
+        address = awg_conf.parse(conf).get("Address", "")
+        try:
+            client_ip = ipaddress.ip_interface(address).ip
+        except ValueError:
+            return False
+        return client_ip in ipaddress.ip_network(alt.subnet, strict=False)
+
     async def _awg_post(self, request: web.Request) -> web.Response:
         if self._issue_awg is None or not self._same_origin(request):
             return _not_found()
@@ -405,9 +424,7 @@ class SubscriptionWeb:
         if not conf:
             return self._json({"ok": False, "error": "failed", "nonce": nxt}, 502)
         try:
-            key = amnezia_key.build_key(
-                conf, f"{vpn_protocol.country_flag(node.name)} {found.device_label}".strip()
-            )
+            key = amnezia_key.build_key(conf, self._awg_key_name(conf, found, node))
         except amnezia_key.ConfigError as exc:
             log.warning("vpn: ключ vpn:// для AmneziaVPN не собран: %s", exc)
             key = ""
