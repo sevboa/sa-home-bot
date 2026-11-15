@@ -19,6 +19,9 @@ from sa_home_bot.llm import image_prompt
 log = logging.getLogger(__name__)
 
 _NATIVE_PX = 512
+MODEL_OFFLOAD = "model"
+SEQUENTIAL_OFFLOAD = "sequential"
+CUDA_OOM_TEXT = "out of memory"
 
 MODES = ("free", "item", "variant", "scene")
 DEFAULT_STRENGTH = 0.55
@@ -138,10 +141,14 @@ _MAX_EXTRA_MODELS = 2
 
 
 class _Loaded:
-    def __init__(self, pipe: Any, spec: ModelSpec, device: str = "cpu") -> None:
+    def __init__(
+        self, pipe: Any, spec: ModelSpec, device: str = "cpu", offload: str = ""
+    ) -> None:
         self.pipe = pipe
         self.spec = spec
         self.device = device
+        self.offload = offload
+        self.active_offload = offload
         self.img2img: Any = None
         self.ip_loaded = False
         self.loras: set[str] = set()
@@ -267,6 +274,20 @@ def pipeline_device(spec: ModelSpec, cfg: LlmConfig) -> str:
     return "cpu"
 
 
+def enable_offload(pipe: Any, mode: str) -> None:
+    if mode == MODEL_OFFLOAD:
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.enable_sequential_cpu_offload()
+
+
+def _switch_offload(loaded: _Loaded, mode: str) -> None:
+    if loaded.active_offload == mode:
+        return
+    enable_offload(loaded.pipe, mode)
+    loaded.active_offload = mode
+
+
 def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig, device: str) -> Any:
     import torch
 
@@ -304,7 +325,7 @@ def _load_pipeline_sync(spec: ModelSpec, cfg: LlmConfig, device: str) -> Any:
         pipe.fuse_lora()
         pipe.unload_lora_weights()
         if device == "cuda":
-            pipe.enable_sequential_cpu_offload()
+            enable_offload(pipe, cfg.imagegen_gpu_offload)
     pipe.set_progress_bar_config(disable=True)
     log.info("imagegen: %s загружен за %.1fс", spec.repo, time.monotonic() - started)
     return pipe
@@ -321,7 +342,8 @@ async def _get_pipeline(spec: ModelSpec, cfg: LlmConfig, device: str | None = No
         loaded = _pipelines.get(key)
         if loaded is None:
             pipe = await asyncio.to_thread(_load_pipeline_sync, spec, cfg, device)
-            loaded = _pipelines[key] = _Loaded(pipe, spec, device)
+            offload = cfg.imagegen_gpu_offload if device == "cuda" else ""
+            loaded = _pipelines[key] = _Loaded(pipe, spec, device, offload)
             extra = [
                 entry
                 for entry in _pipelines
@@ -412,6 +434,8 @@ def _generate_sync(
     ip_scale = job.get("ip_scale")
     ref = job.get("ref")
     wants_ip = ref is not None and ip_scale is not None
+    if loaded.offload == MODEL_OFFLOAD:
+        _switch_offload(loaded, SEQUENTIAL_OFFLOAD if ref is not None else MODEL_OFFLOAD)
     if loaded.ip_loaded and not wants_ip:
         _without_offload(loaded, pipe.unload_ip_adapter)
         loaded.ip_loaded = False
@@ -427,7 +451,7 @@ def _generate_sync(
             else:
                 from diffusers import StableDiffusionImg2ImgPipeline as Img2Img
 
-            loaded.img2img = Img2Img.from_pipe(pipe)
+            loaded.img2img = Img2Img.from_pipe(pipe, torch_dtype=pipe.dtype)
         return loaded.img2img(
             prompt, image=ref, strength=job["strength"],
             num_inference_steps=job["steps"], **common,
@@ -462,11 +486,14 @@ def _without_offload(loaded: _Loaded, change: Callable[[], Any]) -> None:
         return
     loaded.pipe.remove_all_hooks()
     change()
-    loaded.pipe.enable_sequential_cpu_offload()
+    enable_offload(loaded.pipe, loaded.active_offload)
 
 
 def is_out_of_memory(exc: BaseException) -> bool:
-    return type(exc).__name__ == "OutOfMemoryError"
+    name = type(exc).__name__
+    if name == "OutOfMemoryError":
+        return True
+    return name == "AcceleratorError" and CUDA_OOM_TEXT in str(exc)
 
 
 def release_gpu() -> int:
@@ -562,6 +589,8 @@ async def generate_image(
             if device != "cuda" or not is_out_of_memory(exc):
                 raise
             log.warning("imagegen: %s не влез в видеопамять, кадр пересчитывается на CPU", model)
+            if loaded.active_offload:
+                enable_offload(loaded.pipe, loaded.active_offload)
             torch.cuda.empty_cache()
             loaded = await _get_pipeline(spec, cfg, "cpu")
             device = loaded.device

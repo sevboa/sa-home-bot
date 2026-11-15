@@ -200,3 +200,67 @@ def test_release_gpu_returns_zero_without_cuda_entries(monkeypatch):
     imagegen._pipelines[("a", "cpu")] = imagegen._Loaded("cpu-a", MODELS["dream"], "cpu")
     assert imagegen.release_gpu() == 0
     assert not caches
+
+
+class AcceleratorError(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (AcceleratorError("CUDA error: out of memory"), True),
+        (AcceleratorError("CUDA error: illegal memory access"), False),
+    ],
+)
+def test_accelerator_out_of_memory_is_detected(exc, expected):
+    assert imagegen.is_out_of_memory(exc) is expected
+
+
+class _OffloadPipe:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def enable_model_cpu_offload(self):
+        self.calls.append("model")
+
+    def enable_sequential_cpu_offload(self):
+        self.calls.append("sequential")
+
+    def remove_all_hooks(self):
+        self.calls.append("remove")
+
+
+@pytest.mark.parametrize(("mode", "call"), [("model", "model"), ("sequential", "sequential")])
+def test_enable_offload_picks_mode(mode, call):
+    pipe = _OffloadPipe()
+    imagegen.enable_offload(pipe, mode)
+    assert pipe.calls == [call]
+
+
+def test_switch_offload_only_on_change_and_without_offload_keeps_active_mode():
+    pipe = _OffloadPipe()
+    loaded = imagegen._Loaded(pipe, MODELS["dream"], "cuda", "model")
+    imagegen._switch_offload(loaded, "model")
+    assert pipe.calls == []
+    imagegen._switch_offload(loaded, "sequential")
+    assert loaded.active_offload == "sequential"
+    assert loaded.offload == "model"
+    changed: list[int] = []
+    imagegen._without_offload(loaded, lambda: changed.append(1))
+    assert pipe.calls == ["sequential", "remove", "sequential"]
+    assert changed == [1]
+
+
+async def test_cuda_pipeline_remembers_offload_mode_from_config(monkeypatch):
+    imagegen._pipelines.clear()
+    monkeypatch.setattr(imagegen, "_load_pipeline_sync", lambda spec, cfg, device: "pipe")
+    cfg = LlmConfig(imagegen_device="cuda", imagegen_gpu_offload="model")
+    cuda_loaded = await imagegen._get_pipeline(MODELS["dream"], cfg)
+    cpu_loaded = await imagegen._get_pipeline(MODELS["dream"], cfg, "cpu")
+    assert (cuda_loaded.offload, cuda_loaded.active_offload) == ("model", "model")
+    assert cpu_loaded.offload == ""
+
+
+def test_gpu_offload_defaults_to_sequential():
+    assert LlmConfig().imagegen_gpu_offload == "sequential"

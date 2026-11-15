@@ -720,6 +720,12 @@ Ollama и sa-home-bot держат модель тёплой одинаково�
   CPU); SDXL-turbo, TAESD и превью остаются на CPU, при нехватке видеопамяти
   кадр молча пересчитывается на CPU (см. platform-llm/imagegen.md).
 
+- `imagegen_gpu_offload: Literal["sequential", "model"] = "sequential"`
+  Как SD1.5 делит видеокарту при `imagegen_device = "cuda"`. `"sequential"` —
+  поштучная выгрузка слоёв для всех кадров. `"model"` — кадр без образца идёт
+  модулями целиком (пик ~1,8 ГБ, ~2 с), кадр с образцом (img2img, IP-Adapter)
+  переключается на поштучную выгрузку (см. platform-llm/imagegen.md).
+
 - `imagegen_display_px: int = Field(default=512, ge=64, le=2048)`
   Сторона бота (тулы generate_image/find_image): до какого размера
   растягивать картинку при отправке (nearest-neighbor, целым множителем —
