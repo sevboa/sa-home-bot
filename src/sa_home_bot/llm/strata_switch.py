@@ -30,6 +30,7 @@ DEFAULT_UPSTREAM = "http://127.0.0.1:8080"
 MODELS_PATH = "/v1/models"
 CHAT_PATH = "/v1/chat/completions"
 VRAM_PATH = "/v1/vram"
+STATUS_PATH = "/v1/switch/status"
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
 AUTH_HEADER = "Authorization"
@@ -63,6 +64,13 @@ class VramFailed(RuntimeError):
 
 class MainUnreachable(VramFailed):
     pass
+
+
+@dataclass
+class Waiter:
+    model: str
+    since: float
+    priority: bool
 
 
 @dataclass(frozen=True)
@@ -286,24 +294,38 @@ class StrataSwitch:
         self.last_request_end: float | None = None
         self.run = run or run_launcher
         self.clock = clock
+        self.launching: str | None = None
+        self.launch_started: float | None = None
+        self.waiting: list[Waiter] = []
         self._lock = asyncio.Lock()
 
     async def acquire(self, model: str, immediate: bool = False) -> None:
         model = resolve(self.settings, model)
         launcher = self.settings.launchers[model]
-        if model == self.current and not self._lock.locked():
+        if model == self.current and self.launching is None:
             self.active += 1
             return
-        async with self._lock:
-            if model == self.current:
+        waiter = Waiter(model, self.clock(), immediate)
+        self.waiting.append(waiter)
+        try:
+            async with self._lock:
+                if model == self.current:
+                    self.active += 1
+                    return
+                await self._wait_until_free(0.0 if immediate else self.settings.idle_s)
+                await self._launch(model, launcher)
                 self.active += 1
-                return
-            await self._wait_until_free(0.0 if immediate else self.settings.idle_s)
-            await self._launch(model, launcher)
-            self.active += 1
+        finally:
+            self.waiting.remove(waiter)
 
     async def _launch(self, model: str, launcher: list[str]) -> None:
-        await guarded_launch(self.run, launcher, partial(self._remember_launch, model))
+        self.launching = model
+        self.launch_started = self.clock()
+        try:
+            await guarded_launch(self.run, launcher, partial(self._remember_launch, model))
+        finally:
+            self.launching = None
+            self.launch_started = None
 
     def _remember_launch(self, model: str, code: int) -> None:
         self.current = model if code == 0 else None
@@ -552,6 +574,47 @@ async def relay_normal(
                 attempt.task.cancel()
 
 
+def elapsed_since(start: float | None, now: float) -> float | None:
+    if start is None:
+        return None
+    return round(now - start, 1)
+
+
+def switch_status(
+    switch: StrataSwitch, gate: PriorityGate, companion: Companion | None
+) -> dict[str, object]:
+    now = switch.clock()
+    launching: dict[str, object] | None = None
+    if switch.launching is not None:
+        launching = {"model": switch.launching, "for_s": elapsed_since(switch.launch_started, now)}
+    companion_status: dict[str, object] | None = None
+    if companion is not None:
+        companion_status = {
+            "name": companion.settings.name,
+            "running": companion.running,
+            "active": companion.active,
+            "idle_for_s": elapsed_since(companion.last_request, now),
+            "idle_stop_s": companion.settings.idle_stop_s,
+        }
+    return {
+        "current": switch.current,
+        "launching": launching,
+        "active": switch.active,
+        "idle_for_s": elapsed_since(switch.last_request_end, now),
+        "idle_s": switch.settings.idle_s,
+        "waiting": [
+            {
+                "model": waiter.model,
+                "for_s": elapsed_since(waiter.since, now),
+                "priority": waiter.priority,
+            }
+            for waiter in switch.waiting
+        ],
+        "priority_active": gate.priority_active,
+        "companion": companion_status,
+    }
+
+
 def build_app(switch: StrataSwitch, upstream: str) -> web.Application:
     gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
     companion = build_companion(switch, upstream)
@@ -587,8 +650,12 @@ def build_app(switch: StrataSwitch, upstream: str) -> web.Application:
             return await relay_priority(request, payload, upstream, switch, gate)
         return await relay_normal(request, payload, upstream, switch, gate)
 
+    async def status(request: web.Request) -> web.Response:
+        return web.json_response(switch_status(switch, gate, companion))
+
     app = web.Application()
     app.router.add_get(MODELS_PATH, models)
+    app.router.add_get(STATUS_PATH, status)
     app.router.add_post(CHAT_PATH, chat)
     app[COMPANION_KEY] = companion
     if companion is not None:
@@ -689,7 +756,7 @@ def main(argv: list[str] | None = None) -> None:
         await switch.start()
 
     app.on_startup.append(load_default)
-    web.run_app(app, host=args.host, port=args.port)
+    web.run_app(app, host=args.host, port=args.port, handler_cancellation=True)
 
 
 if __name__ == "__main__":

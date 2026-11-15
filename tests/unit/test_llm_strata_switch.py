@@ -19,21 +19,25 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_POLL_S,
     DEFAULT_PRIORITY_GRACE_S,
     MODELS_PATH,
+    STATUS_PATH,
     UPSTREAM_CONNECT_S,
     UPSTREAM_TIMEOUT,
     VRAM_PATH,
     Companion,
     CompanionSettings,
     LaunchFailed,
+    PriorityGate,
     StrataSwitch,
     SwitchBusy,
     SwitchSettings,
     UnknownModel,
     VramFailed,
+    Waiter,
     build_app,
     build_companion,
     load_settings,
     resolve,
+    switch_status,
 )
 from tests.unit.support.waiting import wait_until
 
@@ -264,6 +268,85 @@ async def test_request_to_old_model_waits_while_switch_runs():
     assert switch.active == 0
 
 
+async def test_request_to_loaded_model_passes_while_switch_waits_for_idle():
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=30.0), run, StepClock())
+    await switch.acquire("iq3")
+    switch.release()
+    switching = asyncio.create_task(switch.acquire("qw2"))
+    await wait_until(lambda: not switching.done() and run.calls == [LAUNCHERS["iq3"]])
+    await asyncio.wait_for(switch.acquire("iq3"), timeout=2.0)
+    assert switch.active == 1
+    assert switch.current == "iq3"
+    assert run.calls == [LAUNCHERS["iq3"]]
+    switch.release()
+    await switching
+    assert switch.current == "qw2"
+    assert run.calls == [LAUNCHERS["iq3"], LAUNCHERS["qw2"]]
+    switch.release()
+
+
+async def test_request_to_model_being_launched_waits_for_launch():
+    gate = asyncio.Event()
+    run = FakeRun()
+    run.gate = gate
+    switch = StrataSwitch(settings(idle_s=0.0), run, StepClock())
+    switching = asyncio.create_task(switch.acquire("qw2"))
+    await wait_until(lambda: run.calls == [LAUNCHERS["qw2"]])
+    assert switch.launching == "qw2"
+    assert switch.launch_started is not None
+    waiting_request = asyncio.create_task(switch.acquire("qw2"))
+    await asyncio.sleep(0.05)
+    assert not waiting_request.done()
+    gate.set()
+    await switching
+    await waiting_request
+    assert switch.launching is None
+    assert switch.launch_started is None
+    assert switch.current == "qw2"
+    assert switch.active == 2
+    assert run.calls == [LAUNCHERS["qw2"]]
+    switch.release()
+    switch.release()
+
+
+async def test_waiting_list_shows_waiter_and_drops_it_on_cancel():
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=30.0), run, StepClock())
+    await switch.acquire("iq3")
+    switch.release()
+    switching = asyncio.create_task(switch.acquire("qw2"))
+    await wait_until(lambda: len(switch.waiting) == 1)
+    assert (switch.waiting[0].model, switch.waiting[0].priority) == ("qw2", False)
+    assert isinstance(switch.waiting[0].since, float)
+    blocked = asyncio.create_task(switch.acquire("qw2", immediate=True))
+    await wait_until(lambda: len(switch.waiting) == 2)
+    assert [(w.model, w.priority) for w in switch.waiting] == [("qw2", False), ("qw2", True)]
+    blocked.cancel()
+    switching.cancel()
+    await wait_until(lambda: switch.waiting == [])
+    assert switching.cancelled()
+    assert blocked.cancelled()
+    assert not switch._lock.locked()
+    await switch.acquire("qw2", immediate=True)
+    assert switch.current == "qw2"
+    assert switch.active == 1
+    assert switch.waiting == []
+    assert run.calls == [LAUNCHERS["iq3"], LAUNCHERS["qw2"]]
+    switch.release()
+
+
+async def test_waiting_list_drops_waiter_after_switch_busy():
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=30.0, max_wait_s=0.0), run, StepClock())
+    await switch.acquire("iq3")
+    switch.release()
+    with pytest.raises(SwitchBusy, match="модель занята"):
+        await switch.acquire("qw2")
+    assert switch.waiting == []
+    assert run.calls == [LAUNCHERS["iq3"]]
+
+
 async def test_queued_request_for_new_model_does_not_relaunch_it():
     gate = asyncio.Event()
     run = FakeRun()
@@ -429,6 +512,181 @@ async def test_chat_returns_502_when_strata_is_unreachable():
     assert "Strata" in answer["error"]
     assert switch.current == "iq3"
     assert switch.active == 0
+
+
+def test_switch_status_without_companion_and_without_activity():
+    switch = StrataSwitch(settings(idle_s=2.0), FakeRun(), StepClock(step=0.0))
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    status = switch_status(switch, gate, None)
+    assert status == {
+        "current": None,
+        "launching": None,
+        "active": 0,
+        "idle_for_s": None,
+        "idle_s": 2.0,
+        "waiting": [],
+        "priority_active": 0,
+        "companion": None,
+    }
+
+
+def test_switch_status_rounds_times_to_tenth():
+    switch = StrataSwitch(settings(idle_s=2.0), FakeRun(), StepClock(step=0.0))
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    now = switch.clock()
+    switch.current = "iq3"
+    switch.active = 1
+    switch.launching = "qw2"
+    switch.launch_started = now - 1.234
+    switch.last_request_end = now - 5.0
+    switch.waiting = [Waiter("qw2", now - 0.06, True), Waiter("iq3", now - 12.0, False)]
+    gate.priority_active = 2
+    status = switch_status(switch, gate, None)
+    assert status["current"] == "iq3"
+    assert status["active"] == 1
+    assert status["launching"] == {"model": "qw2", "for_s": 1.2}
+    assert status["idle_for_s"] == 5.0
+    assert status["idle_s"] == 2.0
+    assert status["waiting"] == [
+        {"model": "qw2", "for_s": 0.1, "priority": True},
+        {"model": "iq3", "for_s": 12.0, "priority": False},
+    ]
+    assert status["priority_active"] == 2
+
+
+def test_switch_status_shows_companion_fields():
+    run = FakeRun()
+    switch, companion_settings = companion_switch(run, StepClock(step=0.0))
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    companion = Companion(
+        settings=companion_settings,
+        switch=switch,
+        main_upstream="http://127.0.0.1:1",
+        run=run,
+        clock=switch.clock,
+        poll_s=switch.settings.poll_s,
+        max_wait_s=switch.settings.max_wait_s,
+    )
+    companion.running = True
+    companion.begin_request(AUTH)
+    companion.last_request = switch.clock() - 3.0
+    status = switch_status(switch, gate, companion)
+    assert status["companion"] == {
+        "name": COMPANION.name,
+        "running": True,
+        "active": 1,
+        "idle_for_s": 3.0,
+        "idle_stop_s": COMPANION.idle_stop_s,
+    }
+
+
+async def test_switch_status_shows_launching_and_waiting_in_arrival_order():
+    gate_event = asyncio.Event()
+    run = FakeRun()
+    run.gate = gate_event
+    switch = StrataSwitch(settings(idle_s=0.0), run, StepClock())
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    switching = asyncio.create_task(switch.acquire("qw2", immediate=True))
+    await wait_until(lambda: run.calls == [LAUNCHERS["qw2"]])
+    waiter = asyncio.create_task(switch.acquire("qw2"))
+    await wait_until(lambda: len(switch.waiting) == 2)
+    status = switch_status(switch, gate, None)
+    assert status["launching"]["model"] == "qw2"
+    assert status["launching"]["for_s"] >= 0.0
+    assert [(item["model"], item["priority"]) for item in status["waiting"]] == [
+        ("qw2", True),
+        ("qw2", False),
+    ]
+    assert all(item["for_s"] >= 0.0 for item in status["waiting"])
+    assert status["current"] is None
+    gate_event.set()
+    await switching
+    await waiter
+    status = switch_status(switch, gate, None)
+    assert status["launching"] is None
+    assert status["waiting"] == []
+    assert status["current"] == "qw2"
+    assert status["active"] == 2
+
+
+async def test_status_route_answers_without_authorization():
+    switch = StrataSwitch(settings(), FakeRun())
+    switch.current = "iq3"
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.get(STATUS_PATH)
+        body = await resp.json()
+    finally:
+        await close(router, upstream_server)
+    assert resp.status == 200
+    assert body == {
+        "current": "iq3",
+        "launching": None,
+        "active": 0,
+        "idle_for_s": None,
+        "idle_s": 1.0,
+        "waiting": [],
+        "priority_active": 0,
+        "companion": None,
+    }
+
+
+async def test_status_route_shows_active_and_waiting_requests():
+    switch = StrataSwitch(settings(idle_s=0.05), FakeRun())
+    upstream = ScratchUpstream(delay=0.3)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        normal = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await wait_until(lambda: upstream.arrived == 1)
+        switching = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "qw2", "messages": []}, headers=AUTH)
+        )
+        await wait_until(lambda: len(switch.waiting) == 1)
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["current"] == "iq3"
+        assert body["active"] == 1
+        assert body["launching"] is None
+        assert body["priority_active"] == 0
+        assert body["companion"] is None
+        assert [(item["model"], item["priority"]) for item in body["waiting"]] == [("qw2", False)]
+        assert body["waiting"][0]["for_s"] >= 0.0
+        assert (await normal).status == 200
+        assert (await switching).status == 200
+        assert switch.active == 0
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_status_route_reports_companion_state():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    main = VramUpstream(journal)
+    partner = Upstream()
+    app, router, servers, companion = await companion_router(main, partner, run)
+    try:
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["current"] == "iq3"
+        assert body["companion"] == {
+            "name": COMPANION.name,
+            "running": False,
+            "active": 0,
+            "idle_for_s": None,
+            "idle_stop_s": companion.idle_stop_s,
+        }
+        resp = await router.post(
+            CHAT_PATH, json={"model": COMPANION.name, "messages": []}, headers=AUTH
+        )
+        await resp.read()
+        body = await (await router.get(STATUS_PATH)).json()
+        assert body["companion"]["running"] is True
+        assert body["companion"]["active"] == 0
+        assert body["companion"]["idle_for_s"] >= 0.0
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
+    finally:
+        await close(router, *servers)
 
 
 def test_load_settings_reads_toml(tmp_path: Path):
