@@ -54,7 +54,7 @@ notes = "reasoning-level модели: Ollama think принимает стро�
 [[profile]]
 name = "strata-alfred"
 match = ["alfred"]
-think_control = "effort"
+think_control = "effort_min"
 router = true
 num_ctx = 32768
 thinking_hidden = true
