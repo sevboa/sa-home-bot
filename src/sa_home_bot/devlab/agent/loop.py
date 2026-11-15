@@ -399,7 +399,7 @@ class AgentLoop:
         title = args.get("title")
         if not isinstance(title, str) or not title.strip():
             return "ошибка: step_done требует непустой title"
-        failures = await self._guard.verify_green()
+        failures = await self._guard.verify_step()
         if failures:
             seg.red_runs += 1
             return STEP_REJECTED + "\n".join(failures)
