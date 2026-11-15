@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_EDIT_FILE,
@@ -101,8 +102,17 @@ def build_task(
     return "\n\n".join(parts)
 
 
+def _closes_step(messages: Sequence[dict[str, Any]], index: int) -> bool:
+    content = messages[index].get("content")
+    if not isinstance(content, str) or content.startswith(FOLDED_OUTPUT_PREFIX):
+        return False
+    return index == len(messages) - 1 or messages[index + 1].get("role") == "assistant"
+
+
 def with_flow_reminder(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    view = list(messages)
-    if view and isinstance(view[-1].get("content"), str):
-        view[-1] = {**view[-1], "content": f"{view[-1]['content']}\n\n{FLOW_REMINDER}"}
-    return view
+    return [
+        {**message, "content": f"{message['content']}\n\n{FLOW_REMINDER}"}
+        if _closes_step(messages, index)
+        else message
+        for index, message in enumerate(messages)
+    ]

@@ -6,7 +6,10 @@ import time
 from sa_home_bot.devlab.agent import context
 from sa_home_bot.devlab.agent.context import (
     DROPPED_STEPS_PATTERN,
+    FOLD_TARGET_SHARE,
+    FOLDED_OUTPUT_PREFIX,
     FOLDED_REPLY_PREFIX,
+    REASONING_FIELD,
     RECENT_OUTPUT_CHARS,
     TRUNCATED_PATTERN,
     estimate_tokens,
@@ -220,3 +223,45 @@ def test_pinned_alone_over_budget_stays_over_and_reports_sizes():
     report = pinned_report(messages)
     assert "3000 симв." in report and "60000 симв." in report
     assert estimate_tokens("з" * 60000) > 2000
+
+
+def snapshot(messages: list[dict]) -> list[dict]:
+    return json.loads(json.dumps(messages))
+
+
+def test_fold_leaves_headroom_so_next_steps_only_append():
+    budget = 6000
+    messages = dialog(12, output=2000)
+    assert fold_old_results(messages, budget, 4) <= budget * FOLD_TARGET_SHARE
+    assert_valid(messages)
+    for index in range(50, 53):
+        before = snapshot(messages)
+        messages += pair(index, 2000)
+        assert fold_old_results(messages, budget, 4) <= budget
+        assert messages[: len(before)] == before
+
+
+def with_reasoning(messages: list[dict], size: int) -> list[dict]:
+    for message in messages:
+        if message["role"] == "assistant":
+            message[REASONING_FIELD] = "р" * size
+    return messages
+
+
+def test_old_reasoning_folds_before_tool_outputs():
+    messages = with_reasoning(dialog(8, output=100), 3000)
+    fold_old_results(messages, 6000, 2)
+    assistants = [m for m in messages if m["role"] == "assistant"]
+    assert REASONING_FIELD not in assistants[0]
+    assert all(REASONING_FIELD in m for m in assistants[-2:])
+    assert not any(
+        m["content"].startswith(FOLDED_OUTPUT_PREFIX) for m in messages if m["role"] == "tool"
+    )
+    assert_valid(messages)
+
+
+def test_last_unit_reasoning_is_dropped_when_it_alone_overflows():
+    messages = with_reasoning(dialog(2, output=100), 30000)
+    assert fold_old_results(messages, 3000, 4) <= 3000
+    assert REASONING_FIELD not in messages[-2]
+    assert_valid(messages)

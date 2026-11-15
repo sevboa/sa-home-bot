@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
+from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT, FOLDED_OUTPUT_PREFIX, REASONING_FIELD
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import (
@@ -23,17 +23,13 @@ from sa_home_bot.devlab.agent.loop import (
 )
 from sa_home_bot.devlab.agent.model import (
     MODEL_TIMEOUT_S,
-    REASONING_FIELD,
-    REASONING_KEEP_LAST,
-    REASONING_MAX_CHARS,
     GatewayChat,
     ModelError,
     ModelReply,
     ToolCall,
     parse_reply,
-    with_reasoning,
 )
-from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER
+from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER, with_flow_reminder
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, SandboxPathError
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
@@ -341,7 +337,7 @@ async def test_gateway_chat_request_and_parse():
     assert reply.as_message()["tool_calls"][0]["function"]["name"] == "grep"
 
 
-async def test_gateway_chat_returns_own_reasoning_on_next_request():
+async def test_gateway_chat_reasoning_rides_in_history():
     bodies = []
 
     async def handler(request):
@@ -361,23 +357,53 @@ async def test_gateway_chat_returns_own_reasoning_on_next_request():
         await chat.close()
         await server.close()
     assert first.reasoning == "план 1"
-    assert REASONING_FIELD not in first.as_message()
-    assert REASONING_FIELD not in bodies[0]["messages"][0]
+    assert first.as_message()[REASONING_FIELD] == "план 1"
+    assert REASONING_FIELD not in ModelReply("ответ").as_message()
     assert bodies[1]["messages"][1][REASONING_FIELD] == "план 1"
 
 
-def assistant(key):
-    return {"role": "assistant", "content": "", "tool_calls": [{"id": key}]}
+def flow_step(key: str, output: str) -> list[dict]:
+    call = {"id": key, "type": "function", "function": {"name": "t", "arguments": "{}"}}
+    return [
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": key, "content": output},
+    ]
 
 
-def test_reasoning_goes_to_last_replies_within_budget():
-    keys = [f"k{i}" for i in range(REASONING_KEEP_LAST + 2)]
-    messages = [assistant(key) for key in keys]
-    memory = {key: "r" for key in keys}
-    memory[keys[-2]] = "x" * REASONING_MAX_CHARS
-    view = with_reasoning(messages, memory)
-    assert [REASONING_FIELD in m for m in view] == [False] * (len(keys) - 1) + [True]
-    assert REASONING_FIELD not in messages[-1]
+def test_flow_reminder_keeps_sent_prefix_unchanged():
+    history = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+    history += flow_step("k1", "a")
+    sent = with_flow_reminder(history)
+    longer = with_flow_reminder([*history, *flow_step("k2", "b"), *flow_step("k3", "c")])
+    assert longer[: len(sent)] == sent
+    assert sent[0]["content"] == "s"
+    assert sent[1]["content"] == f"t\n\n{FLOW_REMINDER}"
+    assert longer[-1]["content"] == f"c\n\n{FLOW_REMINDER}"
+    assert history[-1]["content"] == "a"
+
+
+def test_flow_reminder_only_on_step_end_and_not_on_folded_output():
+    folded = FOLDED_OUTPUT.format(size=10)
+    call = {"id": "k1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+    history = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "t"},
+        {"role": "assistant", "content": "", "tool_calls": [call, {**call, "id": "k2"}]},
+        {"role": "tool", "tool_call_id": "k1", "content": "первый"},
+        {"role": "tool", "tool_call_id": "k2", "content": folded},
+        *flow_step("k3", "b"),
+    ]
+    view = with_flow_reminder(history)
+    assert [m["content"].endswith(FLOW_REMINDER) for m in view] == [
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert view[4]["content"] == folded
 
 
 async def test_gateway_chat_timeout_and_http_error():
