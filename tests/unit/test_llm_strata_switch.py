@@ -753,7 +753,19 @@ async def test_companion_launch_failure_leaves_it_stopped():
         await close(main_server)
 
 
-async def test_companion_skips_vram_when_main_model_not_loaded():
+async def test_companion_skips_vram_when_main_model_not_listening():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock())
+    main_server, main_url = await main_upstream(VramUpstream(journal))
+    await close(main_server)
+    companion = loaded_companion(switch, main_url)
+    await companion.ensure_running()
+    assert journal == [LAUNCH]
+    assert companion.running is True
+
+
+async def test_companion_shrinks_main_after_router_restart_without_known_model():
     journal: list[str] = []
     run = JournalRun(journal)
     switch, _ = companion_switch(run, StepClock())
@@ -761,10 +773,8 @@ async def test_companion_skips_vram_when_main_model_not_loaded():
     main_server, main_url = await main_upstream(main)
     companion = loaded_companion(switch, main_url, current=None)
     try:
-        assert switch.current is None
         await companion.ensure_running()
-        assert journal == [LAUNCH]
-        assert companion.running is True
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
     finally:
         await close(main_server)
 

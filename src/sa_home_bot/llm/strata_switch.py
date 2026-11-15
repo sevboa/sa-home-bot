@@ -61,6 +61,10 @@ class VramFailed(RuntimeError):
     pass
 
 
+class MainUnreachable(VramFailed):
+    pass
+
+
 @dataclass(frozen=True)
 class CompanionSettings:
     name: str
@@ -142,6 +146,10 @@ async def apply_vram_reserve(
     while True:
         try:
             status = await request_vram(upstream, reserve_mib, headers)
+        except aiohttp.ClientConnectorError as exc:
+            raise MainUnreachable(
+                f"Strata не отвечает на {VRAM_PATH}: {type(exc).__name__}"
+            ) from exc
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise VramFailed(
                 f"Strata не приняла резерв видеопамяти: {type(exc).__name__}"
@@ -196,16 +204,17 @@ class Companion:
         return self.clock() - self.last_request >= self.settings.idle_stop_s
 
     async def _reserve_main(self, reserve_mib: int) -> None:
-        if self.switch.current is None:
-            return
-        await apply_vram_reserve(
-            self.main_upstream,
-            reserve_mib,
-            self.headers,
-            self.poll_s,
-            self.max_wait_s,
-            self.clock,
-        )
+        try:
+            await apply_vram_reserve(
+                self.main_upstream,
+                reserve_mib,
+                self.headers,
+                self.poll_s,
+                self.max_wait_s,
+                self.clock,
+            )
+        except MainUnreachable as exc:
+            log.info("компаньон: основная модель не запущена, резерв пропущен: %s", exc)
 
     def _remember_launch(self, code: int) -> None:
         self.running = code == 0
