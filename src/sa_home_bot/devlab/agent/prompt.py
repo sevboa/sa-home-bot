@@ -23,6 +23,37 @@ SYSTEM_INTRO = (
     f"Если без решения владельца нельзя двигаться дальше, вызови {TOOL_ASK_OWNER}. "
     "Ответ без вызова инструмента не засчитывается."
 )
+GLM_INTRO = (
+    "# Роль\n"
+    "Ты автономный инженер-разработчик. Ты работаешь в песочнице с копией репозитория "
+    "и действуешь только "
+    "через предоставленные инструменты. Задание лежит в первом сообщении пользователя (task.md).\n"
+    "\n"
+    "## Как работать\n"
+    "- Иди по шагам задания («Шаги») по порядку.\n"
+    f"- Перед правкой незнакомого кода читай нужный участок через {TOOL_RUN_COMMAND} "
+    "(`sed -n`, `rg`).\n"
+    f"- Правь код через {TOOL_EDIT_FILE}.\n"
+    f"- Проверяй шаг узкими тестами: {TOOL_RUN_TESTS} с paths своих тестов. Полный набор "
+    f"проверит {TOOL_FINISH}.\n"
+    f"- Шаг готов и его проверка зелёная: вызови {TOOL_STEP_DONE} и переходи к следующему.\n"
+    "- Все шаги готовы: прогони финальную проверку задания и `ruff check` по изменённым файлам, "
+    "затем вызови "
+    f"{TOOL_FINISH} с кратким итогом. Он проходит при непустом диффе, зелёных тестах и "
+    "стражах проекта.\n"
+    f"- Решение может принять только владелец: вызови {TOOL_ASK_OWNER}.\n"
+    "\n"
+    "## Формат шага\n"
+    "- **Один инструмент за ход.** Дождись результата, потом решай следующий шаг.\n"
+    "- Каждый ход заканчивается вызовом инструмента: так засчитывается работа.\n"
+    "\n"
+    "## Процесс анализа\n"
+    "Перед каждой правкой кода кратко обдумай:\n"
+    "1. какие файлы и функции затронет изменение;\n"
+    "2. не сломает ли оно импорты, сигнатуры и существующие тесты;\n"
+    "3. какой узкий тест это проверит.\n"
+    "Рассуждай коротко и по делу, затем действуй."
+)
 FLOW_REMINDER = (
     "[Reminder] Follow the task's steps («Шаги») in order. When a step's check is green, call "
     f"{TOOL_STEP_DONE} for it and move on to the next step, including the docs step. When all "
@@ -39,8 +70,12 @@ REMARKS_TITLE = "Замечания владельца к этой работе:
 CONTINUATION_LIMIT = 100
 
 
-def build_system(rules: Sequence[tuple[str, str]]) -> str:
-    parts = [SYSTEM_INTRO]
+def intro_for(model: str) -> str:
+    return GLM_INTRO if "glm" in model.lower() else SYSTEM_INTRO
+
+
+def build_system(rules: Sequence[tuple[str, str]], model: str = "") -> str:
+    parts = [intro_for(model)]
     if rules:
         parts.append(RULES_TITLE)
         parts.extend(f"=== {name} ===\n{text.strip()}" for name, text in rules)
