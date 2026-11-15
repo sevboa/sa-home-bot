@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import signal
 import time
 import tomllib
 from collections.abc import Awaitable, Callable
@@ -13,6 +15,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+from sa_home_bot.devlab.neighbor import NeighborGate, start_following, stop_following
 from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
@@ -22,6 +25,10 @@ DEFAULT_MAX_WAIT_S = 1800.0
 DEFAULT_POLL_S = 5.0
 DEFAULT_PRIORITY_GRACE_S = 10.0
 DEFAULT_COMPANION_IDLE_STOP_S = 1800.0
+DEFAULT_FREEZE_MAX_S = 300.0
+FREEZE_GUARD_POLL_S = 1.0
+ENGINE_FLAG = "--serve"
+PROC_ROOT = Path("/proc")
 PRIORITY_POLL_S = 0.2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8090
@@ -106,6 +113,9 @@ class SwitchSettings:
     priority: frozenset[str] = frozenset()
     priority_grace_s: float = DEFAULT_PRIORITY_GRACE_S
     companion: CompanionSettings | None = None
+    freeze_engine: bool = False
+    freeze_max_s: float = DEFAULT_FREEZE_MAX_S
+    llm_socket: str = ""
 
 
 def resolve(settings: SwitchSettings, model: str) -> str:
@@ -387,18 +397,142 @@ class NormalAttempt:
     protected: bool = False
 
 
+def parent_pid(stat: str) -> int:
+    return int(stat.rsplit(")", 1)[1].split()[1])
+
+
+def engine_pids(root: int, proc: Path = PROC_ROOT) -> list[int]:
+    children: dict[int, list[int]] = {}
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            ppid = parent_pid((entry / "stat").read_text())
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry.name))
+    found: list[int] = []
+    queue = list(children.get(root, []))
+    while queue:
+        pid = queue.pop()
+        queue.extend(children.get(pid, []))
+        try:
+            argv = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if ENGINE_FLAG.encode() in argv:
+            found.append(pid)
+    return sorted(found)
+
+
+class EngineFreezer:
+    def __init__(
+        self,
+        find: Callable[[], list[int]],
+        clock: Callable[[], float],
+        max_s: float,
+        send: Callable[[int, int], None] = os.kill,
+    ) -> None:
+        self._find = find
+        self._clock = clock
+        self._max_s = max_s
+        self._send = send
+        self.holders = 0
+        self.frozen: list[int] = []
+        self.frozen_since: float | None = None
+        self.expired = False
+
+    def hold(self) -> None:
+        self.holders += 1
+        if self.holders == 1 and not self.frozen:
+            self.expired = False
+            self.frozen = self._find()
+            self.frozen_since = self._clock()
+            self._signal(self.frozen, signal.SIGSTOP)
+            log.info("основная модель заморожена на время приоритета: %s", self.frozen)
+
+    def release(self) -> None:
+        self.holders = max(0, self.holders - 1)
+        if self.holders == 0:
+            self.thaw()
+            self.expired = False
+
+    def thaw(self) -> None:
+        pids = self.frozen
+        if not pids:
+            return
+        self.frozen = []
+        self.frozen_since = None
+        self._signal(pids, signal.SIGCONT)
+        log.info("основная модель разморожена: %s", pids)
+
+    def expire_if_stuck(self) -> bool:
+        if self.frozen_since is None or self._clock() - self.frozen_since < self._max_s:
+            return False
+        log.warning(
+            "приоритет держит основную модель дольше %.0f с, размораживаю по freeze_max_s",
+            self._max_s,
+        )
+        self.expired = True
+        self.thaw()
+        return True
+
+    async def guard(self, poll_s: float = FREEZE_GUARD_POLL_S) -> None:
+        while True:
+            await asyncio.sleep(poll_s)
+            self.expire_if_stuck()
+
+    def _signal(self, pids: list[int], sig: int) -> None:
+        for pid in pids:
+            try:
+                self._send(pid, sig)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                log.warning("нет прав послать сигнал %s процессу %s", sig, pid)
+
+
 class PriorityGate:
-    def __init__(self, clock: Callable[[], float], poll_s: float, grace_s: float) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float],
+        poll_s: float,
+        grace_s: float,
+        freezer: EngineFreezer | None = None,
+    ) -> None:
         self._clock = clock
         self._poll_s = poll_s
         self._grace_s = grace_s
+        self.freezer = freezer
         self.priority_active = 0
         self.last_priority_end: float | None = None
         self.interruptable: set[NormalAttempt] = set()
         self.uninterruptible = 0
 
-    async def enter_priority(self) -> None:
+    async def enter_priority(self, preempt: bool = True) -> None:
         self.priority_active += 1
+        if preempt or self.freezer is None:
+            await self._preempt()
+
+    def freeze_engine(self) -> bool:
+        if self.freezer is None:
+            return False
+        self.freezer.hold()
+        return True
+
+    def unfreeze_engine(self) -> None:
+        if self.freezer is not None:
+            self.freezer.release()
+
+    async def enter_hold(self) -> None:
+        await self.enter_priority(preempt=False)
+        self.freeze_engine()
+
+    async def leave_hold(self) -> None:
+        self.unfreeze_engine()
+        self.leave_priority()
+
+    async def _preempt(self) -> None:
         while True:
             attempts = [attempt for attempt in self.interruptable if attempt.task is not None]
             if not attempts:
@@ -531,9 +665,10 @@ async def relay_companion(
     companion: Companion,
     gate: PriorityGate,
 ) -> web.StreamResponse:
-    await gate.enter_priority()
+    await gate.enter_priority(preempt=not companion.running)
     label = client_label(payload)
     companion.begin_request(auth_headers(request), label)
+    frozen = False
     try:
         try:
             await companion.ensure_running()
@@ -541,11 +676,14 @@ async def relay_companion(
             return json_error(503, str(exc))
         except (LaunchFailed, OSError) as exc:
             return json_error(502, str(exc))
+        frozen = gate.freeze_engine()
         try:
             return await relay_chat(request, payload, companion.settings.upstream)
         except (aiohttp.ClientError, TimeoutError) as exc:
             return json_error(502, f"PolyStrata недоступна: {type(exc).__name__}")
     finally:
+        if frozen:
+            gate.unfreeze_engine()
         companion.end_request(label)
         gate.leave_priority()
 
@@ -638,12 +776,17 @@ def switch_status(
             for waiter in switch.waiting
         ],
         "priority_active": gate.priority_active,
+        "engine_frozen": bool(gate.freezer is not None and gate.freezer.frozen),
         "companion": companion_status,
     }
 
 
-def build_app(switch: StrataSwitch, upstream: str) -> web.Application:
-    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+def build_app(
+    switch: StrataSwitch, upstream: str, freezer: EngineFreezer | None = None
+) -> web.Application:
+    gate = PriorityGate(
+        switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s, freezer
+    )
     companion = build_companion(switch, upstream)
 
     async def models(request: web.Request) -> web.Response:
@@ -695,7 +838,35 @@ def build_app(switch: StrataSwitch, upstream: str) -> web.Application:
 
         app.on_startup.append(start_companion_guard)
         app.on_cleanup.append(stop_companion_guard)
+    if freezer is not None:
+        attach_freezer(app, freezer, gate, switch.settings)
     return app
+
+
+FREEZE_GUARD_KEY = web.AppKey("freeze_guard", asyncio.Task)
+HOLDS_KEY = web.AppKey("holds", asyncio.Task)
+
+
+def attach_freezer(
+    app: web.Application, freezer: EngineFreezer, gate: PriorityGate, settings: SwitchSettings
+) -> None:
+    holds = NeighborGate(
+        freeze=gate.enter_hold, thaw=gate.leave_hold, freeze_max_s=settings.freeze_max_s
+    )
+
+    async def start(app: web.Application) -> None:
+        app[FREEZE_GUARD_KEY] = asyncio.create_task(freezer.guard())
+        if settings.llm_socket:
+            app[HOLDS_KEY] = start_following(holds, settings.llm_socket)
+
+    async def stop(app: web.Application) -> None:
+        if HOLDS_KEY in app:
+            await stop_following(app[HOLDS_KEY], holds)
+        await cancel_task(app[FREEZE_GUARD_KEY])
+        freezer.thaw()
+
+    app.on_startup.append(start)
+    app.on_cleanup.append(stop)
 
 
 def load_companion(data: dict[str, object]) -> CompanionSettings | None:
@@ -762,6 +933,9 @@ def load_settings(path: str | Path) -> SwitchSettings:
         priority=priority,
         priority_grace_s=float(data.get("priority_grace_s", DEFAULT_PRIORITY_GRACE_S)),
         companion=companion,
+        freeze_engine=bool(data.get("freeze_engine", False)),
+        freeze_max_s=float(data.get("freeze_max_s", DEFAULT_FREEZE_MAX_S)),
+        llm_socket=str(data.get("llm_socket") or ""),
     )
 
 
@@ -776,8 +950,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    switch = StrataSwitch(load_settings(args.config))
-    app = build_app(switch, args.upstream)
+    settings = load_settings(args.config)
+    switch = StrataSwitch(settings)
+    freezer = None
+    if settings.freeze_engine:
+        freezer = EngineFreezer(
+            partial(engine_pids, os.getpid()), switch.clock, settings.freeze_max_s
+        )
+    app = build_app(switch, args.upstream, freezer)
 
     async def load_default(app: web.Application) -> None:
         await switch.start()
