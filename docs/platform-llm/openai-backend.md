@@ -6,7 +6,9 @@ Qwen3.8 в Strata — у неё OpenAI-совместимый API (`POST <openai
 `chat`, `chat_stream` и `generate` той же сигнатуры и возвращает словарь того же вида, что Ollama,
 поэтому читающий ответ код (`llm/service.py::_log_ollama_timings`, обработка `ACTION_CHAT`,
 `llm/photo_check.py`, `llm/image_prompt.py`) не меняется. Служба выбирает транспорт через фасад
-`llm/backend.py` и поле `[llm] backend` (запись ниже).
+`llm/backend.py` и поле `[llm] backend` (запись ниже). `generate` отдаёт текст ещё и в поле
+`response`, как `/api/generate` у Ollama: `ACTION_ASK` читает именно его (находка 2026-11-15 при
+выкате v0.172.1 — без поля Альфред на `ask` отвечал пустой строкой).
 
 ## Почему свой клиент, а не библиотека
 

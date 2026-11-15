@@ -499,7 +499,7 @@ async def test_generate_sends_single_user_message_and_disables_thinking():
     ]
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert "tools" not in body
-    assert result["message"]["content"] == "Доброго дня"
+    assert result["response"] == "Доброго дня"
 
 
 async def test_chat_retries_after_connection_drop():
