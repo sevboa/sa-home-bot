@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from sa_home_bot.bot import vpn_callbacks, vpn_screens, vpn_settings
+from sa_home_bot.bot import vpn_callbacks
 from sa_home_bot.bot import vpn_devices as vd
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -146,13 +146,13 @@ def test_card_text_legacy_awg_hint(has_page):
     assert "Если перевыпуск выдаёт ошибку — включите Hiddify и попробуйте ещё раз." in text
     if has_page:
         assert (
-            f"2. Нажмите «{vpn_settings.PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
+            f"2. Нажмите «{vd.PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
             f"все ключи AmneziaVPN («{vd.PAGE_REISSUE_BUTTON}»), добавьте новые ключи "
             "в приложение." in text
         )
     else:
         assert (
-            f"2. Нажмите «{vpn_screens.REISSUE_BUTTON}» ниже и выберите все ключи AmneziaVPN, "
+            f"2. Нажмите «{vd.REISSUE_BUTTON}» ниже и выберите все ключи AmneziaVPN, "
             "добавьте новые ключи в приложение." in text
         )
 
@@ -177,8 +177,8 @@ async def test_show_screen_card_without_page_uses_reissue_button(_fanout):
     _fanout["servers"] = _servers(legacy_awg=True)
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
     text = cb.message.edits[-1]
-    assert vpn_screens.REISSUE_BUTTON in text
-    assert vpn_settings.PAGE_CARD_BUTTON not in text
+    assert vd.REISSUE_BUTTON in text
+    assert vd.PAGE_CARD_BUTTON not in text
 
 
 async def test_expert_reissue_fix_does_not_send_keep_old(_fanout):

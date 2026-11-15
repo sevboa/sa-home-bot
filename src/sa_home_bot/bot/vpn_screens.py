@@ -28,7 +28,6 @@ TRANSPORT_PICKER_TEXT = (
     "• <b>AmneziaVPN</b> — быстрее, но в части стран может не работать."
 )
 TRANSPORT_REALITY_HINT = " — для РФ"
-REISSUE_BUTTON = "🔄 Перевыпустить ключи"
 
 
 def admin_row(
@@ -129,7 +128,7 @@ def device_card_keyboard(
     countries = vpn_devices.countries_of(servers)
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
-        rows.append([InlineKeyboardButton(text=vpn_settings.PAGE_CARD_BUTTON, url=page_url)])
+        rows.append([InlineKeyboardButton(text=vpn_devices.PAGE_CARD_BUTTON, url=page_url)])
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_ISSUE):
         rows.append(
             [
@@ -144,7 +143,9 @@ def device_card_keyboard(
                 [button(vpn_settings.OTHER_WAYS_BUTTON, _cb.card_cb(_cb.SCREEN_PICK, device.key))]
             )
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_REISSUE):
-        rows.append([button(REISSUE_BUTTON, _cb.card_cb(_cb.SCREEN_REISSUE, device.key))])
+        rows.append(
+            [button(vpn_devices.REISSUE_BUTTON, _cb.card_cb(_cb.SCREEN_REISSUE, device.key))]
+        )
         for node in device.broken_nodes():
             country = countries.get(node)
             rows.append(

@@ -17,6 +17,8 @@ TECHNICAL_TRANSPORT_NAME = {AWG: "AmneziaVPN", REALITY: "VLESS (Reality)"}
 AWG_LEGACY_TRANSPORT_NAME = "AmneziaVPN (версия 1)"
 AWG_TECH_NAME = "AmneziaWG"
 PAGE_REISSUE_BUTTON = "🔄 Перевыпустить"
+PAGE_CARD_BUTTON = "📶 Настройки на странице"
+REISSUE_BUTTON = "🔄 Перевыпустить ключи"
 
 
 @dataclass(frozen=True)
@@ -314,17 +316,15 @@ def legacy_awg_country_names(device: Device, countries: dict[str, Country]) -> s
 
 
 def legacy_awg_hint(device: Device, countries: dict[str, Country], has_page: bool) -> list[str]:
-    from sa_home_bot.bot import vpn_screens, vpn_settings
-
     awg = TRANSPORT_NAME[AWG]
     if has_page:
         step = (
-            f"2. Нажмите «{vpn_settings.PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
+            f"2. Нажмите «{PAGE_CARD_BUTTON}», перейдите по ссылке и перевыпустите "
             f"все ключи {awg} («{PAGE_REISSUE_BUTTON}»), добавьте новые ключи в приложение."
         )
     else:
         step = (
-            f"2. Нажмите «{vpn_screens.REISSUE_BUTTON}» ниже и выберите все ключи {awg}, "
+            f"2. Нажмите «{REISSUE_BUTTON}» ниже и выберите все ключи {awg}, "
             "добавьте новые ключи в приложение."
         )
     return [

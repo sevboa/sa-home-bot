@@ -29,7 +29,6 @@ VLESS_FILE_CAPTION = "Настройки Hiddify. Нажмите на файл �
 
 
 PAGE_BUTTON = "📶 Открыть настройки"
-PAGE_CARD_BUTTON = "📶 Настройки на странице"
 OTHER_WAYS_BUTTON = "Другие способы"
 CANCEL_TEXT = "Отмена"
 TO_DEVICE_TEXT = "⬅️ К устройству"
