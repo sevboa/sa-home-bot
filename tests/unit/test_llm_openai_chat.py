@@ -134,6 +134,7 @@ def test_to_openai_messages_keeps_existing_tool_call_id_and_advances_numbering()
         ("high", {"reasoning_budget_tokens": 8192}),
         ("medium", {"reasoning_budget_tokens": 4096}),
         ("low", {"reasoning_budget_tokens": 1024}),
+        ("minimal", {"reasoning_budget_tokens": 256}),
     ],
 )
 def test_think_fields(think, expected):

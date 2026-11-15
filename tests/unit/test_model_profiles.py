@@ -50,7 +50,7 @@ def test_strata_alfred_profile_resolves_by_alias():
     profile, matched = reg.resolve("alfred")
     assert matched is True
     assert profile.name == "strata-alfred"
-    assert profile.think_control == "effort"
+    assert profile.think_control == "effort_min"
     assert profile.router is True
     assert profile.num_ctx == 32768
     assert profile.thinking_hidden is True
@@ -59,7 +59,7 @@ def test_strata_alfred_profile_resolves_by_alias():
 @pytest.mark.parametrize(
     ("reason", "expected_think", "expected_fields"),
     [
-        ("off", False, {"chat_template_kwargs": {"enable_thinking": False}}),
+        ("off", "minimal", {"reasoning_budget_tokens": 256}),
         ("low", "low", {"reasoning_budget_tokens": 1024}),
         ("medium", "medium", {"reasoning_budget_tokens": 4096}),
         ("high", "high", {"reasoning_budget_tokens": 8192}),
@@ -85,6 +85,8 @@ def test_strata_alfred_think_arg_feeds_openai_think_fields(reason, expected_thin
         ("effort", "low", "low"),
         ("effort", "medium", "medium"),
         ("effort", "high", "high"),
+        ("effort_min", "off", "minimal"),
+        ("effort_min", "low", "low"),
         ("none", "off", None),
         ("none", "high", None),
     ],
@@ -95,7 +97,7 @@ def test_think_arg_translation(control, reason, expected):
 
 
 def test_all_reason_levels_translate_without_error():
-    for control in ("flag", "flag_implicit_on", "effort", "none"):
+    for control in ("flag", "flag_implicit_on", "effort", "effort_min", "none"):
         p = ModelProfile(name="x", think_control=control)
         for level in REASON_LEVELS:
             p.think_arg(level)

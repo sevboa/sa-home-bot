@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import LlmConfig
+from sa_home_bot.llm.model_profiles import THINK_MINIMAL
 from sa_home_bot.llm.ollama import _append_error_body, _is_transient_connection_error
 from sa_home_bot.proto.messages import ERR_INTERNAL, ProtoError
 from sa_home_bot.utils.http import JSON_FETCH_ERRORS
@@ -23,10 +24,12 @@ CHAT_COMPLETIONS_PATH = "/chat/completions"
 _THINK_BUDGET_HIGH_TOKENS = 8192
 _THINK_BUDGET_MEDIUM_TOKENS = 4096
 _THINK_BUDGET_LOW_TOKENS = 1024
+_THINK_BUDGET_MINIMAL_TOKENS = 256
 _THINK_BUDGET_TOKENS: dict[str, int] = {
     "high": _THINK_BUDGET_HIGH_TOKENS,
     "medium": _THINK_BUDGET_MEDIUM_TOKENS,
     "low": _THINK_BUDGET_LOW_TOKENS,
+    THINK_MINIMAL: _THINK_BUDGET_MINIMAL_TOKENS,
 }
 _SAMPLING_FIELDS: tuple[str, ...] = ("temperature", "top_p", "seed")
 _TOOL_CALL_ID_PREFIX = "call_"

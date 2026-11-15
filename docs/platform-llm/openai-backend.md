@@ -42,9 +42,28 @@ OpenAI:
 
 - `None` → ничего не отправляем (поведение по умолчанию у самой модели);
 - `False` и `"off"` → `{"chat_template_kwargs": {"enable_thinking": false}}` — рассуждение выключено;
+- `"minimal"` → `reasoning_budget_tokens: 256` — так профиль `effort_min` передаёт `off` (см. ниже);
 - `True` и `"high"` → `reasoning_budget_tokens: 8192`, `"medium"` → 4096, `"low"` → 1024
   (константы модуля). `True` без уровня трактуются как максимум, потому что бот включает рассуждение
   именно тогда, когда модели есть о чём думать.
+
+### Почему Qwen в Strata не выключают рассуждение (стенд 2026-11-15)
+
+Qwen3.8 IQ3_XXS в Strata с `chat_template_kwargs.enable_thinking=false` на многоходовой истории
+схлопывает ответы: с 9–10 хода персона отвечает 1–3 символами или пусто (`done_reason=stop`), изредка
+пишет `<think>` прямо в `content`. Без истории ответы нормальные, одиночные пробы этого не ловят.
+Замер на 35 ходах персоны (сырьё `/mnt/data/claude/alfred-qwen/stand/think-*.jsonl`):
+
+| Вариант | Нормальных из 35 | Ход ср./макс |
+|---|---|---|
+| `reasoning_budget_tokens=0` | 35 | 7.8 / 29.5 с — 0 не выключает рассуждение |
+| `128` | 34 | 4.0 / 5.3 с — бюджет съел ответ, пусто |
+| `256` | 35 | 5.8 / 9.5 с |
+| `enable_thinking=false` + пустой `<think></think>` в истории | 8 из 15 | префикс утекает в ответ |
+
+Поэтому у профиля `strata-alfred` контроль `effort_min`: `off` превращается в бюджет 256. Ведущий и
+сжатие на длинной истории с ним в порядке (Ведущий ~10–13 с вместо ~5 с). Gemma так не ломается и
+выключается обычным `enable_thinking: false`.
 
 ## options (`options_fields`)
 
@@ -132,11 +151,12 @@ Ollama: половину ответа второй попыткой не пов�
 ## Профиль `strata-alfred` (`model-profiles.toml`)
 
 `name = "alfred"` — псевдоним Qwen3.8 в Strata, его и пишет `[llm] model`. Профиль
-`think_control = "effort"`, `router = true`, `num_ctx = 32768`, `thinking_hidden = true`:
+`think_control = "effort_min"`, `router = true`, `num_ctx = 32768`, `thinking_hidden = true`:
 
-- `effort` → `think_arg` отдаёт `False` для `off` и строки `low`/`medium`/`high` для уровней —
-  ровно то, что понимает `openai_chat.think_fields` (`False` → `chat_template_kwargs.enable_thinking`,
-  уровень → `reasoning_budget_tokens` 1024/4096/8192);
+- `effort_min` → `think_arg` отдаёт `"minimal"` для `off` и строки `low`/`medium`/`high` для уровней —
+  ровно то, что понимает `openai_chat.think_fields` (`"minimal"` → `reasoning_budget_tokens` 256,
+  уровень → 1024/4096/8192). Gemma 4 в PolyStrata идёт по своему профилю `gemma-4`
+  (`flag_implicit_on`): там `off` → `False` → `enable_thinking: false`, и это для неё правильно;
 - `num_ctx = 32768` — окно запроса боту; в самой Strata окно задаётся запуском модели, запросом его
   не передать (`options_fields` отбрасывает `num_ctx`), но по этому числу бот считает страховку
   переполнения и сжатие истории;
