@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -29,6 +30,8 @@ DEFAULT_FREEZE_MAX_S = 300.0
 FREEZE_GUARD_POLL_S = 1.0
 ENGINE_FLAG = "--serve"
 PROC_ROOT = Path("/proc")
+TCP_LISTEN_STATE = "0A"
+PROC_NET_TCP = ("net/tcp", "net/tcp6")
 PRIORITY_POLL_S = 0.2
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8090
@@ -423,6 +426,56 @@ def engine_pids(root: int, proc: Path = PROC_ROOT) -> list[int]:
         if ENGINE_FLAG.encode() in argv:
             found.append(pid)
     return sorted(found)
+
+
+def listening_inodes(port: int, proc: Path = PROC_ROOT) -> set[str]:
+    wanted = f"{port:04X}"
+    inodes: set[str] = set()
+    for table in PROC_NET_TCP:
+        try:
+            rows = (proc / table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != TCP_LISTEN_STATE:
+                continue
+            if fields[1].rsplit(":", 1)[-1] == wanted:
+                inodes.add(fields[9])
+    return inodes
+
+
+def socket_owners(inodes: set[str], proc: Path = PROC_ROOT) -> list[int]:
+    links = {f"socket:[{inode}]" for inode in inodes}
+    owners: list[int] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fds = list((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target in links:
+                owners.append(int(entry.name))
+                break
+    return sorted(owners)
+
+
+def upstream_engine_pids(port: int, proc: Path = PROC_ROOT) -> list[int]:
+    found: set[int] = set()
+    for owner in socket_owners(listening_inodes(port, proc), proc):
+        found.update(engine_pids(owner, proc))
+    return sorted(found)
+
+
+def upstream_port(url: str) -> int:
+    parts = urlsplit(url)
+    return parts.port or (443 if parts.scheme == "https" else 80)
 
 
 class EngineFreezer:
@@ -955,7 +1008,9 @@ def main(argv: list[str] | None = None) -> None:
     freezer = None
     if settings.freeze_engine:
         freezer = EngineFreezer(
-            partial(engine_pids, os.getpid()), switch.clock, settings.freeze_max_s
+            partial(upstream_engine_pids, upstream_port(args.upstream)),
+            switch.clock,
+            settings.freeze_max_s,
         )
     app = build_app(switch, args.upstream, freezer)
 

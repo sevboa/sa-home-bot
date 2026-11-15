@@ -43,6 +43,8 @@ from sa_home_bot.llm.strata_switch import (
     load_settings,
     resolve,
     switch_status,
+    upstream_engine_pids,
+    upstream_port,
 )
 from tests.unit.support.waiting import wait_until
 
@@ -1884,3 +1886,46 @@ def test_load_settings_reads_freeze_options(tmp_path: Path):
         120.0,
         "/run/llm.sock",
     )
+
+
+TCP_HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when uid inode\n"
+
+
+def tcp_row(port: int, state: str, inode: int) -> str:
+    fields = [f"00000000:{port:04X}", "00000000:0000", state, "0:0", "00:0", "0", "1000", "0"]
+    return "   0: " + " ".join(fields) + f" {inode} 1\n"
+
+
+def own_socket(root: Path, pid: int, inode: int) -> None:
+    fd_dir = root / str(pid) / "fd"
+    fd_dir.mkdir()
+    (fd_dir / "3").symlink_to("/dev/null")
+    (fd_dir / "11").symlink_to(f"socket:[{inode}]")
+
+
+def test_upstream_engine_pids_follows_the_listener_not_the_router(tmp_path: Path):
+    (tmp_path / "net").mkdir()
+    (tmp_path / "net" / "tcp").write_text(
+        TCP_HEADER + tcp_row(8080, "0A", 777) + tcp_row(8080, "01", 778) + tcp_row(8086, "0A", 900)
+    )
+    fake_proc(tmp_path, 1, 0, ["systemd", "--user"])
+    fake_proc(tmp_path, 10, 1, ["python", "-m", "sa_home_bot.llm.strata_switch"])
+    fake_proc(tmp_path, 30, 1, ["python3", "-m", "serve.server"])
+    fake_proc(tmp_path, 31, 30, ["strata", "--serve", "--pack", "x"])
+    fake_proc(tmp_path, 40, 1, ["strata-poly", "--serve"])
+    fake_proc(tmp_path, 41, 40, ["strata-poly", "--serve", "--worker"])
+    for pid in (1, 10, 31, 41):
+        (tmp_path / str(pid) / "fd").mkdir()
+    own_socket(tmp_path, 30, 777)
+    own_socket(tmp_path, 40, 900)
+    assert upstream_engine_pids(8080, tmp_path) == [31]
+    assert upstream_engine_pids(8086, tmp_path) == [41]
+    assert upstream_engine_pids(9000, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("url", "port"),
+    [("http://127.0.0.1:8080", 8080), ("http://host", 80), ("https://host/v1", 443)],
+)
+def test_upstream_port(url: str, port: int):
+    assert upstream_port(url) == port
