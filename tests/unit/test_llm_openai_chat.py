@@ -468,7 +468,8 @@ async def test_chat_posts_openai_body_and_parses_reply(tmp_path):
     assert body["temperature"] == 0
     assert body["max_tokens"] == 512
     assert "num_ctx" not in body
-    assert "response_format" not in body and "format" not in body
+    assert body["response_format"] == {"type": "json_object"}
+    assert "format" not in body
     assert seen["headers"][0]["Authorization"] == "Bearer secret-key-42"
     assert result["message"]["content"] == "Доброго дня"
     assert result["done_reason"] == "stop"
@@ -499,6 +500,7 @@ async def test_generate_sends_single_user_message_and_disables_thinking():
     ]
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert "tools" not in body
+    assert "response_format" not in body
     assert result["response"] == "Доброго дня"
 
 
