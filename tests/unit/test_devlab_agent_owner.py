@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from sa_home_bot.devlab import protocol
@@ -90,22 +92,46 @@ async def test_ask_owner_skips_sibling_calls_in_same_reply(tmp_path):
     assert [m["tool_call_id"] for m in asked.dialog.messages if m["role"] == "tool"] == ["t9"]
 
 
-async def test_step_done_rejected_on_red_and_accepted_on_green(tmp_path):
+RED_ECHO_TEST = (
+    sys.executable,
+    "-c",
+    "import sys; print('ARGS', sys.argv[1:]); sys.exit(1)",
+    "-n",
+    "auto",
+)
+
+
+@pytest.mark.parametrize(
+    ("test_argv", "touched", "accepted"),
+    [
+        (RED_TEST, {}, True),
+        (RED_TEST, {"src/app.py": "x = 2\n"}, True),
+        (RED_ECHO_TEST, {"tests/test_new.py": "", "tests/helper.py": ""}, False),
+        (GREEN_TEST, {"tests/test_new.py": ""}, True),
+    ],
+)
+async def test_step_done_runs_only_changed_test_files(tmp_path, test_argv, touched, accepted):
     steps: list[str] = []
 
     async def on_step(title: str) -> None:
         steps.append(title)
 
-    for test_argv, accepted in ((RED_TEST, False), (GREEN_TEST, True)):
-        steps.clear()
-        spec = AgentSpec(test_argv=test_argv, diff_prefixes=("src/",))
-        model = ScriptedChatModel(STEP, ModelError("конец"))
-        loop, _ = make_loop(tmp_path, model, spec=spec)
-        loop._on_step = on_step
-        await loop.run("s", "t")
-        answer = model.seen[1][-1]["content"]
-        assert (steps == ["заготовка"]) is accepted
-        assert answer.startswith("шаг принят" if accepted else "шаг не принят")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_gone.py").write_text("")
+    spec = AgentSpec(test_argv=test_argv, diff_prefixes=("src/",))
+    model = ScriptedChatModel(STEP, ModelError("конец"))
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    loop._on_step = on_step
+    (tmp_path / "tests" / "test_gone.py").unlink()
+    for name, text in touched.items():
+        (tmp_path / name).write_text(text)
+    await loop.run("s", "t")
+    answer = model.seen[1][-1]["content"]
+    assert (steps == ["заготовка"]) is accepted
+    assert answer.startswith("шаг принят" if accepted else "шаг не принят")
+    if not accepted:
+        assert "изменённые тесты не зелёные" in answer
+        assert "ARGS ['tests/test_new.py']" in answer
 
 
 @pytest.mark.parametrize(
