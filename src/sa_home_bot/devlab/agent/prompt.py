@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 from typing import Any
 
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
@@ -8,9 +9,13 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_EDIT_FILE,
     TOOL_FINISH,
+    TOOL_GREP,
+    TOOL_LIST_FILES,
+    TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
     TOOL_RUN_TESTS,
     TOOL_STEP_DONE,
+    TOOL_WRITE_FILE,
 )
 
 SYSTEM_INTRO = (
@@ -26,26 +31,31 @@ SYSTEM_INTRO = (
 )
 GLM_INTRO = (
     "# Роль\n"
-    "Ты автономный инженер-разработчик. Ты работаешь в песочнице с копией репозитория "
-    "и действуешь только "
-    "через предоставленные инструменты. Задание лежит в первом сообщении пользователя (task.md).\n"
+    "Ты инженер-разработчик. Ты работаешь в песочнице с копией репозитория и действуешь "
+    "через предоставленные инструменты. Задание лежит в первом сообщении пользователя (task.md): "
+    "цель, файлы, шаги и проверки.\n"
     "\n"
     "## Как работать\n"
     "- Иди по шагам задания («Шаги») по порядку.\n"
-    f"- Перед правкой незнакомого кода читай нужный участок через {TOOL_RUN_COMMAND} "
-    "(`sed -n`, `rg`).\n"
-    f"- Правь код через {TOOL_EDIT_FILE}.\n"
-    f"- Проверяй шаг узкими тестами: {TOOL_RUN_TESTS} с paths своих тестов. Полный набор "
-    f"проверит {TOOL_FINISH}.\n"
-    f"- Шаг готов и его проверка зелёная: вызови {TOOL_STEP_DONE} и переходи к следующему.\n"
-    "- Все шаги готовы: прогони финальную проверку задания и `ruff check` по изменённым файлам, "
-    "затем вызови "
-    f"{TOOL_FINISH} с кратким итогом. Он проходит при непустом диффе, зелёных тестах и "
-    "стражах проекта.\n"
+    "- Перед правкой прочитай нужный участок и образец рядом через "
+    f"{TOOL_READ_FILE} и {TOOL_GREP}.\n"
+    f"- Правь код через {TOOL_EDIT_FILE}, новый файл создавай через {TOOL_WRITE_FILE}.\n"
+    f"- Проверяй шаг узкими тестами: {TOOL_RUN_TESTS} с paths своих тестов.\n"
+    "- Шаг готов, когда выполнено его условие «Готово, когда». Условие зелёное: вызови "
+    f"{TOOL_STEP_DONE} и переходи к следующему шагу.\n"
+    f"- {TOOL_STEP_DONE} прогоняет весь набор тестов и стражи и принимает только зелёное. Шаг, "
+    "который по заданию заканчивается красным тестом, закрывай вместе с правкой: убедись узким "
+    "прогоном, что тест красный по нужной причине, сразу делай правку и вызывай "
+    f"{TOOL_STEP_DONE}, когда тесты позеленеют.\n"
+    "- Все шаги готовы: прогони финальную проверку задания («Финальный прогон») и `ruff check` "
+    f"по изменённым файлам, затем вызови {TOOL_FINISH} с кратким итогом на русском. Он проходит "
+    "при непустом диффе, зелёных тестах и стражах проекта.\n"
     f"- Решение может принять только владелец: вызови {TOOL_ASK_OWNER}.\n"
     "\n"
-    "## Формат шага\n"
-    "- **Один инструмент за ход.** Дождись результата, потом решай следующий шаг.\n"
+    "## Формат хода\n"
+    f"- Независимые чтения ({TOOL_READ_FILE}, {TOOL_GREP}, {TOOL_LIST_FILES}) отправляй в одном "
+    "ходе.\n"
+    "- Правку и проверку делай по одной и смотри результат, прежде чем решать дальше.\n"
     "- Каждый ход заканчивается вызовом инструмента: так засчитывается работа.\n"
     "\n"
     "## Процесс анализа\n"
@@ -55,11 +65,28 @@ GLM_INTRO = (
     "3. какой узкий тест это проверит.\n"
     "Рассуждай коротко и по делу, затем действуй."
 )
+GLM_SETTING_TITLE = "## Обстановка"
+GLM_SETTING = (
+    "- Сегодня {today}. Эту дату ставь у новых находок в `docs/`.\n"
+    f"- {TOOL_RUN_COMMAND} запускает команду без оболочки, разрешены команды, которые начинаются "
+    "так: {commands}. Песочница уже настроена: команда пишется как есть, без `cd`, пайпов и "
+    "переменных окружения вроде `PYTHONPATH`.\n"
+    f"- Ты не коммитишь, не деплоишь и не вызываешь скилы: {TOOL_STEP_DONE} и {TOOL_FINISH} сами "
+    "сохраняют работу. Правила проекта ниже написаны и для людей; тебя касаются правила про код, "
+    "тесты и документацию."
+)
 FLOW_REMINDER = (
     "[Reminder] Follow the task's steps («Шаги») in order. When a step's check is green, call "
     f"{TOOL_STEP_DONE} for it and move on to the next step, including the docs step. When all "
     "steps are done, run the task's final check («Финальный прогон») and ruff check on the changed "
     f"files, then call {TOOL_FINISH} in the same reply as soon as they are green."
+)
+GLM_FLOW_REMINDER = (
+    "[Напоминание] Иди по шагам задания («Шаги») по порядку. Проверка шага зелёная: вызови "
+    f"{TOOL_STEP_DONE} и переходи к следующему, включая шаг документации. Шаг, который по заданию "
+    f"заканчивается красным тестом, закрой {TOOL_STEP_DONE} вместе с правкой. Все шаги готовы: "
+    "финальный прогон задания и `ruff check` по изменённым файлам, и как только они зелёные, "
+    f"вызови {TOOL_FINISH}."
 )
 RULES_TITLE = "Правила проекта (обязательны):"
 CONTINUATION_TITLE = (
@@ -71,12 +98,32 @@ REMARKS_TITLE = "Замечания владельца к этой работе:
 CONTINUATION_LIMIT = 100
 
 
+def _is_glm(model: str) -> bool:
+    return "glm" in model.lower()
+
+
 def intro_for(model: str) -> str:
-    return GLM_INTRO if "glm" in model.lower() else SYSTEM_INTRO
+    return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
-def build_system(rules: Sequence[tuple[str, str]], model: str = "") -> str:
+def reminder_for(model: str) -> str:
+    return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
+
+
+def glm_setting(commands: Sequence[str], today: date) -> str:
+    listed = ", ".join(f"`{command}`" for command in commands) or "нет"
+    return f"{GLM_SETTING_TITLE}\n{GLM_SETTING.format(today=today.isoformat(), commands=listed)}"
+
+
+def build_system(
+    rules: Sequence[tuple[str, str]],
+    model: str = "",
+    commands: Sequence[str] = (),
+    today: date | None = None,
+) -> str:
     parts = [intro_for(model)]
+    if _is_glm(model):
+        parts.append(glm_setting(commands, today or date.today()))
     if rules:
         parts.append(RULES_TITLE)
         parts.extend(f"=== {name} ===\n{text.strip()}" for name, text in rules)
@@ -109,9 +156,11 @@ def _closes_step(messages: Sequence[dict[str, Any]], index: int) -> bool:
     return index == len(messages) - 1 or messages[index + 1].get("role") == "assistant"
 
 
-def with_flow_reminder(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def with_flow_reminder(
+    messages: Sequence[dict[str, Any]], reminder: str = FLOW_REMINDER
+) -> list[dict[str, Any]]:
     return [
-        {**message, "content": f"{message['content']}\n\n{FLOW_REMINDER}"}
+        {**message, "content": f"{message['content']}\n\n{reminder}"}
         if _closes_step(messages, index)
         else message
         for index, message in enumerate(messages)

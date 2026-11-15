@@ -10,7 +10,7 @@ import aiohttp
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELD
-from sa_home_bot.devlab.agent.prompt import with_flow_reminder
+from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
 from sa_home_bot.devlab.usage import usage_cost
 
 MODEL_TIMEOUT_S = 1800.0
@@ -99,7 +99,7 @@ class GatewayChat:
     ) -> ModelReply:
         body = {
             "model": self._model,
-            "messages": with_flow_reminder(messages),
+            "messages": with_flow_reminder(messages, reminder_for(self._model)),
             "tools": tools,
             "temperature": self._temperature,
             "user": f"devlab {self._job_id}",
