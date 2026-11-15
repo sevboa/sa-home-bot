@@ -122,6 +122,10 @@ def to_openai_messages(messages: list[dict[str, Any]], system: str) -> list[dict
     return out
 
 
+JSON_FORMAT = "json"
+JSON_OBJECT_FORMAT = {"type": "json_object"}
+
+
 def think_fields(think: bool | str | None) -> dict[str, Any]:
     if think is None:
         return {}
@@ -403,6 +407,8 @@ async def chat(
     }
     if tools:
         payload["tools"] = tools
+    if response_format == JSON_FORMAT:
+        payload["response_format"] = JSON_OBJECT_FORMAT
     url = f"{cfg.openai_base_url}{CHAT_COMPLETIONS_PATH}"
     loop = asyncio.get_running_loop()
     started = loop.time()

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -32,8 +33,12 @@ def _append_error_body(exc: urllib.error.HTTPError) -> None:
         exc.msg = f"{exc.msg}: {detail}"
 
 
+_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n(.*?)\n?\s*```\s*$", re.DOTALL | re.IGNORECASE)
+
+
 def parse_json_object(content: str) -> dict[str, Any]:
-    data = json.loads(content)
+    fenced = _JSON_FENCE_RE.match(content)
+    data = json.loads(fenced.group(1) if fenced else content)
     if not isinstance(data, dict):
         raise ValueError("ответ не объект")
     return data

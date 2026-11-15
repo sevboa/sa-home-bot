@@ -468,3 +468,22 @@ async def test_wsl_keepalive_spawn_failure_leaves_it_not_alive(monkeypatch):
 
 async def _noop(cfg):
     pass
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"a": 1}',
+        '```json\n{"a": 1}\n```',
+        '  ```JSON\n{"a": 1}```  ',
+        '```\n{"a": 1}\n```\n',
+    ],
+)
+def test_parse_json_object_accepts_plain_and_fenced(content):
+    assert ollama.parse_json_object(content) == {"a": 1}
+
+
+@pytest.mark.parametrize("content", ["[1, 2]", "```json\n[1]\n```", "текст", ""])
+def test_parse_json_object_rejects_non_objects(content):
+    with pytest.raises(ValueError):
+        ollama.parse_json_object(content)
