@@ -435,4 +435,5 @@ async def chat_stream(
 
 
 async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
-    return await chat(cfg, [{"role": "user", "content": prompt}], system, think=False)
+    result = await chat(cfg, [{"role": "user", "content": prompt}], system, think=False)
+    return {**result, "response": result["message"].get("content") or ""}
