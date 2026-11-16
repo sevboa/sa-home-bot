@@ -78,7 +78,7 @@ DISMISS_TEXTS = {
     ai_tools.DISMISS_OFF: "<i>Альфред откланивается; свет гаснет, машина выключается</i>",
 }
 DISMISS_NODE_ACTIONS = {
-    ai_tools.DISMISS_SLEEP: "suspend",
+    ai_tools.DISMISS_SLEEP: "poweroff",
     ai_tools.DISMISS_OFF: "poweroff",
 }
 LLM_SLEEP_ACTION = "sleep"
@@ -196,13 +196,19 @@ async def perform_dismissal(
     action = DISMISS_NODE_ACTIONS.get(mode)
     if action is not None:
         try:
-            await node_link.command(
-                action, {}, dst=node_address(LLM_NODE), timeout=DISMISS_TIMEOUT_S
+            response = await node_link.command(
+                action,
+                {"if_idle": True},
+                dst=node_address(LLM_NODE),
+                timeout=DISMISS_TIMEOUT_S,
             )
         except UNREACHABLE_ERRORS as exc:
             log.warning("ai_flow: роспуск — %s не удался: %s", action, exc)
             await message.answer(DISMISS_FAILED_TEXT)
             await notify_admins(book, notifier, f"⚠️ роспуск Альфреда: {action} — {exc}")
+            return
+        if isinstance(response, dict) and response.get("done") is False:
+            await message.answer(DISMISS_TEXTS[ai_tools.DISMISS_MODEL])
             return
 
     await message.answer(DISMISS_TEXTS[mode])

@@ -143,6 +143,46 @@ async def test_power_actions_declared_and_scheduled(monkeypatch):
     assert ran == [["systemctl", "poweroff"]]
 
 
+async def test_poweroff_if_idle_blocked_by_blockers(monkeypatch):
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def blocked():
+        return ["службы: devlab"]
+
+    svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
+    monkeypatch.setattr(svc, "power_blockers", blocked)
+    result = await svc.run_command("poweroff", {"if_idle": True})
+    assert result == {"done": False, "blockers": ["службы: devlab"]}
+    assert ran == []
+
+
+async def test_poweroff_if_idle_powers_off_without_blockers(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.node import service as service_module
+
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def no_blockers():
+        return []
+
+    svc = NodeService(sup, power_runner=fake_runner, node_kind="workstation")
+    monkeypatch.setattr(svc, "power_blockers", no_blockers)
+    result = await svc.run_command("poweroff", {"if_idle": True})
+    assert result == {"done": True, "blockers": []}
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "poweroff"]]
+
+
 @pytest.mark.parametrize("kind", ["server", "vps"])
 async def test_power_actions_not_declared_for_always_on_kinds(kind):
     sup, _ = _fake_supervisor()
