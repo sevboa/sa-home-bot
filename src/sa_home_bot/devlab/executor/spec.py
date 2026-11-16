@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -77,3 +78,11 @@ def read_external_rule(specs_dir: Path, name: str) -> bytes | None:
     except ValueError:
         return None
     return path.read_bytes() if path.is_file() else None
+
+
+async def load_project_spec(
+    specs_dir: Path | None, project: str, read_repo: Callable[[], Awaitable[bytes | None]]
+) -> tuple[ProjectSpec, Path | None]:
+    external = external_spec(specs_dir, project)
+    data = external.read_bytes() if external is not None else await read_repo()
+    return parse_spec(data), external

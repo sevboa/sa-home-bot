@@ -39,8 +39,7 @@ from sa_home_bot.devlab.executor.routing import Catalog, CatalogEntry
 from sa_home_bot.devlab.executor.spec import (
     SPEC_FILE,
     ProjectSpec,
-    external_spec,
-    parse_spec,
+    load_project_spec,
     read_external_rule,
 )
 from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
@@ -455,11 +454,9 @@ class AgentWorker(WorkerLoops):
         repo = self._make_repo(run)
         run.repo = repo
         await repo.open()
-        external = external_spec(self._settings.specs_dir, job.project)
-        if external is not None:
-            project = parse_spec(external.read_bytes())
-        else:
-            project = parse_spec(await run.mirror.read_file(repo.base, SPEC_FILE))
+        project, external = await load_project_spec(
+            self._settings.specs_dir, job.project, lambda: run.mirror.read_file(repo.base, SPEC_FILE)
+        )
         spec = AgentSpec.from_project(project)
         await self._check_model(job, project)
         baseline = await self._baseline(run, repo.base)
