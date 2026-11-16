@@ -96,3 +96,38 @@ async def test_chat_stream_forwards_tools_and_think(journal):
         think=False,
     )
     assert journal[0]["kwargs"] == {"tools": [], "think": False}
+
+
+@pytest.mark.parametrize(("flag", "expected"), [(True, 1), (False, 0)])
+async def test_stop_releases_companion_only_with_flag(flag, expected, monkeypatch):
+    released: list[LlmConfig] = []
+
+    async def fake(cfg):
+        released.append(cfg)
+
+    monkeypatch.setattr(openai_chat, "release_companion", fake)
+    config = cfg_for("openai")
+    config.companion_release = flag
+    await backend.stop(config)
+    assert len(released) == expected
+
+
+async def test_release_companion_swallows_network_errors(monkeypatch):
+    calls: list[tuple[str, dict, dict, float]] = []
+
+    def boom(url, payload, headers, timeout):
+        calls.append((url, payload, headers, timeout))
+        raise OSError("сеть лежит")
+
+    monkeypatch.setattr(openai_chat, "_post_json_sync", boom)
+    config = cfg_for("openai")
+    config.companion_release = True
+    await openai_chat.release_companion(config)
+    assert calls == [
+        (
+            f"{config.openai_base_url}{openai_chat.COMPANION_RELEASE_PATH}",
+            {},
+            {},
+            60.0,
+        )
+    ]

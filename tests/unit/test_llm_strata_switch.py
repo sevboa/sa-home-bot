@@ -21,6 +21,7 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_POLL_S,
     DEFAULT_PRIORITY_GRACE_S,
     MODELS_PATH,
+    RELEASE_PATH,
     STATUS_PATH,
     UPSTREAM_CONNECT_S,
     UPSTREAM_TIMEOUT,
@@ -1929,3 +1930,83 @@ def test_upstream_engine_pids_follows_the_listener_not_the_router(tmp_path: Path
 )
 def test_upstream_port(url: str, port: int):
     assert upstream_port(url) == port
+
+
+async def test_release_stops_companion_before_idle_expires():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    idle_companion = replace(COMPANION, main_reserve_idle_mib=512)
+    switch, _ = companion_switch(run, StepClock(), companion=idle_companion)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        companion.begin_request(AUTH)
+        await companion.ensure_running()
+        companion.end_request()
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
+        assert companion.running is True
+        assert await companion.release() == "stopped"
+        assert journal == [ACTIVE_RESERVE, LAUNCH, STOP, "vram:512"]
+        assert companion.running is False
+    finally:
+        await close(main_server)
+
+
+@pytest.mark.parametrize(
+    ("launch", "expected", "journal_tail"),
+    [(False, "not_running", []), (True, "busy", [ACTIVE_RESERVE, LAUNCH])],
+)
+async def test_release_refuses_to_stop_companion(launch, expected, journal_tail):
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock())
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        if launch:
+            companion.begin_request(AUTH)
+            await companion.ensure_running()
+        assert await companion.release() == expected
+        assert journal == journal_tail
+        assert companion.running is launch
+    finally:
+        await close(main_server)
+
+
+async def test_release_route_stops_running_companion():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    main = VramUpstream(journal)
+    partner = Upstream()
+    app, router, servers, _ = await companion_router(
+        main, partner, run, companion_options={"main_reserve_idle_mib": 512}
+    )
+    companion = app[COMPANION_KEY]
+    try:
+        companion.begin_request({})
+        await companion.ensure_running()
+        companion.end_request()
+        resp = await router.post(RELEASE_PATH, headers=AUTH)
+        body = await resp.json()
+        assert resp.status == 200
+        assert body == {"result": "stopped"}
+        assert companion.headers == AUTH
+        assert journal == [ACTIVE_RESERVE, LAUNCH, STOP, "vram:512"]
+        assert companion.running is False
+    finally:
+        await close(router, *servers)
+
+
+async def test_release_route_without_companion_answers_404():
+    switch = StrataSwitch(settings(), FakeRun())
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(RELEASE_PATH)
+        body = await resp.json()
+    finally:
+        await close(router, upstream_server)
+    assert resp.status == 404
+    assert "компаньон" in body["error"]
