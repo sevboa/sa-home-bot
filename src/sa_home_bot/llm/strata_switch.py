@@ -218,6 +218,7 @@ class Companion:
         self.active = 0
         self.serving: list[str] = []
         self.last_request: float | None = None
+        self.requested_at: float | None = None
         self.headers: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._idle_task: asyncio.Task | None = None
@@ -226,6 +227,7 @@ class Companion:
         self.active += 1
         self.serving.append(client)
         self.last_request = self.clock()
+        self.requested_at = self.clock()
         if headers:
             self.headers = dict(headers)
 
@@ -343,10 +345,12 @@ class StrataSwitch:
         self.launch_started: float | None = None
         self.waiting: list[Waiter] = []
         self.serving: list[str] = []
+        self.requested: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     async def acquire(self, model: str, immediate: bool = False, client: str = "") -> None:
         model = resolve(self.settings, model)
+        self.requested[model] = self.clock()
         launcher = self.settings.launchers[model]
         if model == self.current and self.launching is None:
             self.active += 1
@@ -828,6 +832,7 @@ def switch_status(
             "serving": list(companion.serving),
             "idle_for_s": elapsed_since(companion.last_request, now),
             "idle_stop_s": companion.settings.idle_stop_s,
+            "requested_ago_s": elapsed_since(companion.requested_at, now),
         }
     return {
         "current": switch.current,
@@ -836,6 +841,10 @@ def switch_status(
         "serving": list(switch.serving),
         "idle_for_s": elapsed_since(switch.last_request_end, now),
         "idle_s": switch.settings.idle_s,
+        "requested_ago_s": {
+            model: elapsed_since(start, now)
+            for model, start in sorted(switch.requested.items())
+        },
         "waiting": [
             {
                 "model": waiter.model,
