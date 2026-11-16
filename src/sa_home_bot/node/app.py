@@ -387,6 +387,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         down_after_s=settings.swarm.node_down_alert_after_s,
     )
     await watcher.start()
+    node_service.start_drain_watch()
 
     discovery = SwarmDiscovery(
         node_id,
@@ -431,6 +432,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         arm_hard_exit(budget.total_s + HARD_EXIT_MARGIN_S)
         farewell = emit(EVENT_NODE_LEAVING, {"node": node_id, "kind": settings.node.kind})
         await budget.step("прощание с роем", farewell)
+        await budget.step("слежение за очередью devlab", node_service.stop_drain_watch())
         await budget.step("присутствие соседей", watcher.stop())
         await budget.step("маячок discovery", discovery.stop())
         await budget.step("аренда лидерства", lease.stop())

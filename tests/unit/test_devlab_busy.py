@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from sa_home_bot.config import PowerRuleConfig
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.service import ExecutorService
@@ -297,6 +298,98 @@ async def test_restart_wait_error_forces_restart(monkeypatch):
     monkeypatch.setattr(svc, "_busy_services", boom)
     await asyncio.sleep(0.05)
     assert calls == ["restart"]
+
+
+def _drain_service(monkeypatch, link, powered):
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+    monkeypatch.setattr(service_module, "DRAIN_POLL_S", 0.01)
+    monkeypatch.setattr(service_module, "DRAIN_GRACE_S", 0.2)
+
+    async def no_sessions():
+        return []
+
+    async def power_runner(argv):
+        pass
+
+    monkeypatch.setattr(service_module.ssh_sessions, "list_ssh_sessions", no_sessions)
+    monkeypatch.setattr(service_module.ssh_sessions, "list_tmux_sessions", no_sessions)
+    sup, _ = _fake_supervisor()
+    router = NodeRouter("n", local_services={"devlab": link})
+    svc = NodeService(
+        sup,
+        router,
+        power_runner=power_runner,
+        node_kind="workstation",
+        idle_poweroff=powered,
+        power_rule=PowerRuleConfig(alfred_service="alfred"),
+    )
+    offs: list[int] = []
+
+    async def counted():
+        offs.append(1)
+
+    monkeypatch.setattr(svc, "maybe_auto_poweroff_idle", counted)
+    return svc, offs
+
+
+async def test_drain_watch_powers_off_once_when_service_freed(monkeypatch):
+    link = StubLink(True, True)
+    svc, offs = _drain_service(monkeypatch, link, True)
+    svc.start_drain_watch()
+    await asyncio.sleep(0.05)
+    link.busy = False
+    await asyncio.sleep(0.5)
+    assert offs == [1]
+    await asyncio.sleep(0.3)
+    assert offs == [1]
+    await svc.stop_drain_watch()
+
+
+async def test_drain_watch_skips_when_service_rebusy_during_grace(monkeypatch):
+    link = StubLink(True, True)
+    svc, offs = _drain_service(monkeypatch, link, True)
+    svc.start_drain_watch()
+    link.busy = False
+    await asyncio.sleep(0.05)
+    link.busy = True
+    await asyncio.sleep(0.4)
+    assert offs == []
+    await svc.stop_drain_watch()
+
+
+async def test_drain_watch_ignores_never_busy_service(monkeypatch):
+    svc, offs = _drain_service(monkeypatch, StubLink(True, False), True)
+    svc.start_drain_watch()
+    await asyncio.sleep(0.3)
+    assert offs == []
+    await svc.stop_drain_watch()
+
+
+@pytest.mark.parametrize(
+    ("powered", "alfred_service"),
+    [(False, "alfred"), (True, "")],
+)
+async def test_drain_watch_skips_when_disabled(powered, alfred_service):
+    sup, _ = _fake_supervisor()
+    svc = NodeService(
+        sup,
+        NodeRouter("n", local_services={"devlab": StubLink(True, False)}),
+        node_kind="workstation",
+        idle_poweroff=powered,
+        power_rule=PowerRuleConfig(alfred_service=alfred_service),
+    )
+    svc.start_drain_watch()
+    assert svc._drain_task is None
+
+
+async def test_drain_watch_stops_task(monkeypatch):
+    link = StubLink(True, True)
+    svc, offs = _drain_service(monkeypatch, link, True)
+    svc.start_drain_watch()
+    task = svc._drain_task
+    await svc.stop_drain_watch()
+    assert task.done()
+    assert task.cancelled()
 
 
 def test_router_working_services_ignores_parked_and_falls_back_to_busy():
