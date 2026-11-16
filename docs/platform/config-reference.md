@@ -1016,6 +1016,23 @@ alfred: kind=server, но он дома, не в облаке).
   Пока локальная служба отдаёт `busy` в hello (исполнитель devlab, 2026-11-01), нода не
   выключается и `idle_power_blocked` не шлёт.
 
+- `power_rule: PowerRuleConfig = Field(default_factory=PowerRuleConfig)`
+  Дополнительные проверки перед гашением простаивающей машины
+  (`node/power_rule.py`, 2026-11-16); каждая включается только непустой настройкой,
+  без них поведение прежнее:
+  - `switch_status_url: str = ""` — пусто: strata-switch не проверяется. Иначе
+    `GET <url>` (тайм-аут 5 с, node/power_rule.py::fetch_switch_status): активные модели
+    (`active`/`serving`), очередь запуска (`waiting`), companion-Альфред (`companion.active`)
+    и свежие запросы WebUI — блокеры; недоступный или несловарный ответ — блокер
+    «strata-switch недоступен».
+  - `webui_model: str = ""` — пусто: WebUI не проверяется; имя модели для
+    `requested_ago_s` статуса switch.
+  - `webui_quiet_s: float = Field(default=1800.0, gt=0)` — «писали меньше … назад»:
+    запрос к модели моложе порога — блокер.
+  - `alfred_service: str = ""` — пусто: Альфред не проверяется. Иначе запрос
+    `get_state` к службе (тайм-аут 5 с): `asleep` не true — блокер «Альфред не спит»,
+    недоступная служба — блокер «<служба> недоступна».
+
 - `stop_timeout_s: float = Field(default=90.0, gt=0)`
   SIGTERM → SIGKILL
 

@@ -8,8 +8,10 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from sa_home_bot import __version__, wol
+from sa_home_bot.config import PowerRuleConfig
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import kind as node_kinds
+from sa_home_bot.node import power_rule as power_rules
 from sa_home_bot.node import update as node_update
 from sa_home_bot.node.events import (
     ACTION_CLOSE_SSH_SESSIONS,
@@ -35,6 +37,7 @@ from sa_home_bot.proto.messages import (
     ERR_UNAVAILABLE,
     ERR_UNKNOWN_DST,
     MSG_COMMAND,
+    MSG_GET_STATE,
     ActionParam,
     ActionSpec,
     Address,
@@ -149,6 +152,7 @@ class NodeService:
         node_kind: str = node_kinds.KIND_SERVER,
         power_controllable: bool | None = None,
         idle_poweroff: bool = False,
+        power_rule: PowerRuleConfig | None = None,
         replicator: ConfigReplicator | None = None,
         lease: LeaseManager | None = None,
         make_peer_link: Callable[[str, str | Sequence[str]], PeerLink] | None = None,
@@ -168,6 +172,7 @@ class NodeService:
         self._power = power_commands() if controllable else {}
         self._power_runner = power_runner or _default_power_runner
         self._idle_poweroff = idle_poweroff and controllable
+        self._power_rule = power_rule or PowerRuleConfig()
         self._idle_blocked_by: list[str] = []
         self._restart_node = restart_node
         self._restart_wait_task: asyncio.Task[None] | None = None
@@ -791,33 +796,70 @@ class NodeService:
             result.update(self._schedule_power(ACTION_POWEROFF))
         return result
 
+    async def _service_state(self, name: str) -> dict[str, Any] | None:
+        if self._router is None:
+            return None
+        env = make_request(
+            MSG_GET_STATE,
+            dst=Address(node=self._node, service=name),
+            timeout_s=5.0,
+        )
+        try:
+            response = await self._router.route(env)
+        except ProtoError:
+            return None
+        if response is None or response.ok is not True:
+            return None
+        payload = response.payload
+        return payload if isinstance(payload, dict) else None
+
+    async def _collect_blockers(self) -> tuple[list[str], list[str]]:
+        blockers: list[str] = []
+        busy = self._router.busy_services() if self._router is not None else []
+        if busy:
+            blockers.append("службы: " + ", ".join(busy))
+        ssh, tmux = await self._blocking_sessions()
+        session_descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
+        blockers.extend(session_descriptions)
+        rule = self._power_rule
+        if rule.switch_status_url:
+            status = await power_rules.fetch_switch_status(rule.switch_status_url)
+            if status is None:
+                blockers.append("strata-switch недоступен")
+            else:
+                blockers.extend(
+                    power_rules.switch_blockers(status, rule.webui_model, rule.webui_quiet_s)
+                )
+        if rule.alfred_service and self._router is not None:
+            state = await self._service_state(rule.alfred_service)
+            if state is None:
+                blockers.append(f"{rule.alfred_service} недоступна")
+            elif state.get("asleep") is not True:
+                blockers.append("Альфред не спит")
+        return blockers, session_descriptions
+
+    async def power_blockers(self) -> list[str]:
+        blockers, _ = await self._collect_blockers()
+        return blockers
+
     async def maybe_auto_poweroff_idle(self) -> None:
         if not self._idle_poweroff:
             return
-        busy = self._router.busy_services() if self._router is not None else []
-        if busy:
-            log.info(
-                "%s: простой Alfred, но службы заняты (%s) — выключение отложено",
-                self._node,
-                ", ".join(busy),
-            )
-            return
-        ssh, tmux = await self._blocking_sessions()
-        if not ssh and not tmux:
+        blockers, session_descriptions = await self._collect_blockers()
+        if not blockers:
             self._idle_blocked_by = []
             self._schedule_power(ACTION_POWEROFF)
             return
-        descriptions = [s.describe() for s in ssh] + [f"tmux: {name}" for name in tmux]
-        log.warning(
+        log.info(
             "%s: простой Alfred, но выключение отложено — %s",
             self._node,
-            ", ".join(descriptions),
+            ", ".join(blockers),
         )
-        if descriptions == self._idle_blocked_by:
+        if session_descriptions == self._idle_blocked_by:
             return
-        self._idle_blocked_by = descriptions
-        if self._emit is not None:
+        self._idle_blocked_by = session_descriptions
+        if self._emit is not None and session_descriptions:
             await self._emit(
                 EVENT_IDLE_POWER_BLOCKED,
-                {"node": self._node, "sessions": descriptions},
+                {"node": self._node, "sessions": session_descriptions},
             )

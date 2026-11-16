@@ -344,6 +344,7 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         node_kind=settings.node.kind,
         power_controllable=settings.node.power_controllable,
         idle_poweroff=settings.node.idle_poweroff,
+        power_rule=settings.node.power_rule,
         replicator=replicator,
         lease=lease,
         make_peer_link=make_peer_link,

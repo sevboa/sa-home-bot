@@ -694,11 +694,19 @@ class WeatherConfig(BaseModel):
     city: str = ""
 
 
+class PowerRuleConfig(BaseModel):
+    switch_status_url: str = ""
+    webui_model: str = ""
+    webui_quiet_s: float = Field(default=1800.0, gt=0)
+    alfred_service: str = ""
+
+
 class NodeConfig(BaseModel):
     id: str = ""
     kind: NodeKind = "workstation"
     power_controllable: bool | None = None
     idle_poweroff: bool = False
+    power_rule: PowerRuleConfig = Field(default_factory=PowerRuleConfig)
     socket: str = "./data/node.sock"
     listen: list[str] = Field(default_factory=list)
     assignments: list[str] = Field(default_factory=list)

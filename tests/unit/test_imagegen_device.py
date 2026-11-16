@@ -10,6 +10,13 @@ from sa_home_bot.llm import imagegen
 from sa_home_bot.llm.imagegen import MODELS, pipeline_device
 
 
+@pytest.fixture(autouse=True)
+def _clean_pipelines():
+    imagegen._pipelines.clear()
+    yield
+    imagegen._pipelines.clear()
+
+
 def test_device_cpu_by_default_for_sd15():
     assert pipeline_device(MODELS["dream"], LlmConfig()) == "cpu"
 
