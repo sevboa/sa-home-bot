@@ -92,6 +92,8 @@ SEND_WOL_TITLE = "📡 Отправить Wake-on-LAN"
 POWER_DELAY_S = 1.0
 RESTART_DEFER_POLL_S = 30.0
 RESTART_DEFER_MAX_S = 1800.0
+DRAIN_POLL_S = 10.0
+DRAIN_GRACE_S = 30.0
 ARG_FORCE = "force"
 
 
@@ -176,6 +178,7 @@ class NodeService:
         self._idle_blocked_by: list[str] = []
         self._restart_node = restart_node
         self._restart_wait_task: asyncio.Task[None] | None = None
+        self._drain_task: asyncio.Task[None] | None = None
         self._state = state if state is not None else NodeState()
         self._state_path = state_path
         self._local_service_endpoints = local_service_endpoints or {}
@@ -863,3 +866,42 @@ class NodeService:
                 EVENT_IDLE_POWER_BLOCKED,
                 {"node": self._node, "sessions": session_descriptions},
             )
+
+    def start_drain_watch(self) -> None:
+        running = self._drain_task is not None and not self._drain_task.done()
+        if (
+            not self._idle_poweroff
+            or not self._power_rule.alfred_service
+            or self._router is None
+            or running
+        ):
+            return
+        self._drain_task = asyncio.create_task(self._watch_drain(), name="drain-watch")
+
+    async def stop_drain_watch(self) -> None:
+        task = self._drain_task
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _watch_drain(self) -> None:
+        was_busy = False
+        while True:
+            try:
+                await asyncio.sleep(DRAIN_POLL_S)
+                busy = bool(self._router.busy_services()) if self._router is not None else False
+                if was_busy and not busy:
+                    await asyncio.sleep(DRAIN_GRACE_S)
+                    busy = bool(self._router.busy_services()) if self._router is not None else False
+                    if not busy:
+                        log.info("%s: службы освободились — проверяю выключение", self._node)
+                        await self.maybe_auto_poweroff_idle()
+                was_busy = busy
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Слежение за освобождением служб сорвалось")
