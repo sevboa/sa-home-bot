@@ -95,6 +95,7 @@ RESTART_DEFER_MAX_S = 1800.0
 DRAIN_POLL_S = 10.0
 DRAIN_GRACE_S = 30.0
 ARG_FORCE = "force"
+ARG_IF_IDLE = "if_idle"
 
 
 def power_commands() -> dict[str, list[str]]:
@@ -380,6 +381,12 @@ class NodeService:
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == ACTION_RESTART_NODE:
             return self._schedule_restart_node(bool(args.get(ARG_FORCE)))
+        if (
+            action == ACTION_POWEROFF
+            and ACTION_POWEROFF in self._power
+            and args.get(ARG_IF_IDLE) is True
+        ):
+            return await self._poweroff_if_idle()
         if action in self._power:
             return self._schedule_power(action)
         if action == ACTION_CLOSE_SSH_SESSIONS:
@@ -700,6 +707,18 @@ class NodeService:
 
         task = asyncio.create_task(run(), name="node-update")
         self._update_task = task
+
+    async def _poweroff_if_idle(self) -> dict[str, Any]:
+        blockers = await self.power_blockers()
+        if blockers:
+            log.info(
+                "%s: выключение по просьбе отложено — %s",
+                self._node,
+                ", ".join(blockers),
+            )
+            return {"done": False, "blockers": blockers}
+        self._schedule_power(ACTION_POWEROFF)
+        return {"done": True, "blockers": []}
 
     def _schedule_power(self, action: str) -> dict[str, Any]:
         argv = self._power[action]

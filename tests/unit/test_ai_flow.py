@@ -708,16 +708,17 @@ def _note_msg(messages) -> str:
 class FakeDismissLink:
     display_name = "нода"
 
-    def __init__(self, fail_on=None, exc=None):
+    def __init__(self, fail_on=None, exc=None, node_response=None):
         self.calls: list[tuple[str, dict, str, str]] = []
         self._fail_on = fail_on
         self._exc = exc or ServiceUnavailableError("нет связи")
+        self._node_response = node_response or {"ok": True}
 
     async def command(self, action, args=None, dst=None, timeout=None):
         self.calls.append((action, args or {}, dst.node, dst.service))
         if action == self._fail_on:
             raise self._exc
-        return {"ok": True}
+        return self._node_response
 
 
 async def test_dismiss_tool_powers_nothing_off_during_the_request(store):
@@ -1220,7 +1221,7 @@ async def test_model_is_told_not_to_invent_only_without_search(store, book, warn
     ("mode", "expected_calls"),
     [
         (ai_tools.DISMISS_OFF, ["sleep", "poweroff"]),
-        (ai_tools.DISMISS_SLEEP, ["sleep", "suspend"]),
+        (ai_tools.DISMISS_SLEEP, ["sleep", "poweroff"]),
         (ai_tools.DISMISS_MODEL, ["sleep"]),
     ],
 )
@@ -1231,4 +1232,27 @@ async def test_perform_dismissal_unloads_model_then_acts_on_machine(store, mode,
 
     assert [c[0] for c in link.calls] == expected_calls
     assert link.calls[0] == ("sleep", {"quiet": True}, "mycraft", "llm")
+    if mode != ai_tools.DISMISS_MODEL:
+        assert link.calls[1] == ("poweroff", {"if_idle": True}, "mycraft", "node")
     assert message.answers == [ai_flow.DISMISS_TEXTS[mode]]
+
+
+@pytest.mark.parametrize(
+    ("node_response", "expected_text"),
+    [
+        (
+            {"done": False, "blockers": ["службы: devlab"]},
+            ai_flow.DISMISS_TEXTS[ai_tools.DISMISS_MODEL],
+        ),
+        ({"done": True}, ai_flow.DISMISS_TEXTS[ai_tools.DISMISS_OFF]),
+    ],
+    ids=["blocked", "done"],
+)
+async def test_perform_dismissal_blocked_machine_keeps_remark(store, node_response, expected_text):
+    message, notifier = FakeMessage(), _notifier()
+    link = FakeDismissLink(node_response=node_response)
+
+    await ai_flow.perform_dismissal(message, link, ai_tools.DISMISS_OFF, _admin_book(), notifier)
+
+    assert message.answers == [expected_text]
+    assert notifier.sent == []
