@@ -96,6 +96,7 @@ async def run_executor(
         work_dir=work_dir,
         poll_interval_s=cfg.poll_interval_s,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
+        specs_dir=Path(cfg.specs_dir).expanduser() if cfg.specs_dir else None,
     )
     tester = TestWorker(hub, runner, worker_settings, busy)
     slots = SlotRegistry()

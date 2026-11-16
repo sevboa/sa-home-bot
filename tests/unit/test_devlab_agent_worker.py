@@ -44,6 +44,9 @@ BASE_FILES = {
     "test.sh": b"grep -q done out.txt\n",
     "out.txt": b"todo\n",
 }
+EXTERNAL_AGENT_SPEC = (
+    b'[agent]\nrules = ["EXT.md"]\nforbidden_paths = ["test.sh"]\n'
+)
 WRITE_DONE = tool_reply("write_file", "w1", path="out.txt", content="done\n")
 FINISH = tool_reply("finish", "f1", summary="сделано")
 STARTED_DONE = [protocol.MSG_STARTED, protocol.MSG_DONE]
@@ -81,6 +84,7 @@ def make_worker(
     busy=None,
     work_dir="exec",
     slots=None,
+    specs_dir=None,
 ) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
@@ -98,6 +102,7 @@ def make_worker(
             push_interval_s=0.0,
             retry_interval_s=0.01,
             **({"slots": slots} if slots else {}),
+            specs_dir=specs_dir,
         ),
         catalog or StaticCatalog(*(local_entry(name) for name in models)),
         busy,
@@ -153,6 +158,39 @@ async def test_full_path_to_agent_branch(env):
     assert not (env.tmp_path / "exec" / AGENT_DIR / job_id).exists()
     assert load_model(AgentState, env.tmp_path / "exec" / AGENT_STATE_FILE).job is None
     assert not worker.pending_messages
+
+
+async def test_external_spec_and_rules_win_over_repo(env):
+    specs = env.tmp_path / "specs"
+    specs.mkdir()
+    (specs / f"{PROJECT}.toml").write_bytes(EXTERNAL_AGENT_SPEC)
+    (specs / "EXT.md").write_bytes("правило-внешнее\n".encode())
+    await env.push(BASE, BASE_FILES)
+    job_id = await submit(env, push=False)
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(env, model, specs_dir=specs)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert "правило-внешнее" in model.seen[0][0]["content"]
+    assert "правило-один" not in model.seen[0][0]["content"]
+
+
+async def test_external_rule_outside_specs_dir_is_skipped(env):
+    specs = env.tmp_path / "specs-escape"
+    specs.mkdir()
+    (specs / f"{PROJECT}.toml").write_bytes(b'[agent]\nrules = ["../secret.md"]\n')
+    (env.tmp_path / "secret.md").write_bytes("секрет\n".encode())
+    await env.push(BASE, BASE_FILES)
+    job_id = await submit(env, push=False)
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(env, model, specs_dir=specs)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert "секрет" not in model.seen[0][0]["content"]
 
 
 async def test_claim_returns_false_without_jobs(env):

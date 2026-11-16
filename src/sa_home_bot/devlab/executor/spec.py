@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -59,3 +60,20 @@ def parse_spec(data: bytes | None) -> ProjectSpec:
         return ProjectSpec.model_validate(tomllib.loads(data.decode("utf-8")))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValidationError) as exc:
         raise SpecError(f"{SPEC_FILE}: {exc}") from exc
+
+
+def external_spec(specs_dir: Path | None, project: str) -> Path | None:
+    if specs_dir is None:
+        return None
+    path = specs_dir / f"{project}.toml"
+    return path if path.is_file() else None
+
+
+def read_external_rule(specs_dir: Path, name: str) -> bytes | None:
+    root = specs_dir.resolve()
+    path = (specs_dir / name).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path.read_bytes() if path.is_file() else None

@@ -36,7 +36,13 @@ from sa_home_bot.devlab.executor.mirror import (
     remote_url,
 )
 from sa_home_bot.devlab.executor.routing import Catalog, CatalogEntry
-from sa_home_bot.devlab.executor.spec import SPEC_FILE, ProjectSpec, parse_spec
+from sa_home_bot.devlab.executor.spec import (
+    SPEC_FILE,
+    ProjectSpec,
+    external_spec,
+    parse_spec,
+    read_external_rule,
+)
 from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
 from sa_home_bot.devlab.hub.queue import Job, Message
 from sa_home_bot.utils.files import load_model, save_model
@@ -449,7 +455,11 @@ class AgentWorker(WorkerLoops):
         repo = self._make_repo(run)
         run.repo = repo
         await repo.open()
-        project = parse_spec(await run.mirror.read_file(repo.base, SPEC_FILE))
+        external = external_spec(self._settings.specs_dir, job.project)
+        if external is not None:
+            project = parse_spec(external.read_bytes())
+        else:
+            project = parse_spec(await run.mirror.read_file(repo.base, SPEC_FILE))
         spec = AgentSpec.from_project(project)
         await self._check_model(job, project)
         baseline = await self._baseline(run, repo.base)
@@ -461,7 +471,7 @@ class AgentWorker(WorkerLoops):
         await (sandbox.resume() if held else sandbox.start())
         spend = self._spend_of(job)
         entries = await self._catalog.entries(job.model)
-        rules = await self._rules(run, project, repo.base)
+        rules = await self._rules(run, project, repo.base, external)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
@@ -537,10 +547,15 @@ class AgentWorker(WorkerLoops):
         shutil.rmtree(target, ignore_errors=True)
         return snapshot
 
-    async def _rules(self, run: JobRun, project: ProjectSpec, base: str) -> list[tuple[str, str]]:
+    async def _rules(
+        self, run: JobRun, project: ProjectSpec, base: str, external: Path | None
+    ) -> list[tuple[str, str]]:
         rules = []
         for name in project.agent.rules:
-            data = await run.mirror.read_file(base, name)
+            if external is None:
+                data = await run.mirror.read_file(base, name)
+            else:
+                data = read_external_rule(self._settings.specs_dir, name)
             if data is not None:
                 text = data.decode("utf-8", errors="replace")
                 log.info("Файл правил %s: %d симв.", name, len(text))
