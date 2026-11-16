@@ -41,6 +41,7 @@ MODELS_PATH = "/v1/models"
 CHAT_PATH = "/v1/chat/completions"
 VRAM_PATH = "/v1/vram"
 STATUS_PATH = "/v1/switch/status"
+RELEASE_PATH = "/v1/switch/companion/release"
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
 AUTH_HEADER = "Authorization"
@@ -265,14 +266,30 @@ class Companion:
             await self._reserve_main(self.settings.main_reserve_active_mib)
             await guarded_launch(self.run, self.settings.launcher, self._remember_launch)
 
+    async def _stop_locked(self) -> None:
+        await guarded_launch(self.run, self.settings.stopper, self._remember_stop)
+        await self._reserve_main(self.settings.main_reserve_idle_mib)
+
     async def stop_if_idle(self) -> None:
         if not self.is_idle():
             return
         async with self._lock:
             if not self.is_idle():
                 return
-            await guarded_launch(self.run, self.settings.stopper, self._remember_stop)
-            await self._reserve_main(self.settings.main_reserve_idle_mib)
+            await self._stop_locked()
+
+    async def release(self) -> str:
+        if not self.running:
+            return "not_running"
+        if self.active > 0:
+            return "busy"
+        async with self._lock:
+            if not self.running:
+                return "not_running"
+            if self.active > 0:
+                return "busy"
+            await self._stop_locked()
+            return "stopped"
 
     async def idle_guard(self) -> None:
         while True:
@@ -876,10 +893,20 @@ def build_app(
     async def status(request: web.Request) -> web.Response:
         return web.json_response(switch_status(switch, gate, companion))
 
+    async def release(request: web.Request) -> web.Response:
+        if companion is None:
+            return json_error(404, "компаньон не настроен")
+        headers = auth_headers(request)
+        if headers:
+            companion.headers = headers
+        result = await companion.release()
+        return web.json_response({"result": result})
+
     app = web.Application()
     app.router.add_get(MODELS_PATH, models)
     app.router.add_get(STATUS_PATH, status)
     app.router.add_post(CHAT_PATH, chat)
+    app.router.add_post(RELEASE_PATH, release)
     app[COMPANION_KEY] = companion
     if companion is not None:
 

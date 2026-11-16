@@ -443,3 +443,14 @@ async def chat_stream(
 async def generate(cfg: LlmConfig, prompt: str, system: str) -> dict[str, Any]:
     result = await chat(cfg, [{"role": "user", "content": prompt}], system, think=False)
     return {**result, "response": result["message"].get("content") or ""}
+
+
+COMPANION_RELEASE_PATH = "/switch/companion/release"
+
+
+async def release_companion(cfg: LlmConfig) -> None:
+    url = f"{cfg.openai_base_url}{COMPANION_RELEASE_PATH}"
+    try:
+        await asyncio.to_thread(_post_json_sync, url, {}, _auth_headers(cfg), 60.0)
+    except JSON_FETCH_ERRORS as exc:
+        log.warning("openai: не удалось выгрузить компаньон: %s", exc)

@@ -455,7 +455,9 @@ class AgentWorker(WorkerLoops):
         run.repo = repo
         await repo.open()
         project, external = await load_project_spec(
-            self._settings.specs_dir, job.project, lambda: run.mirror.read_file(repo.base, SPEC_FILE)
+            self._settings.specs_dir,
+            job.project,
+            lambda: run.mirror.read_file(repo.base, SPEC_FILE),
         )
         spec = AgentSpec.from_project(project)
         await self._check_model(job, project)

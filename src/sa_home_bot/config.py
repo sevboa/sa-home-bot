@@ -376,6 +376,7 @@ class LlmConfig(BaseModel):
     model: str = "qwen3:14b"
     backend: Literal["ollama", "openai"] = "ollama"
     openai_base_url: str = "http://127.0.0.1:8090/v1"
+    companion_release: bool = False
     openai_api_key_file: Path | None = None
     wsl_distro: str = "Docker"
     ollama_container: str = "ollama"

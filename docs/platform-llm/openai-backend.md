@@ -187,6 +187,10 @@ openai_api_key_file = "secrets/strata_key.txt"
   конфиги не меняются.
 - `openai_base_url` — адрес API без `/chat/completions`, по умолчанию `http://127.0.0.1:8090/v1`.
 - `openai_api_key_file` — путь к файлу с ключом (gitignored, как `config.toml`); по умолчанию нет.
+- `companion_release` — `bool`, по умолчанию `False`: при `backend = "openai"` засыпание службы
+  (`backend.stop`) зовёт `openai_chat.release_companion` — POST на
+  `openai_base_url + "/switch/companion/release"` (тайм-аут 60 с, заголовок ключа как у запросов);
+  ошибка сети только логируется WARNING, засыпание не падает. Без флага поведение прежнее.
 
 Тесты: `tests/unit/test_llm_openai_chat.py` — перевод сообщений (картинка, два вызова инструмента с
 двумя ответами, все значения `think`), перевод ответа (обычный, с рассуждением, с вызовом инструмента,

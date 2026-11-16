@@ -72,5 +72,7 @@ async def ensure_running(cfg: LlmConfig) -> None:
 
 async def stop(cfg: LlmConfig) -> None:
     if cfg.backend == "openai":
+        if cfg.companion_release:
+            await openai_chat.release_companion(cfg)
         return
     await ollama.stop(cfg)
