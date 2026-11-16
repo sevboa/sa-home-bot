@@ -22,7 +22,7 @@ from sa_home_bot.devlab.executor.mirror import (
     remote_url,
 )
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest, RunResult, TestRunner
-from sa_home_bot.devlab.executor.spec import SPEC_FILE, parse_spec
+from sa_home_bot.devlab.executor.spec import SPEC_FILE, load_project_spec
 from sa_home_bot.devlab.hub.queue import Job
 from sa_home_bot.utils.files import load_model, save_model
 
@@ -62,6 +62,7 @@ class WorkerSettings:
     work_dir: Path
     poll_interval_s: float
     heartbeat_interval_s: float
+    specs_dir: Path | None = None
 
 
 def heartbeat_body(jobs: Sequence[str], progress: Mapping[str, int] | None = None) -> dict:
@@ -316,7 +317,10 @@ class TestWorker(WorkerLoops):
     async def _run_job(self, job: Job, ref: str, mirror: ProjectMirror, workdir: Path) -> None:
         await mirror.fetch()
         sha = await mirror.resolve(ref)
-        spec = parse_spec(await mirror.read_file(sha, SPEC_FILE)).test
+        project, _ = await load_project_spec(
+            self._settings.specs_dir, job.project, lambda: mirror.read_file(sha, SPEC_FILE)
+        )
+        spec = project.test
         cmd = str(job.params.get(protocol.FIELD_CMD, "")).strip() or spec.cmd.strip()
         if not cmd:
             raise ValueError(f"не задана команда: ни в задании, ни в [test] cmd файла {SPEC_FILE}")

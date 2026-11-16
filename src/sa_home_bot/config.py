@@ -193,6 +193,7 @@ class DevlabConfig(BaseModel):
     agent_max_tokens: int = Field(default=0, ge=0)
     agent_context_tokens: int = Field(default=16000, ge=1000)
     agent_reply_tokens: int = Field(default=2000, ge=100)
+    specs_dir: str = ""
 
 
 class MonitorConfig(BaseModel):

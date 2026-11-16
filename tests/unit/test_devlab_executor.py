@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -12,6 +13,7 @@ from sa_home_bot.devlab.executor import mirror as mirror_module
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 from sa_home_bot.devlab.executor.mirror import GitError, ProjectMirror, remote_url
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE
+from sa_home_bot.devlab.executor.spec import external_spec, read_external_rule
 from sa_home_bot.devlab.executor.worker import (
     JOBS_DIR,
     STATE_FILE,
@@ -32,6 +34,7 @@ from tests.unit.test_devlab_git import arun_git, auth, run_git
 PROJECT = "demo"
 CLIENT = "laptop"
 SPEC = b'[test]\ncmd = "python -m pytest -q"\ntimeout_s = 60\n'
+EXTERNAL_SPEC = b'[test]\ncmd = "python -m pytest -q -s"\ntimeout_s = 77\n'
 PASSED = b"3 passed in 0.10s\n"
 
 
@@ -71,7 +74,9 @@ class Env:
         data = await self.mcp.call(protocol.TOOL_TEST, project=PROJECT, ref=ref, **kwargs)
         return data["job"]["id"]
 
-    def worker(self, runner: FakeTestRunner, name: str = "exec") -> TestWorker:
+    def worker(
+        self, runner: FakeTestRunner, name: str = "exec", specs_dir: Path | None = None
+    ) -> TestWorker:
         hub = ExecutorHub(self.hub_url, self.executor_token)
         self.hubs.append(hub)
         return TestWorker(
@@ -83,6 +88,7 @@ class Env:
                 work_dir=self.tmp_path / name,
                 poll_interval_s=0.01,
                 heartbeat_interval_s=0.01,
+                specs_dir=specs_dir,
             ),
         )
 
@@ -145,6 +151,38 @@ async def test_full_test_job_path(env):
     assert log["text"] == PASSED.decode()
     assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
     assert await env.status(data["job"]["id"]) == protocol.STATUS_DONE
+
+
+async def test_external_spec_wins_over_repo_spec(env):
+    specs = env.tmp_path / "specs"
+    specs.mkdir()
+    (specs / f"{PROJECT}.toml").write_bytes(EXTERNAL_SPEC)
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/1"
+    await env.push(ref, {".devlab.toml": SPEC, "a.txt": b"x"})
+    runner = FakeTestRunner(output=PASSED, junit=None)
+    worker = env.worker(runner, specs_dir=specs)
+    job_id = await env.submit(ref)
+    assert await worker.claim_once()
+
+    (request,) = runner.requests
+    assert request.argv == ("python", "-m", "pytest", "-q", "-s", f"--junitxml={JUNIT_FILE}")
+    assert request.timeout_s == 77
+    assert await env.status(job_id) == protocol.STATUS_DONE
+
+
+async def test_missing_external_spec_falls_back_to_repo(env):
+    specs = env.tmp_path / "specs-empty"
+    specs.mkdir()
+    ref = f"{protocol.TEST_BRANCH_PREFIX}{CLIENT}/1"
+    await env.push(ref, {".devlab.toml": SPEC})
+    runner = FakeTestRunner(output=PASSED)
+    worker = env.worker(runner, specs_dir=specs)
+    job_id = await env.submit(ref)
+    assert await worker.claim_once()
+
+    (request,) = runner.requests
+    assert request.timeout_s == 60
+    assert await env.status(job_id) == protocol.STATUS_DONE
 
 
 async def test_junit_and_job_overrides(env):
@@ -448,6 +486,25 @@ def test_refused_as_final_prefers_field_and_falls_back_to_text():
     assert not refused_as_final(HubRequestError("переход done → failed", 400, "queued"))
     assert refused_as_final(HubRequestError("переход stopped → failed недопустим", 400))
     assert not refused_as_final(HubRequestError("отказ", 400))
+
+
+def test_external_spec_found_or_missing(tmp_path):
+    (tmp_path / "demo.toml").write_bytes(SPEC)
+    assert external_spec(tmp_path, "demo") == tmp_path / "demo.toml"
+    assert external_spec(tmp_path, "other") is None
+    assert external_spec(None, "demo") is None
+
+
+def test_external_rule_reads_inside_and_blocks_escape(tmp_path):
+    (tmp_path / "RULES.md").write_bytes(b"abc")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "more.md").write_bytes(b"xyz")
+    escape = tmp_path.parent / "escape.md"
+    escape.write_bytes(b"secret")
+    assert read_external_rule(tmp_path, "RULES.md") == b"abc"
+    assert read_external_rule(tmp_path, "sub/more.md") == b"xyz"
+    assert read_external_rule(tmp_path, "missing.md") is None
+    assert read_external_rule(tmp_path, "../escape.md") is None
 
 
 async def test_failed_post_failure_keeps_current_and_branch(env, monkeypatch):
