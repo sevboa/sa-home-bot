@@ -579,6 +579,7 @@ def test_switch_status_without_companion_and_without_activity():
         "serving": [],
         "idle_for_s": None,
         "idle_s": 2.0,
+        "requested_ago_s": {},
         "waiting": [],
         "priority_active": 0,
         "engine_frozen": False,
@@ -608,6 +609,7 @@ def test_switch_status_rounds_times_to_tenth():
     assert status["serving"] == ["чат владелец"]
     assert status["idle_for_s"] == 5.0
     assert status["idle_s"] == 2.0
+    assert status["requested_ago_s"] == {}
     assert status["waiting"] == [
         {"model": "qw2", "for_s": 0.1, "priority": True, "client": "агент devlab v2y5xn"},
         {"model": "iq3", "for_s": 12.0, "priority": False, "client": ""},
@@ -639,7 +641,47 @@ def test_switch_status_shows_companion_fields():
         "serving": ["чат владелец"],
         "idle_for_s": 3.0,
         "idle_stop_s": COMPANION.idle_stop_s,
+        "requested_ago_s": 0.0,
     }
+
+
+async def test_switch_status_requested_ago_updates_per_model():
+    run = FakeRun()
+    switch = StrataSwitch(settings(idle_s=0.0), run, StepClock(step=0.0))
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    await switch.acquire("iq3")
+    switch.release()
+    await switch.acquire("qw2")
+    switch.release()
+    switch.clock = StepClock(start=7.0, step=0.0)
+    status = switch_status(switch, gate, None)
+    assert status["requested_ago_s"] == {"iq3": 7.0, "qw2": 7.0}
+    await switch.acquire("iq3")
+    switch.release()
+    status = switch_status(switch, gate, None)
+    assert status["requested_ago_s"] == {"iq3": 0.0, "qw2": 7.0}
+
+
+def test_companion_requested_ago_counts_from_request_start():
+    run = FakeRun()
+    switch, companion_settings = companion_switch(run, StepClock(step=0.1))
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    companion = Companion(
+        settings=companion_settings,
+        switch=switch,
+        main_upstream="http://127.0.0.1:1",
+        run=run,
+        clock=switch.clock,
+        poll_s=switch.settings.poll_s,
+        max_wait_s=switch.settings.max_wait_s,
+    )
+    companion.running = True
+    companion.begin_request(AUTH, "чат владелец")
+    companion.end_request("чат владелец")
+    switch.clock = StepClock(start=5.0, step=0.0)
+    status = switch_status(switch, gate, companion)
+    assert status["companion"]["idle_for_s"] == 4.7
+    assert status["companion"]["requested_ago_s"] == 4.8
 
 
 async def test_switch_status_shows_launching_and_waiting_in_arrival_order():
@@ -689,6 +731,7 @@ async def test_status_route_answers_without_authorization():
         "serving": [],
         "idle_for_s": None,
         "idle_s": 1.0,
+        "requested_ago_s": {},
         "waiting": [],
         "priority_active": 0,
         "engine_frozen": False,
@@ -788,6 +831,7 @@ async def test_status_route_reports_companion_state():
             "serving": [],
             "idle_for_s": None,
             "idle_stop_s": companion.idle_stop_s,
+            "requested_ago_s": None,
         }
         resp = await router.post(
             CHAT_PATH,

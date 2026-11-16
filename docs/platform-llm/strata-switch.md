@@ -264,6 +264,7 @@ llm_socket = "/home/sevboa/.local/share/sa-home-bot/data/llm.sock"
   "serving": ["чат владелец"],
   "idle_for_s": 41.7,
   "idle_s": 300.0,
+  "requested_ago_s": {"qwen3.8": 8.1},
   "waiting": [
     {"model": "iq3", "for_s": 3.2, "priority": false, "client": "devlab v2y5xn"}
   ],
@@ -275,7 +276,8 @@ llm_socket = "/home/sevboa/.local/share/sa-home-bot/data/llm.sock"
     "active": 0,
     "serving": ["чат владелец"],
     "idle_for_s": 120.5,
-    "idle_stop_s": 1800.0
+    "idle_stop_s": 1800.0,
+    "requested_ago_s": 121.3
   }
 }
 ```
@@ -288,6 +290,9 @@ llm_socket = "/home/sevboa/.local/share/sa-home-bot/data/llm.sock"
 - `serving` — подписи этих запросов (те же, что у `active`, по одной на запрос);
 - `idle_for_s` — секунды с конца последнего запроса основной модели (`null`, если запросов ещё не
   было); `idle_s` — порог простоя из конфига;
+- `requested_ago_s` — словарь `{имя модели: сколько секунд назад начался последний запрос к ней}`
+  (по алфавиту; пустой, если запросов не было); нужен ноде для правила выключения mycraft
+  (WebUI молчит 30 мин);
 - `waiting` — ожидающие переключения в порядке поступления: имя модели, сколько секунд ждёт,
   `priority` (запросам из `priority` и компаньону порог `idle_s` не нужен) и `client` — подпись
   клиента;
@@ -295,8 +300,12 @@ llm_socket = "/home/sevboa/.local/share/sa-home-bot/data/llm.sock"
 - `engine_frozen` — движок основной модели сейчас остановлен `SIGSTOP` (всегда `false` без
   `freeze_engine`);
 - `companion` — состояние компаньона: `running`, число активных запросов, `serving` — подписи этих
-  запросов, `idle_for_s` с конца последнего запроса компаньона и `idle_stop_s` из конфига; `null`,
-  если секции `[companion]` нет.
+  запросов, `idle_for_s` с конца последнего запроса компаньона и `idle_stop_s` из конфига;
+  `requested_ago_s` — сколько секунд назад начался последний запрос компаньона (`null`, если
+  запросов не было); `null`, если секции `[companion]` нет.
+
+Запись 2026-11-16: поле `requested_ago_s` (верхнее и у компаньона) нужно ноде для правила
+выключения mycraft (WebUI молчит 30 мин).
 
 Находка 2026-11-15: владельцу видно, что держит модель, — например «агент devlab v2y5xn». Подпись
 берётся из стандартного поля OpenAI `user` в теле запроса (`client_label`): непустая строка,
