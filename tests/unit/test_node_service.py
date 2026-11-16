@@ -988,3 +988,140 @@ async def test_close_ssh_sessions_also_kills_tmux(monkeypatch):
     assert killed == [True]
     await asyncio.sleep(0.05)
     assert ran == [["systemctl", "poweroff"]]
+
+
+async def test_power_blockers_switch_busy(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.config import PowerRuleConfig
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def fake_fetch(url):
+        return {"active": 2, "serving": ["a", "b"]}
+
+    _stub_no_blockers(monkeypatch, service_module)
+    monkeypatch.setattr(service_module.power_rules, "fetch_switch_status", fake_fetch)
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+
+    svc = NodeService(
+        sup,
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        power_rule=PowerRuleConfig(switch_status_url="http://x/v1/switch/status"),
+    )
+    assert await svc.power_blockers() == ["модели: a, b"]
+    await svc.maybe_auto_poweroff_idle()
+    await asyncio.sleep(0.05)
+    assert ran == []
+
+
+async def test_power_blockers_switch_unreachable(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.config import PowerRuleConfig
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def fake_fetch(url):
+        return None
+
+    _stub_no_blockers(monkeypatch, service_module)
+    monkeypatch.setattr(service_module.power_rules, "fetch_switch_status", fake_fetch)
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+
+    svc = NodeService(
+        sup,
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        power_rule=PowerRuleConfig(switch_status_url="http://x/v1/switch/status"),
+    )
+    assert await svc.power_blockers() == ["strata-switch недоступен"]
+    await svc.maybe_auto_poweroff_idle()
+    await asyncio.sleep(0.05)
+    assert ran == []
+
+
+async def test_power_blockers_alfred_not_asleep(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.config import PowerRuleConfig
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def fake_state(name):
+        return {"asleep": False}
+
+    _stub_no_blockers(monkeypatch, service_module)
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+
+    svc = NodeService(
+        sup,
+        NodeRouter("n"),
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        power_rule=PowerRuleConfig(alfred_service="llm"),
+    )
+    svc._service_state = fake_state
+    assert await svc.power_blockers() == ["Альфред не спит"]
+    await svc.maybe_auto_poweroff_idle()
+    await asyncio.sleep(0.05)
+    assert ran == []
+
+
+async def test_power_blockers_all_clear_powers_off(monkeypatch):
+    import asyncio
+
+    from sa_home_bot.config import PowerRuleConfig
+    from sa_home_bot.node import service as service_module
+
+    sup, _ = _fake_supervisor()
+    ran: list[list[str]] = []
+
+    async def fake_runner(argv):
+        ran.append(argv)
+
+    async def fake_fetch(url):
+        return {}
+
+    async def fake_state(name):
+        return {"asleep": True}
+
+    _stub_no_blockers(monkeypatch, service_module)
+    monkeypatch.setattr(service_module.power_rules, "fetch_switch_status", fake_fetch)
+    monkeypatch.setattr(service_module, "POWER_DELAY_S", 0.0)
+
+    svc = NodeService(
+        sup,
+        NodeRouter("n"),
+        power_runner=fake_runner,
+        node_kind="workstation",
+        idle_poweroff=True,
+        power_rule=PowerRuleConfig(
+            switch_status_url="http://x/v1/switch/status",
+            alfred_service="llm",
+        ),
+    )
+    svc._service_state = fake_state
+    assert await svc.power_blockers() == []
+    await svc.maybe_auto_poweroff_idle()
+    await asyncio.sleep(0.05)
+    assert ran == [["systemctl", "poweroff"]]
