@@ -226,6 +226,42 @@ async def test_depends_on_blocks_until_done(queue):
     assert second.id == b.id
 
 
+@pytest.mark.parametrize(
+    "fail_via, expected_status",
+    [
+        ("executor_failed", S.STATUS_FAILED),
+        ("executor_stopped", S.STATUS_STOPPED),
+        ("client_stop", S.STATUS_STOPPED),
+    ],
+)
+async def test_dependency_failed_notifies_dependents(queue, fail_via, expected_status):
+    a = await submit(queue)
+    b = await submit(queue, depends_on=[a.id])
+    c = await submit(queue)
+
+    if fail_via == "executor_failed":
+        await queue.claim(EXECUTOR, [MODEL])
+        await queue.post_from_executor(a.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "oops"})
+    elif fail_via == "executor_stopped":
+        await queue.claim(EXECUTOR, [MODEL])
+        await queue.post_from_executor(a.id, S.MSG_STOPPED)
+    else:
+        await queue.post_from_client(CLIENT, a.id, S.MSG_STOP)
+
+    inbox = await queue.inbox(CLIENT)
+    dep_msgs = [m for m in inbox if m.kind == S.MSG_DEPENDENCY_FAILED]
+    assert len(dep_msgs) == 1
+    msg = dep_msgs[0]
+    assert msg.job_id == b.id
+    assert msg.payload == {S.PAYLOAD_DEPENDENCY: a.id, S.PAYLOAD_DEPENDENCY_STATUS: expected_status}
+
+    assert (await queue.get_job(b.id)).status == S.STATUS_QUEUED
+    assert (await queue.get_job(c.id)).status == S.STATUS_QUEUED
+
+    c_inbox = [m for m in inbox if m.job_id == c.id and m.kind == S.MSG_DEPENDENCY_FAILED]
+    assert len(c_inbox) == 0
+
+
 async def test_depends_on_missing_raises(queue):
     with pytest.raises(HubError, match="зависимость"):
         await queue.submit(CLIENT, PROJECT, MODEL, TASK, depends_on=["nope"])

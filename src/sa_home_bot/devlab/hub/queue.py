@@ -440,6 +440,8 @@ class HubQueue:
                 else:
                     self._check_transition(job, target)
                     await self._set_status(conn, job, target)
+                    if target in (protocol.STATUS_FAILED, protocol.STATUS_STOPPED):
+                        await HubQueue._notify_dependents(conn, job, target)
             await conn.execute(
                 "UPDATE jobs SET tokens = tokens + ?, cost_usd = cost_usd + ? WHERE id = ?",
                 (tokens, cost, job_id),
@@ -455,6 +457,7 @@ class HubQueue:
         if attempts >= protocol.TEST_MAX_REQUEUES:
             self._check_transition(job, protocol.STATUS_FAILED)
             await self._set_status(conn, job, protocol.STATUS_FAILED)
+            await HubQueue._notify_dependents(conn, job, protocol.STATUS_FAILED)
             text = f"исполнитель перезапускался во время прогона {attempts + 1} раз"
             return protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
         params = {**job.params, protocol.PARAM_ATTEMPTS: attempts + 1}
@@ -509,6 +512,7 @@ class HubQueue:
             elif kind == protocol.MSG_STOP:
                 self._check_transition(job, protocol.STATUS_STOPPED)
                 await self._set_status(conn, job, protocol.STATUS_STOPPED)
+                await HubQueue._notify_dependents(conn, job, protocol.STATUS_STOPPED)
                 if job.status == protocol.STATUS_QUEUED:
                     await self._post(
                         conn, job_id, protocol.DIRECTION_TO_CLIENT, protocol.MSG_STOPPED, {}
@@ -714,6 +718,28 @@ class HubQueue:
         await conn.execute(
             "UPDATE jobs SET status = ?, finished = ? WHERE id = ?", (target, finished, job.id)
         )
+
+    @staticmethod
+    async def _notify_dependents(
+        conn: aiosqlite.Connection, job: Job, status: str
+    ) -> None:
+        cur = await conn.execute(
+            "SELECT j.id FROM jobs j, json_each(j.params, '$.depends_on') d "
+            "WHERE j.status = ? AND j.client = ? AND d.value = ?",
+            (protocol.STATUS_QUEUED, job.client, job.id),
+        )
+        dependent_ids = [row["id"] for row in await cur.fetchall()]
+        for dep_id in dependent_ids:
+            await HubQueue._post(
+                conn,
+                dep_id,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_DEPENDENCY_FAILED,
+                {
+                    protocol.PAYLOAD_DEPENDENCY: job.id,
+                    protocol.PAYLOAD_DEPENDENCY_STATUS: status,
+                },
+            )
 
     @staticmethod
     async def _post(
