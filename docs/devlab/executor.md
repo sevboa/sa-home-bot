@@ -290,12 +290,15 @@
 `agent_max_tokens`, `agent_context_tokens` (потолок окна локальной модели и окно по умолчанию, если в каталоге нет `context`), `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
 
 Профили ролей (2026-11-18). Профиль задаётся в `[devlab.agent_profiles.<имя>]` (`DevlabProfileConfig`):
-`prompt_file` (путь к файлу с текстом роли, `~` раскрывается), `max_steps` (целое ≥ 1) и `max_wall_s`
-(> 0). Исполнитель берёт профиль задания из `params.profile` (`protocol.PARAM_PROFILE`, по умолчанию
-`executor`, `protocol.DEFAULT_PROFILE`): текст роли добавляется в конец системного промпта (`"\n\n"`
-после `build_system`), `max_steps`/`max_wall_s` профиля подменяют общие лимиты `AgentLimits`. Файл
-роли не читается — задание падает с причиной «профиль <имя>: файл роли <путь> не читается» до запуска
-модели. Профиль, которого нет в `agent_profiles`, работает по общим настройкам (без текста роли).
+`prompt_file` (путь к файлу с текстом роли, `~` раскрывается), `max_steps` (целое ≥ 1), `max_wall_s`
+(> 0) и `write_prefixes` (список префиксов путей для записи, пусто — без ограничений; запреты проекта
+`forbidden_paths`/`secret_paths` действуют всегда). Исполнитель берёт профиль задания из
+`params.profile` (`protocol.PARAM_PROFILE`, по умолчанию `executor`, `protocol.DEFAULT_PROFILE`):
+текст роли добавляется в конец системного промпта (`"\n\n"` после `build_system`),
+`max_steps`/`max_wall_s` профиля подменяют общие лимиты `AgentLimits`, `write_prefixes` ограничивает
+пути, в которые агент может писать через `write_file` и `edit_file`. Файл роли не читается — задание
+падает с причиной «профиль <имя>: файл роли <путь> не читается» до запуска модели. Профиль, которого
+нет в `agent_profiles`, работает по общим настройкам (без текста роли и без ограничений путей).
 
 ## Тесты
 `tests/unit/test_devlab_executor.py` (настоящий хаб `build_hub_app`, bare-репо, `FakeTestRunner`) и

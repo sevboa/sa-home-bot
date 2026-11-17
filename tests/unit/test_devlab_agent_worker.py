@@ -9,7 +9,8 @@ import pytest
 
 from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop
+from sa_home_bot.devlab.agent.dialog import Dialog
+from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.trace import StepTrace
@@ -375,6 +376,32 @@ async def test_profile_role_text_joins_system_prompt(env):
     system, task = model.seen[0]
     assert system["content"].split("\n\n")[-1] == "роль-текст"
     assert task["content"] == "# сделай out.txt"
+
+
+async def test_profile_write_prefixes_restricts_toolbox(env, monkeypatch):
+    captured_spec = {}
+
+    class CaptureLoop(AgentLoop):
+        def __init__(self, model, tools, guard, limits, **kwargs) -> None:
+            captured_spec["write_prefixes"] = tools._spec.write_prefixes
+            super().__init__(model, tools, guard, limits, **kwargs)
+
+        async def run(self, system: str, task: str, resume: Dialog | None = None) -> AgentResult:
+            return AgentResult(AgentStatus.FINISHED, summary="ok")
+
+    job_id = await submit_profile(env, "custom")
+    model = ScriptedChatModel()
+    worker = make_worker(
+        env,
+        model,
+        profiles={"custom": DevlabProfileConfig(write_prefixes=["docs/"])},
+    )
+    monkeypatch.setattr(agent_worker_module, "AgentLoop", CaptureLoop)
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert captured_spec["write_prefixes"] == ("docs/",)
 
 
 async def test_unreadable_profile_role_fails_job_with_profile_name(env):
