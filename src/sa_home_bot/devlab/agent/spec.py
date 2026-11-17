@@ -21,6 +21,7 @@ class AgentSpec:
     forbidden_paths: tuple[str, ...] = ()
     secret_paths: tuple[str, ...] = ()
     diff_prefixes: tuple[str, ...] = ()
+    write_prefixes: tuple[str, ...] = ()
     command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S
     test_timeout_s: float = DEFAULT_TEST_TIMEOUT_S
     narrow_test_timeout_s: float = DEFAULT_NARROW_TEST_TIMEOUT_S
@@ -37,6 +38,7 @@ class AgentSpec:
             forbidden_paths=tuple(section.forbidden_paths),
             secret_paths=tuple(section.secret_paths),
             diff_prefixes=tuple(section.diff_prefixes),
+            write_prefixes=(),
             command_timeout_s=section.command_timeout_s,
             test_timeout_s=test.timeout_s,
             narrow_test_timeout_s=section.narrow_test_timeout_s,

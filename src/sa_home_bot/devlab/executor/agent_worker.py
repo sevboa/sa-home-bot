@@ -464,6 +464,8 @@ class AgentWorker(WorkerLoops):
         spec = AgentSpec.from_project(project)
         await self._check_model(job, project)
         profile_name, profile = self._profile_of(job)
+        if profile is not None and profile.write_prefixes:
+            spec = replace(spec, write_prefixes=tuple(profile.write_prefixes))
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
         held = self._parked_sandboxes.pop(job.id, None)

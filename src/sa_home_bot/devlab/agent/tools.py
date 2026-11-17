@@ -208,6 +208,12 @@ class ToolBox:
         relative = safe_relative(path)
         if matches(relative, self._spec.forbidden_paths + self._spec.secret_paths):
             raise ToolError(f"путь {relative} закрыт для правок правилами проекта")
+        if self._spec.write_prefixes and not any(
+            relative.startswith(prefix) for prefix in self._spec.write_prefixes
+        ):
+            raise ToolError(
+                f"путь {relative} вне путей роли: {', '.join(self._spec.write_prefixes)}"
+            )
         return relative
 
     async def _read_text(self, path: str) -> str:

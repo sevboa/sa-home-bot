@@ -267,6 +267,50 @@ async def test_forbidden_paths_and_command_whitelist(tmp_path):
         await box.call(TOOL_RUN_COMMAND, {"command": "ls"})
 
 
+@pytest.mark.parametrize(
+    "write_prefixes,path,should_pass",
+    [
+        (("tests/",), "tests/x.py", True),
+        (("tests/",), "src/x.py", False),
+        (("docs/",), "docs/readme.md", True),
+        (("docs/",), "src/x.py", False),
+        ((), "src/x.py", True),
+        ((), "tests/x.py", True),
+    ],
+)
+async def test_write_prefixes(tmp_path, write_prefixes, path, should_pass):
+    spec = AgentSpec(write_prefixes=write_prefixes)
+    box = ToolBox(LocalSandbox(tmp_path), spec)
+    if should_pass:
+        await box.call(TOOL_WRITE_FILE, {"path": path, "content": "x"})
+    else:
+        with pytest.raises(ToolError, match="вне путей роли"):
+            await box.call(TOOL_WRITE_FILE, {"path": path, "content": "x"})
+
+
+@pytest.mark.parametrize(
+    "write_prefixes,path,should_pass",
+    [
+        (("tests/",), "tests/x.py", True),
+        (("tests/",), "src/x.py", False),
+        (("docs/",), "docs/readme.md", True),
+        (("docs/",), "src/x.py", False),
+        ((), "src/x.py", True),
+        ((), "tests/x.py", True),
+    ],
+)
+async def test_write_prefixes_edit_file(tmp_path, write_prefixes, path, should_pass):
+    (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / path).write_text("old")
+    spec = AgentSpec(write_prefixes=write_prefixes)
+    box = ToolBox(LocalSandbox(tmp_path), spec)
+    if should_pass:
+        await box.call(TOOL_EDIT_FILE, {"path": path, "old": "old", "new": "new"})
+    else:
+        with pytest.raises(ToolError, match="вне путей роли"):
+            await box.call(TOOL_EDIT_FILE, {"path": path, "old": "old", "new": "new"})
+
+
 async def test_command_timeout_reported(tmp_path):
     spec = AgentSpec(allowed_commands=("sleep",), command_timeout_s=0.2)
     box = ToolBox(LocalSandbox(tmp_path), spec)
