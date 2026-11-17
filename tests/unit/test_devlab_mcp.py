@@ -210,6 +210,18 @@ async def test_submit_without_base_branch_pushed(client, store, alice):
     assert await store.queue.list_jobs() == []
 
 
+async def test_submit_with_profile(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice, profile="docs")
+    assert submitted["job"]["params"]["profile"] == "docs"
+
+
+async def test_submit_with_purpose(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice, purpose="bench")
+    assert submitted["job"]["params"]["purpose"] == "bench"
+
+
 async def test_release_requires_waiting_owner(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice)

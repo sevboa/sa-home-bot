@@ -109,6 +109,8 @@ async def submit(
     task: str,
     base_branch: str,
     priority: int = 0,
+    profile: str = protocol.DEFAULT_PROFILE,
+    purpose: str = protocol.PURPOSE_DEV,
 ) -> Any:
     if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
         ctx.store.git_root, project, base_branch
@@ -119,7 +121,14 @@ async def submit(
             f"HEAD:{base_branch}"
         )
     job = await ctx.store.queue.submit(
-        ctx.client, project, model, task, priority=priority, base_branch=base_branch
+        ctx.client,
+        project,
+        model,
+        task,
+        priority=priority,
+        base_branch=base_branch,
+        profile=profile,
+        purpose=purpose,
     )
     return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
 
@@ -289,6 +298,17 @@ TOOLS: tuple[Tool, ...] = (
                 required=True,
             ),
             Param("priority", "integer", "Приоритет, больше — раньше. По умолчанию 0."),
+            Param(
+                "profile",
+                "string",
+                "Профиль роли агента: executor (по умолчанию), executor-xs, tester, docs, devops.",
+            ),
+            Param(
+                "purpose",
+                "string",
+                "Назначение: dev (разработка, по умолчанию) или bench "
+                "(замер на стенде, уступает dev).",
+            ),
         ),
         submit,
     ),
