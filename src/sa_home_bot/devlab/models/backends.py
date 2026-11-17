@@ -86,6 +86,7 @@ class OpenAiBackend(HttpBackend):
         body = {
             **self.spec.params,
             **{k: v for k, v in payload.items() if k not in FALLBACK_FIELDS},
+            **self.spec.override,
         }
         if self.spec.report_cost:
             body["usage"] = {"include": True}
@@ -193,7 +194,7 @@ class LlamaCppBackend(HttpBackend):
             await self._ensure_up()
             return await self._post(
                 self._base + LLAMA_CHAT_PATH,
-                {**payload, "model": self.spec.model or self.name},
+                {**payload, **self.spec.override, "model": self.spec.model or self.name},
                 {"Content-Type": "application/json"},
             )
         except BaseException:
