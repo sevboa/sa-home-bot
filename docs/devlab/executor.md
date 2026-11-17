@@ -275,6 +275,14 @@
 `agent_memory`, `agent_max_steps`, `agent_max_wall_s`, `agent_max_red_runs`, `agent_max_cost_usd`,
 `agent_max_tokens`, `agent_context_tokens` (потолок окна локальной модели и окно по умолчанию, если в каталоге нет `context`), `agent_reply_tokens` (см. `docs/platform/config-reference.md`, `DevlabConfig`). Токен — только в instance-конфиге ноды.
 
+Профили ролей (2026-11-18). Профиль задаётся в `[devlab.agent_profiles.<имя>]` (`DevlabProfileConfig`):
+`prompt_file` (путь к файлу с текстом роли, `~` раскрывается), `max_steps` (целое ≥ 1) и `max_wall_s`
+(> 0). Исполнитель берёт профиль задания из `params.profile` (`protocol.PARAM_PROFILE`, по умолчанию
+`executor`, `protocol.DEFAULT_PROFILE`): текст роли добавляется в конец системного промпта (`"\n\n"`
+после `build_system`), `max_steps`/`max_wall_s` профиля подменяют общие лимиты `AgentLimits`. Файл
+роли не читается — задание падает с причиной «профиль <имя>: файл роли <путь> не читается» до запуска
+модели. Профиль, которого нет в `agent_profiles`, работает по общим настройкам (без текста роли).
+
 ## Тесты
 `tests/unit/test_devlab_executor.py` (настоящий хаб `build_hub_app`, bare-репо, `FakeTestRunner`) и
 `tests/unit/test_devlab_executor_service.py` (сквозной: `run_executor` с настоящим хабом, двумя настоящими

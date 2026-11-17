@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop
 from sa_home_bot.devlab.agent.model import ModelError
@@ -85,6 +86,7 @@ def make_worker(
     work_dir="exec",
     slots=None,
     specs_dir=None,
+    profiles=None,
 ) -> AgentWorker:
     hub = hub_class(env.hub_url, env.executor_token)
     env.hubs.append(hub)
@@ -99,6 +101,7 @@ def make_worker(
             poll_interval_s=0.01,
             heartbeat_interval_s=0.01,
             **({"limits": limits} if limits else {}),
+            **({"profiles": profiles} if profiles else {}),
             push_interval_s=0.0,
             retry_interval_s=0.01,
             **({"slots": slots} if slots else {}),
@@ -307,6 +310,87 @@ async def test_agent_window_comes_from_catalog(env, monkeypatch, entries, expect
 
     assert await env.status(job_id) == protocol.STATUS_DONE
     assert LimitsProbe.seen[0].context_tokens == expected
+
+
+async def submit_profile(env, profile) -> str:
+    await env.push(BASE, BASE_FILES)
+    data = await env.mcp.call(
+        protocol.TOOL_SUBMIT,
+        project=PROJECT,
+        model=MODEL,
+        task="# сделай out.txt",
+        base_branch=BASE,
+        profile=profile,
+    )
+    return data["job"]["id"]
+
+
+@pytest.mark.parametrize(
+    ("profile_settings", "submitted_profile", "max_steps", "max_wall_s"),
+    [
+        ({"max_steps": 3}, "custom", 3, 8 * 3600.0),
+        ({"max_wall_s": 100.0}, "custom", 60, 100.0),
+        (None, None, 60, 8 * 3600.0),
+    ],
+)
+async def test_profile_limits_override_general(
+    env, monkeypatch, profile_settings, submitted_profile, max_steps, max_wall_s
+):
+    monkeypatch.setattr(agent_worker_module, "AgentLoop", LimitsProbe)
+    LimitsProbe.seen = []
+    job_id = (
+        await submit_profile(env, submitted_profile)
+        if submitted_profile
+        else await submit(env)
+    )
+    profiles = (
+        {"custom": DevlabProfileConfig(**profile_settings)} if profile_settings else None
+    )
+    worker = make_worker(
+        env,
+        ScriptedChatModel(WRITE_DONE, FINISH),
+        limits=AgentLimits(),
+        profiles=profiles,
+    )
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    assert LimitsProbe.seen[0].max_steps == max_steps
+    assert LimitsProbe.seen[0].max_wall_s == max_wall_s
+
+
+async def test_profile_role_text_joins_system_prompt(env):
+    path = env.tmp_path / "role.md"
+    path.write_text("роль-текст\n", encoding="utf-8")
+    job_id = await submit_profile(env, "custom")
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(
+        env, model, profiles={"custom": DevlabProfileConfig(prompt_file=str(path))}
+    )
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_DONE
+    system, task = model.seen[0]
+    assert system["content"].split("\n\n")[-1] == "роль-текст"
+    assert task["content"] == "# сделай out.txt"
+
+
+async def test_unreadable_profile_role_fails_job_with_profile_name(env):
+    job_id = await submit_profile(env, "custom")
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(
+        env, model, profiles={"custom": DevlabProfileConfig(prompt_file="missing-role.md")}
+    )
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_FAILED
+    failed = await env.store.queue.last_message(job_id, protocol.MSG_FAILED)
+    assert "custom" in failed.payload[protocol.PAYLOAD_TEXT]
+    assert "missing-role.md" in failed.payload[protocol.PAYLOAD_TEXT]
+    assert not model.seen
 
 
 async def test_held_jobs_are_parked_ones(env):

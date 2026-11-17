@@ -118,6 +118,7 @@ async def run_executor(
                 AgentSettings(
                     **{**vars(worker_settings), "work_dir": directory},
                     limits=agent_limits(cfg),
+                    profiles=cfg.agent_profiles,
                     slots=slots,
                 ),
                 catalog,

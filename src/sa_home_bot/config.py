@@ -165,6 +165,12 @@ class WakeConfig(BaseModel):
 CPUSET_PATTERN = r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
 
 
+class DevlabProfileConfig(BaseModel):
+    prompt_file: str = ""
+    max_steps: int | None = Field(default=None, ge=1)
+    max_wall_s: float | None = Field(default=None, gt=0)
+
+
 class DevlabConfig(BaseModel):
     socket: str = "./data/devlab.sock"
     root: str = "/models/sa-home/devlab"
@@ -193,6 +199,7 @@ class DevlabConfig(BaseModel):
     agent_max_tokens: int = Field(default=0, ge=0)
     agent_context_tokens: int = Field(default=16000, ge=1000)
     agent_reply_tokens: int = Field(default=2000, ge=100)
+    agent_profiles: dict[str, DevlabProfileConfig] = Field(default_factory=dict)
     specs_dir: str = ""
 
 
