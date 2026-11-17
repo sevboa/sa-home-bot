@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 
+from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import estimate_tokens
 from sa_home_bot.devlab.agent.dialog import Dialog
@@ -156,6 +157,7 @@ class Outbox(BaseModel):
 @dataclass(frozen=True)
 class AgentSettings(WorkerSettings):
     limits: AgentLimits = AgentLimits()
+    profiles: dict[str, DevlabProfileConfig] = field(default_factory=dict)
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
     slots: SlotRegistry = field(default_factory=SlotRegistry)
@@ -461,6 +463,8 @@ class AgentWorker(WorkerLoops):
         )
         spec = AgentSpec.from_project(project)
         await self._check_model(job, project)
+        profile_name, profile = self._profile_of(job)
+        role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
         held = self._parked_sandboxes.pop(job.id, None)
         sandbox = held or self._sandboxes(
@@ -475,7 +479,7 @@ class AgentWorker(WorkerLoops):
             MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
             FinishGuard(sandbox, spec),
-            self._limits_for(spend, entries),
+            self._limits_for(spend, entries, profile),
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
@@ -484,6 +488,8 @@ class AgentWorker(WorkerLoops):
             overflow_hint=rules_hint(rules),
         )
         system = build_system(rules, job.model, spec.allowed_commands)
+        if role_text is not None:
+            system = system + "\n\n" + role_text
         dialog = self._answered_dialog(run)
         if dialog is not None:
             return await loop.run(system, job.task, resume=dialog)
@@ -513,9 +519,31 @@ class AgentWorker(WorkerLoops):
         dialog = load_model(Dialog, path)
         return dialog if dialog.answer is not None else None
 
-    def _limits_for(self, spend: JobSpend, entries: list[CatalogEntry]) -> AgentLimits:
+    def _profile_of(self, job: Job) -> tuple[str, DevlabProfileConfig | None]:
+        name = job.params.get(protocol.PARAM_PROFILE, protocol.DEFAULT_PROFILE)
+        return name, self._settings.profiles.get(name)
+
+    def _role_text(self, name: str, profile: DevlabProfileConfig | None) -> str | None:
+        if profile is None or not profile.prompt_file:
+            return None
+        path = Path(profile.prompt_file).expanduser()
+        try:
+            return path.read_text().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ModelUnavailable(f"профиль {name}: файл роли {path} не читается: {exc}") from None
+
+    def _limits_for(
+        self,
+        spend: JobSpend,
+        entries: list[CatalogEntry],
+        profile: DevlabProfileConfig | None = None,
+    ) -> AgentLimits:
         limits = self._settings.limits
         factor = 1 + spend.extensions
+        if profile is not None and profile.max_steps is not None:
+            limits = replace(limits, max_steps=profile.max_steps)
+        if profile is not None and profile.max_wall_s is not None:
+            limits = replace(limits, max_wall_s=profile.max_wall_s)
         return replace(
             limits,
             context_tokens=window_tokens(entries, limits.context_tokens),
