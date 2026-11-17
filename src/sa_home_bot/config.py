@@ -170,6 +170,8 @@ class DevlabProfileConfig(BaseModel):
     max_steps: int | None = Field(default=None, ge=1)
     max_wall_s: float | None = Field(default=None, gt=0)
     write_prefixes: list[str] = Field(default_factory=list)
+    allow_no_changes: bool = False
+    require_verdict: bool = False
 
 
 class DevlabConfig(BaseModel):
