@@ -106,6 +106,49 @@ async def test_finish_without_diff_rejected(tmp_path):
     assert rejected.startswith("финал отклонён") and "нет изменений в src/" in rejected
 
 
+async def test_finish_allow_no_changes_accepted(tmp_path):
+    spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), allow_no_changes=True)
+    model = ScriptedChatModel(tool_reply(TOOL_FINISH, summary="готово"))
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.FINISHED
+    assert result.summary == "готово"
+
+
+@pytest.mark.parametrize(
+    "summary,accepted",
+    [
+        ("ВЕРДИКТ: принято", True),
+        ("итог\nВЕРДИКТ: доработать\n- пункт", True),
+        ("всё хорошо", False),
+    ],
+)
+async def test_finish_require_verdict(tmp_path, summary, accepted):
+    spec = AgentSpec(
+        test_argv=GREEN_TEST,
+        diff_prefixes=("src/",),
+        require_verdict=True,
+    )
+    if accepted:
+        model = ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, summary=summary))
+    else:
+        model = ScriptedChatModel(
+            edit(),
+            tool_reply(TOOL_FINISH, summary=summary),
+            tool_reply(TOOL_FINISH, summary="ВЕРДИКТ: принято"),
+        )
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    result = await loop.run("s", "t")
+    if accepted:
+        assert result.status is AgentStatus.FINISHED
+        assert result.summary == summary
+    else:
+        assert result.status is AgentStatus.FINISHED
+        assert result.summary == "ВЕРДИКТ: принято"
+        rejected = model.seen[2][-1]["content"]
+        assert "нет вердикта" in rejected
+
+
 async def test_finish_ignores_diff_outside_prefix(tmp_path):
     model = ScriptedChatModel(
         tool_reply(TOOL_WRITE_FILE, path="notes.txt", content="x"),

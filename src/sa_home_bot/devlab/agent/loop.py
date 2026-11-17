@@ -425,4 +425,7 @@ class AgentLoop:
         failures = await self._guard.verify()
         if failures:
             return FINISH_REJECTED + "\n".join(failures), None
+        failures = self._guard.verify_summary(summary)
+        if failures:
+            return FINISH_REJECTED + "\n".join(failures), None
         return "принято", summary.strip()

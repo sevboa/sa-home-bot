@@ -8,6 +8,9 @@ from sa_home_bot.devlab.agent.sandbox import Sandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import without_xdist
 
+VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
+VERDICT_REWORK = "ВЕРДИКТ: доработать"
+
 
 def changed_test_files(digests: Mapping[str, str]) -> list[str]:
     return sorted(
@@ -38,9 +41,24 @@ class FinishGuard:
         if spec.diff_prefixes:
             changed = [p for p in changed if p.startswith(spec.diff_prefixes)]
         if not changed:
+            if spec.allow_no_changes:
+                return await self.verify_green()
             where = f" в {', '.join(spec.diff_prefixes)}" if spec.diff_prefixes else ""
             return [f"нет изменений{where}: правок не сделано, задача не выполнена"]
         return await self.verify_green()
+
+    def verify_summary(self, summary: str) -> list[str]:
+        spec = self._spec
+        if not spec.require_verdict:
+            return []
+        for line in summary.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(VERDICT_ACCEPTED) or stripped.startswith(VERDICT_REWORK):
+                return []
+        return [
+            "нет вердикта: добавь в summary строку "
+            "«ВЕРДИКТ: принято» или «ВЕРДИКТ: доработать» и пункты замечаний"
+        ]
 
     async def verify_green(self) -> list[str]:
         spec = self._spec
