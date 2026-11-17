@@ -20,6 +20,11 @@ ROUTE_ROUNDS = 3
 ROUTE_RETRY_S = 5.0
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
+MODELS_ANY = "any"
+MODELS_LOCAL = "local"
+MODELS_REMOTE = "remote"
+MODEL_KINDS = (MODELS_ANY, MODELS_LOCAL, MODELS_REMOTE)
+
 
 def parse_context(raw: Any) -> int:
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
@@ -61,7 +66,7 @@ class CatalogEntry:
 
 
 class Catalog(Protocol):
-    async def names(self) -> list[str]: ...
+    async def names(self, kind: str = MODELS_ANY) -> list[str]: ...
 
     async def entries(self, model: str, fresh: bool = False) -> list[CatalogEntry]: ...
 
@@ -93,8 +98,15 @@ class ModelCatalog:
             self._loaded_at = now
         return self._cache
 
-    async def names(self) -> list[str]:
-        return sorted({entry.name for entry in await self._all() if entry.url})
+    async def names(self, kind: str = MODELS_ANY) -> list[str]:
+        all_entries = await self._all()
+        if kind == MODELS_LOCAL:
+            filtered = [e for e in all_entries if e.url and not e.remote]
+        elif kind == MODELS_REMOTE:
+            filtered = [e for e in all_entries if e.url and e.remote]
+        else:
+            filtered = [e for e in all_entries if e.url]
+        return sorted({entry.name for entry in filtered})
 
     async def entries(self, model: str, fresh: bool = False) -> list[CatalogEntry]:
         return [e for e in await self._all(fresh) if e.name == model and e.url]

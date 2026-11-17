@@ -13,7 +13,7 @@ from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker,
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
-from sa_home_bot.devlab.executor.routing import GatewayModels, ModelCatalog
+from sa_home_bot.devlab.executor.routing import MODELS_ANY, GatewayModels, ModelCatalog
 from sa_home_bot.devlab.executor.runner import TestRunner
 from sa_home_bot.devlab.executor.service import ExecutorService
 from sa_home_bot.devlab.executor.sweep import sweep_orphans
@@ -100,15 +100,16 @@ async def run_executor(
     )
     tester = TestWorker(hub, runner, worker_settings, busy)
     slots = SlotRegistry()
-    slot_dirs = [slot_dir(work_dir, i) for i in range(cfg.agent_slots)]
+    kinds = cfg.agent_slot_models or [MODELS_ANY] * cfg.agent_slots
+    slot_dirs = [slot_dir(work_dir, i) for i in range(len(kinds))]
     sandbox_factory = sandboxes or podman_sandbox_factory(
         cfg,
         pause=gate,
-        cpus=cfg.agent_cpus / cfg.agent_slots,
-        memory=split_memory(cfg.agent_memory, cfg.agent_slots),
+        cpus=cfg.agent_cpus / len(kinds),
+        memory=split_memory(cfg.agent_memory, len(kinds)),
     )
     agents: list[AgentWorker] = []
-    for directory in slot_dirs:
+    for i, directory in enumerate(slot_dirs):
         directory.mkdir(parents=True, exist_ok=True)
         agents.append(
             AgentWorker(
@@ -119,6 +120,7 @@ async def run_executor(
                     **{**vars(worker_settings), "work_dir": directory},
                     limits=agent_limits(cfg),
                     slots=slots,
+                    models_kind=kinds[i],
                 ),
                 catalog,
                 busy,
@@ -130,10 +132,11 @@ async def run_executor(
     lifespan.install_signal_handlers()
     await server.start()
     log.info(
-        "Служба devlab (исполнитель) запущена: хаб %s, каталог %s, агентских слотов %d",
+        "Служба devlab (исполнитель) запущена: хаб %s, каталог %s, агентских слотов %d (%s)",
         hub.url,
         work_dir,
-        cfg.agent_slots,
+        len(kinds),
+        ", ".join(kinds),
     )
     neighbor = start_following(gate, cfg.neighbor_socket or settings.llm.socket)
 

@@ -393,8 +393,14 @@ class StaticCatalog:
     def __init__(self, *entries: CatalogEntry) -> None:
         self.items = list(entries)
 
-    async def names(self) -> list[str]:
-        return sorted({e.name for e in self.items})
+    async def names(self, kind: str = "any") -> list[str]:
+        if kind == "local":
+            filtered = [e for e in self.items if not e.remote]
+        elif kind == "remote":
+            filtered = [e for e in self.items if e.remote]
+        else:
+            filtered = self.items
+        return sorted({e.name for e in filtered})
 
     async def entries(self, model: str, fresh: bool = False) -> list[CatalogEntry]:
         return [e for e in self.items if e.name == model]

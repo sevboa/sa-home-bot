@@ -95,6 +95,29 @@ async def test_catalog_gives_executor_gateway_urls_and_clients_do_not(env):
     assert await ModelCatalog(hub).names() == ["glm"]
 
 
+async def test_catalog_filters_by_model_kind(env):
+    for name, url, remote in (
+        ("local-model", "http://l:8721", False),
+        ("remote-model", "http://r:8721", True),
+    ):
+        token = await env.store.issue_token(name, protocol.ROLE_GATEWAY)
+        principal = await env.store.authenticate(token)
+        beat = {
+            protocol.FIELD_MODELS: [
+                {protocol.MODEL_NAME: name, protocol.MODEL_REMOTE: remote}
+            ],
+            protocol.FIELD_URL: url,
+        }
+        await env.store.heartbeat(principal, beat)
+    hub = ExecutorHub(env.hub_url, env.executor_token)
+    env.hubs.append(hub)
+
+    catalog = ModelCatalog(hub)
+    assert await catalog.names() == ["local-model", "remote-model"]
+    assert await catalog.names("local") == ["local-model"]
+    assert await catalog.names("remote") == ["remote-model"]
+
+
 async def test_failover_switches_gateway_keeping_dialog():
     dead, dead_bodies = await gateway_server(status=503)
     alive, alive_bodies = await gateway_server(usage={"prompt_tokens": 5, "completion_tokens": 2})
