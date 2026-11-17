@@ -458,10 +458,7 @@ def watch_command(
             if messages:
                 for message in messages:
                     kind = message["kind"]
-                    if kinds is not None:
-                        if kind in kinds:
-                            print(watch_line(message), flush=True)
-                    elif kind not in WATCH_DEFAULT_SKIP:
+                    if kind in kinds if kinds is not None else kind not in WATCH_DEFAULT_SKIP:
                         print(watch_line(message), flush=True)
                 call(url, token, protocol.TOOL_ACK, {"upto": fresh})
                 cursor = fresh
