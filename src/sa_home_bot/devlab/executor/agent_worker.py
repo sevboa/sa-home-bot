@@ -36,7 +36,7 @@ from sa_home_bot.devlab.executor.mirror import (
     check_project_name,
     remote_url,
 )
-from sa_home_bot.devlab.executor.routing import Catalog, CatalogEntry
+from sa_home_bot.devlab.executor.routing import MODELS_ANY, Catalog, CatalogEntry
 from sa_home_bot.devlab.executor.spec import (
     SPEC_FILE,
     ProjectSpec,
@@ -162,6 +162,7 @@ class AgentSettings(WorkerSettings):
     push_interval_s: float = PUSH_INTERVAL_S
     retry_interval_s: float = RETRY_INTERVAL_S
     slots: SlotRegistry = field(default_factory=SlotRegistry)
+    models_kind: str = MODELS_ANY
 
 
 @dataclass
@@ -371,7 +372,7 @@ class AgentWorker(WorkerLoops):
         available: list[str] = []
         if resumed is None:
             try:
-                available = await self._catalog.names()
+                available = await self._catalog.names(self._settings.models_kind)
             except HubRequestError as exc:
                 log.info("Каталог моделей недоступен: %s", self.scrub(str(exc)))
                 return False

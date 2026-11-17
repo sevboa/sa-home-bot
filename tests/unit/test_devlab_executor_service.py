@@ -261,6 +261,20 @@ async def test_executor_sweeps_every_agent_slot_dir(env, rig, monkeypatch):
     assert (exec_dir / "agent-1").is_dir()
 
 
+async def test_agent_slot_models_creates_workers_with_different_kinds(env, rig, monkeypatch):
+    calls = []
+
+    async def record(wrapper, work_dirs, keep):
+        calls.append(list(work_dirs))
+
+    monkeypatch.setattr(executor_app, "sweep_orphans", record)
+    await rig.start_executor(monkeypatch, agent_slot_models=["local", "remote"])
+    await wait_until(lambda: calls, timeout=DONE_TIMEOUT_S)
+    exec_dir = env.tmp_path / "exec"
+    assert calls == [[exec_dir, exec_dir / "agent-1"]]
+    assert (exec_dir / "agent-1").is_dir()
+
+
 @pytest.mark.parametrize(
     ("memory", "slots", "expected"),
     [("12g", 1, "12g"), ("12g", 2, "6144m"), ("3g", 2, "2048m"), ("8192m", 4, "2048m")],
