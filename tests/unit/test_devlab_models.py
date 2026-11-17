@@ -218,6 +218,27 @@ async def test_model_params_are_defaults_under_request_fields(
     assert provider.received[0]["reasoning_budget_tokens"] == expected
 
 
+@pytest.mark.parametrize(
+    ("spec_extra", "request_extra", "expected"),
+    [
+        ({"override": {"temperature": 1.0}}, {"temperature": 0.0}, {"temperature": 1.0}),
+        ({}, {"temperature": 0.0}, {"temperature": 0.0}),
+        (
+            {"params": {"top_p": 0.9}, "override": {"temperature": 1.0}},
+            {},
+            {"temperature": 1.0, "top_p": 0.9},
+        ),
+    ],
+)
+async def test_model_override_wins_over_request_fields(
+    setup, provider, spec_extra, request_extra, expected
+):
+    _, client = await setup(**spec_extra)
+    resp = await client.post(protocol.HTTP_CHAT_PATH, json={**CHAT, **request_extra}, headers=AUTH)
+    await resp.read()
+    assert {k: v for k, v in provider.received[0].items() if k in expected} == expected
+
+
 @pytest.mark.parametrize(("configured", "expected"), [({}, 300), ({"read_timeout_s": 900}, 900)])
 async def test_upstream_read_timeout_comes_from_model_config(configured, expected):
     backend = build_backend(MODEL, DevlabModelConfig(**configured))

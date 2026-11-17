@@ -305,6 +305,7 @@ class DevlabModelConfig(BaseModel):
     remote: bool = True
     report_cost: bool = False
     params: dict[str, Any] = Field(default_factory=dict)
+    override: dict[str, Any] = Field(default_factory=dict)
     read_timeout_s: int = Field(default=300, ge=1)
     gguf: str = ""
     threads: int = Field(default=0, ge=0)
