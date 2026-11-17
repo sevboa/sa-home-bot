@@ -10,7 +10,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ WAIT_MAX_HUB_FAILURES = 3
 WATCH_PAGE = 100
 WATCH_PAYLOAD_CHARS = 300
 WATCH_INTERVAL_S = 10.0
+WATCH_DEFAULT_SKIP = (protocol.MSG_STARTED, protocol.MSG_STEP_DONE)
 EXIT_TIMEOUT = 124
 SNAPSHOT_MESSAGE = "devlab snapshot"
 SNAPSHOT_IDENTITY = {
@@ -410,6 +411,7 @@ def watch_command(
     *,
     interval: float = WATCH_INTERVAL_S,
     timeout: float = WAIT_TIMEOUT_S,
+    kinds: Collection[str] | None = None,
     token_path: str = TOKEN_PATH,
     call: Callable[[str, str, str, dict[str, Any]], dict[str, Any]] = call_tool,
     sleep: Callable[[float], None] = time.sleep,
@@ -455,7 +457,12 @@ def watch_command(
             fresh = reply.get(protocol.FIELD_CURSOR, cursor)
             if messages:
                 for message in messages:
-                    print(watch_line(message), flush=True)
+                    kind = message["kind"]
+                    if kinds is not None:
+                        if kind in kinds:
+                            print(watch_line(message), flush=True)
+                    elif kind not in WATCH_DEFAULT_SKIP:
+                        print(watch_line(message), flush=True)
                 call(url, token, protocol.TOOL_ACK, {"upto": fresh})
                 cursor = fresh
         except HubUnavailable as exc:
