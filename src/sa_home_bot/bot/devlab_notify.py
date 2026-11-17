@@ -10,8 +10,6 @@ from typing import Any
 from aiogram.types import InlineKeyboardMarkup
 
 from sa_home_bot.bot import ai_lines
-from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
-from sa_home_bot.bot.away import AwayService
 from sa_home_bot.bot.notifier import Notifier, admin_subs
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
@@ -20,8 +18,7 @@ from sa_home_bot.bot.ui.keyboards import button, markup
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import OUTBOX_KIND_TASK, Store
 from sa_home_bot.devlab import protocol
-from sa_home_bot.llm_chat import ACTION_CHAT
-from sa_home_bot.proto.addresses import LLM_ADDRESS, Address
+from sa_home_bot.proto.addresses import Address
 from sa_home_bot.utils.text import clip
 
 log = logging.getLogger(__name__)
@@ -50,19 +47,6 @@ LEADS = {
     protocol.MSG_FAILED: ai_lines.DEVLAB_FAILED_TEXT,
     protocol.MSG_STALLED: ai_lines.DEVLAB_STALLED_TEXT,
 }
-LEAD_EVENTS = {
-    protocol.MSG_QUESTION: "агент задал вам вопрос и ждёт ответа",
-    protocol.MSG_DONE: "агент закончил порученное задание",
-    protocol.MSG_FAILED: "агент не справился с заданием",
-    protocol.MSG_STALLED: "работа агента встала, вестей от него давно нет",
-}
-LEAD_INSTRUCTION = (
-    "Скажи хозяину одну-две короткие фразы в своём образе: {event}. "
-    "Подробности (числа, суммы, названия моделей и веток, номера, текст вопроса или отчёта) "
-    "будут приведены ниже отдельным блоком, поэтому их не называй и не пересказывай, "
-    "никаких цифр. Без списков и без приветствия."
-)
-LEAD_MAX_CHARS = 400
 BODY_FIELDS = {
     protocol.MSG_QUESTION: protocol.PAYLOAD_TEXT,
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
@@ -152,8 +136,8 @@ def facts_block(message: dict[str, Any], max_chars: int) -> str:
     return "\n".join(lines)
 
 
-def compose_text(message: dict[str, Any], max_chars: int, lead: str | None = None) -> str:
-    text = f"{lead or LEADS[message['kind']]}\n\n{facts_block(message, max_chars)}"
+def compose_text(message: dict[str, Any], max_chars: int) -> str:
+    text = f"{LEADS[message['kind']]}\n\n{facts_block(message, max_chars)}"
     if message[protocol.FIELD_KIND] == protocol.MSG_QUESTION:
         text += f"\n\n{ai_lines.DEVLAB_ANSWER_HINT}"
     return text
@@ -231,40 +215,9 @@ class DevlabNotifier:
             timeout=CALL_TIMEOUT_S,
         )
 
-    async def _compose_lead(self, kind: str) -> str | None:
-        node_link = self._get_node_link()
-        if node_link is None:
-            return None
-        try:
-            if await AwayService(self._store, self._config).load() is not None:
-                return None
-            args = {
-                "messages": [
-                    {"role": "user", "content": LEAD_INSTRUCTION.format(event=LEAD_EVENTS[kind])}
-                ],
-                "role": "persona",
-                "think": False,
-            }
-            result = await node_link.command(
-                ACTION_CHAT,
-                args,
-                dst=LLM_ADDRESS,
-                timeout=self._config.devlab_notify.llm_timeout_s,
-            )
-            if not isinstance(result, dict) or result.get("done_reason") == "length":
-                return None
-            raw = str(result.get("response") or "").strip()
-            if not raw:
-                return None
-            return ALFRED_PREFIX_HTML + html.escape(clip(raw, LEAD_MAX_CHARS, at_word=True))
-        except Exception:
-            log.warning("devlab_notify: вступление не получено", exc_info=True)
-            return None
-
     async def _deliver(self, message: dict[str, Any]) -> None:
         subs = admin_subs(self._book)
-        lead = await self._compose_lead(message[protocol.FIELD_KIND]) if subs else None
-        text = compose_text(message, self._config.devlab_notify.facts_max_chars, lead)
+        text = compose_text(message, self._config.devlab_notify.facts_max_chars)
         job_id = str(message[protocol.FIELD_JOB][protocol.FIELD_ID])
         seq = message[protocol.FIELD_SEQ]
         keyboard = notice_keyboard(message[protocol.FIELD_KIND], job_id)

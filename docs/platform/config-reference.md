@@ -236,7 +236,6 @@ OLLAMA_NUM_PARALLEL>1 (риск нехватки VRAM на две одновре
 
 - `enabled: bool = false` — выключено: задача наблюдателя не стартует.
 - `poll_s: float = 30` — период опроса ящика хаба.
-- `llm_timeout_s: float = 90` — таймаут вступления через gemma.
 - `facts_max_chars: int = 1500` — обрезка текста вопроса / сводки / причины в блоке фактов.
 
 ## DevlabModelsConfig

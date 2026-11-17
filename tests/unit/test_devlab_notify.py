@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
 from sa_home_bot.bot import ai_lines, devlab_notify
-from sa_home_bot.bot.away import AwayState
 from sa_home_bot.bot.devlab_notify import DevlabNotifier
 from sa_home_bot.config import Settings
-from sa_home_bot.db.store import ALFRED_AWAY_KEY
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.errors import ServiceUnavailableError
-from sa_home_bot.proto.messages import ERR_UNAVAILABLE, ProtoError
 from tests.unit.support.factories import make_book, make_subscription
 from tests.unit.support.fakes import FakeNodeLink, FakeNotifier
 
@@ -248,133 +243,22 @@ async def test_question_sent_with_buttons(store):
     assert notifier.markups[0] is not None
 
 
-def chat_link(result):
-    return FakeNodeLink(results={**inbox([message(6)]), "chat": result})
-
-
-def chat_calls(link):
-    return [(a, args, dst) for a, args, dst in link.calls if a == "chat"]
-
-
-async def test_gemma_lead_replaces_stub_and_facts_stay_intact(store):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    link = chat_link({"response": "Сэр, агент ждёт вашего слова <b>"})
+@pytest.mark.parametrize(
+    "kind",
+    [protocol.MSG_QUESTION, protocol.MSG_DONE, protocol.MSG_FAILED, protocol.MSG_STALLED],
+)
+async def test_delivery_uses_stub_lead_without_llm(store, kind):
+    status = (
+        protocol.STATUS_RUNNING if kind == protocol.MSG_STALLED else protocol.STATUS_WAITING_OWNER
+    )
+    link = FakeNodeLink(results=inbox([message(6, kind, status=status)]))
     notifier_obj, notifier = make(store, link)
+    await store.set_state(devlab_notify.CURSOR_KEY, "5")
     await notifier_obj.tick()
+    assert notifier.sent
     text = notifier.sent[0][1]
-    assert text.startswith("<b>Альфред:</b> Сэр, агент ждёт вашего слова &lt;b&gt;\n\n")
-    assert ai_lines.DEVLAB_QUESTION_TEXT not in text
-    assert "$0.0123" in text and "agent/j1" in text and "Какой &lt;ключ&gt;?" in text
-    ((_, args, dst),) = chat_calls(link)
-    assert args["role"] == "persona" and args["think"] is False
-    assert "chat_id" not in args
-    assert dst.service == "llm"
-    prompt = args["messages"][0]["content"]
-    assert not any(ch.isdigit() for ch in prompt)
-    for fact in ("glm", "agent/j1", "sa-home-bot", "Какой"):
-        assert fact not in prompt
-
-
-async def test_one_chat_call_for_all_admins(store):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    link = chat_link({"response": "Сэр."})
-    settings = Settings()
-    settings.devlab_notify.enabled = True
-    book = make_book(make_subscription(OWNER), make_subscription(33))
-    notifier = FakeNotifier()
-    notifier_obj = DevlabNotifier(
-        get_node_link=lambda: link, store=store, config=settings, book=book, notifier=notifier
-    )
-    await notifier_obj.tick()
-    assert len(chat_calls(link)) == 1
-    assert len(notifier.sent) == 2
-    assert notifier.sent[0][1] == notifier.sent[1][1]
-
-
-async def test_away_skips_chat(store):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    now = datetime.now(tz=UTC)
-    await store.set_state(
-        ALFRED_AWAY_KEY, AwayState(until=now + timedelta(hours=2), started_at=now).to_json()
-    )
-    link = chat_link({"response": "Сэр."})
-    notifier_obj, notifier = make(store, link)
-    await notifier_obj.tick()
-    assert chat_calls(link) == []
-    assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        TimeoutError(),
-        ServiceUnavailableError("нет связи"),
-        ProtoError(ERR_UNAVAILABLE, "нет"),
-        RuntimeError("сбой"),
-    ],
-)
-async def test_chat_failure_falls_back_to_stub(store, error):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-
-    class Link(FakeNodeLink):
-        async def command(self, action, args=None, dst=None, *, timeout=None):
-            if action == "chat":
-                self.calls.append((action, args or {}, dst))
-                raise error
-            return await super().command(action, args, dst, timeout=timeout)
-
-    link = Link(results=inbox([message(6)]))
-    notifier_obj, notifier = make(store, link)
-    assert await notifier_obj.tick() == 1
-    assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
-
-
-async def test_away_load_failure_falls_back_to_stub(store, monkeypatch):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-
-    async def broken(self):
-        raise RuntimeError("база")
-
-    monkeypatch.setattr(devlab_notify.AwayService, "load", broken)
-    link = chat_link({"response": "Сэр."})
-    notifier_obj, notifier = make(store, link)
-    assert await notifier_obj.tick() == 1
-    assert chat_calls(link) == []
-    assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
-
-
-@pytest.mark.parametrize(
-    "result", [{"response": ""}, {"response": "  "}, {"response": "Сэр", "done_reason": "length"}]
-)
-async def test_empty_or_truncated_reply_falls_back(store, result):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    notifier_obj, notifier = make(store, chat_link(result))
-    await notifier_obj.tick()
-    assert notifier.sent[0][1].startswith(ai_lines.DEVLAB_QUESTION_TEXT)
-
-
-async def test_chat_uses_configured_timeout(store):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    seen = {}
-
-    class Link(FakeNodeLink):
-        async def command(self, action, args=None, dst=None, *, timeout=None):
-            seen[action] = timeout
-            return await super().command(action, args, dst, timeout=timeout)
-
-    link = Link(results={**inbox([message(6)]), "chat": {"response": "Сэр."}})
-    notifier_obj, _ = make(store, link)
-    notifier_obj._config.devlab_notify.llm_timeout_s = 7.5
-    await notifier_obj.tick()
-    assert seen["chat"] == 7.5
-
-
-async def test_long_lead_is_clipped(store):
-    await store.set_state(devlab_notify.CURSOR_KEY, "5")
-    notifier_obj, notifier = make(store, chat_link({"response": "слово " * 200}))
-    await notifier_obj.tick()
-    lead = notifier.sent[0][1].split("\n\n")[0]
-    assert len(lead) <= len("<b>Альфред:</b> ") + devlab_notify.LEAD_MAX_CHARS + 5
+    assert text.startswith(devlab_notify.LEADS[kind])
+    assert [action for action, _, _ in link.calls] == [protocol.ACTION_OWNER_INBOX]
 
 
 STALLED_PAYLOAD = {protocol.PAYLOAD_SILENT_MIN: 42, protocol.PAYLOAD_EXECUTOR_ALIVE: False}
