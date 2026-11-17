@@ -398,6 +398,111 @@ async def finish(store, job_id):
     )
 
 
+async def run_watch(hub, tmp_path, *, token=None, **kwargs):
+    client, _, real = hub
+    sleeps = []
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    code = await asyncio.to_thread(
+        snapshot.watch_command,
+        settings_for(client),
+        token_path=wait_token(tmp_path, token or real),
+        sleep=sleep,
+        clock=lambda: clock["now"],
+        **kwargs,
+    )
+    return code, sleeps
+
+
+async def test_watch_prints_only_messages_after_start(hub, tmp_path, capsys):
+    _, store, _ = hub
+    first = await queue_test_job(store)
+    await finish(store, first)
+    second = await queue_test_job(store)
+    await finish(store, second)
+    third = await queue_test_job(store)
+    calls = []
+    inbox_calls = []
+
+    def call(url, tok, name, arguments):
+        calls.append((name, arguments))
+        inbox_calls.append(arguments)
+        if name == protocol.TOOL_INBOX and len(inbox_calls) == 3:
+            asyncio.run_coroutine_threadsafe(finish(store, third), loop).result(5)
+        return snapshot.call_tool(url, tok, name, arguments)
+
+    loop = asyncio.get_running_loop()
+    code, _ = await run_watch(hub, tmp_path, timeout=0.1, call=call)
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    line = json.loads(lines[0])
+    assert line["seq"] > 0
+    assert line["job_id"] == third
+    assert line["kind"] == protocol.MSG_TEST_DONE
+    assert json.loads(line["payload"]) == {
+        protocol.PAYLOAD_EXIT_CODE: 0,
+        protocol.PAYLOAD_DURATION_S: 1.0,
+        protocol.PAYLOAD_SUMMARY: dict.fromkeys(protocol.SUMMARY_KEYS, 0),
+    }
+    left = await store.queue.inbox(CLIENT)
+    assert [(m.job_id, m.read) for m in left] == [(first, True), (second, True), (third, True)]
+    acks = [arguments for name, arguments in calls if name == protocol.TOOL_ACK]
+    assert acks == [{"upto": line["seq"]}]
+    code, _ = await run_watch(hub, tmp_path, timeout=0.1)
+    assert code == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_watch_truncates_long_payload(tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text("t\n")
+    calls = []
+
+    def call(url, tok, name, arguments):
+        if name != protocol.TOOL_INBOX:
+            return {}
+        calls.append(arguments)
+        if len(calls) == 1:
+            return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: 0}
+        if len(calls) == 2:
+            return {
+                protocol.FIELD_MESSAGES: [
+                    {"seq": 1, "job_id": "j1", "kind": "k", "payload": "x" * 400}
+                ],
+                protocol.FIELD_CURSOR: 1,
+            }
+        return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: arguments["since"]}
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    code = snapshot.watch_command(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        timeout=0.1,
+        token_path=str(token_file),
+        call=call,
+        sleep=lambda seconds: None,
+        clock=clock,
+    )
+    assert code == 0
+    line = json.loads(capsys.readouterr().out.strip())
+    assert set(line) == {"seq", "job_id", "kind", "payload"}
+    assert line["seq"] == 1
+    assert line["job_id"] == "j1"
+    assert line["kind"] == "k"
+    assert len(line["payload"]) == snapshot.WATCH_PAYLOAD_CHARS
+    assert line["payload"].startswith('"x')
+    assert line["payload"].count("x") == 299
+
+
 async def test_wait_times_out_with_code_124(hub, tmp_path, capsys):
     _, store, token = hub
     job_id = await queue_test_job(store)
