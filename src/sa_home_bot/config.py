@@ -266,7 +266,6 @@ LLAMACPP_DEFAULTS: dict[str, Any] = {
 class DevlabNotifyConfig(BaseModel):
     enabled: bool = False
     poll_s: float = Field(default=30.0, gt=0)
-    llm_timeout_s: float = Field(default=90.0, gt=0)
     facts_max_chars: int = Field(default=1500, ge=100)
 
 
