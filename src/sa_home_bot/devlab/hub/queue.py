@@ -222,6 +222,7 @@ class HubQueue:
         task: str,
         priority: int = 0,
         base_branch: str | None = None,
+        profile: str = protocol.DEFAULT_PROFILE,
     ) -> Job:
         if not model.strip() or not task.strip():
             raise HubError("у задания должны быть модель и task.md")
@@ -229,14 +230,18 @@ class HubQueue:
             raise HubError("приоритет — целое число")
         if base_branch is not None and not _valid_base_branch(base_branch):
             raise HubError(f"базовая ветка: {protocol.BASE_BRANCH_PREFIX}<имя>, без пробелов и ..")
+        profile = profile.strip()
+        if not PROJECT_NAME_RE.match(profile):
+            raise HubError("профиль: латиница, цифры, дефис, подчёркивание")
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
                 raise HubError(f"проекта {project!r} нет")
             job_id = await self._free_id(conn)
+            params = json.dumps({protocol.PARAM_PROFILE: profile}, ensure_ascii=False)
             await conn.execute(
                 "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
-                " status, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, created, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     protocol.JOB_KIND_AGENT,
@@ -248,6 +253,7 @@ class HubQueue:
                     priority,
                     protocol.STATUS_QUEUED,
                     utc_now().isoformat(),
+                    params,
                 ),
             )
             return await self._load(conn, job_id)

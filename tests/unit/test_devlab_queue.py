@@ -142,6 +142,36 @@ async def test_submit_defaults_and_validation(queue):
     assert await queue.projects() == [PROJECT]
 
 
+@pytest.mark.parametrize(
+    "profile, expected",
+    [
+        (None, "executor"),
+        ("tester", "tester"),
+        ("executor-xs", "executor-xs"),
+        ("docs", "docs"),
+        ("devops", "devops"),
+    ],
+)
+async def test_submit_profile(queue, profile, expected):
+    kwargs = {"profile": profile} if profile is not None else {}
+    job = await queue.submit(CLIENT, PROJECT, MODEL, TASK, **kwargs)
+    assert job.params == {S.PARAM_PROFILE: expected}
+
+
+@pytest.mark.parametrize("bad_profile", ["Плохой", "", "a b", "A", "a.b"])
+async def test_submit_rejects_bad_profile(queue, bad_profile):
+    with pytest.raises(HubError, match="профиль"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, profile=bad_profile)
+
+
+async def test_resume_preserves_profile(queue):
+    job = await finished_job(queue, S.MSG_FAILED)
+    assert job.params[S.PARAM_PROFILE] == "executor"
+    await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME, {S.PAYLOAD_TEXT: "замечание"})
+    resumed = await queue.get_job(job.id)
+    assert resumed.params[S.PARAM_PROFILE] == "executor"
+
+
 async def test_claim_order_priority_then_age(queue):
     low = await submit(queue)
     high = await submit(queue, priority=5)
