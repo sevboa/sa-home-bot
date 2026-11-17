@@ -503,6 +503,83 @@ def test_watch_truncates_long_payload(tmp_path, capsys):
     assert line["payload"].count("x") == 299
 
 
+@pytest.mark.parametrize(
+    ("kinds", "messages", "expected_kinds"),
+    [
+        (
+            None,
+            [
+                {"seq": 1, "job_id": "j1", "kind": protocol.MSG_STARTED, "payload": {}},
+                {"seq": 2, "job_id": "j1", "kind": protocol.MSG_STEP_DONE, "payload": {}},
+                {"seq": 3, "job_id": "j1", "kind": protocol.MSG_DONE, "payload": {}},
+            ],
+            [protocol.MSG_DONE],
+        ),
+        (
+            [protocol.MSG_STEP_DONE],
+            [
+                {"seq": 1, "job_id": "j1", "kind": protocol.MSG_STARTED, "payload": {}},
+                {"seq": 2, "job_id": "j1", "kind": protocol.MSG_STEP_DONE, "payload": {}},
+                {"seq": 3, "job_id": "j1", "kind": protocol.MSG_DONE, "payload": {}},
+            ],
+            [protocol.MSG_STEP_DONE],
+        ),
+        (
+            [protocol.MSG_DONE, protocol.MSG_FAILED],
+            [
+                {"seq": 1, "job_id": "j1", "kind": protocol.MSG_DONE, "payload": {}},
+                {"seq": 2, "job_id": "j1", "kind": protocol.MSG_FAILED, "payload": {}},
+                {"seq": 3, "job_id": "j1", "kind": protocol.MSG_STARTED, "payload": {}},
+            ],
+            [protocol.MSG_DONE, protocol.MSG_FAILED],
+        ),
+    ],
+)
+def test_watch_kinds_filter(tmp_path, capsys, kinds, messages, expected_kinds):
+    token_file = tmp_path / "token"
+    token_file.write_text("t\n")
+    calls = []
+    inbox_count = [0]
+
+    def call(url, tok, name, arguments):
+        if name == protocol.TOOL_ACK:
+            calls.append((name, arguments))
+            return {protocol.FIELD_OK: True}
+        if name != protocol.TOOL_INBOX:
+            return {}
+        inbox_count[0] += 1
+        calls.append((name, arguments))
+        if inbox_count[0] == 1:
+            return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: 0}
+        if inbox_count[0] == 2:
+            return {protocol.FIELD_MESSAGES: messages, protocol.FIELD_CURSOR: len(messages)}
+        return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: arguments["since"]}
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    code = snapshot.watch_command(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        timeout=0.1,
+        token_path=str(token_file),
+        call=call,
+        sleep=lambda seconds: None,
+        clock=clock,
+        kinds=kinds,
+    )
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == len(expected_kinds)
+    for i, line in enumerate(lines):
+        data = json.loads(line)
+        assert data["kind"] == expected_kinds[i]
+    acks = [arguments for name, arguments in calls if name == protocol.TOOL_ACK]
+    assert acks == [{"upto": len(messages)}]
+
+
 async def test_wait_times_out_with_code_124(hub, tmp_path, capsys):
     _, store, token = hub
     job_id = await queue_test_job(store)

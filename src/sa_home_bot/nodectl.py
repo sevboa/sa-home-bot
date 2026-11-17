@@ -151,6 +151,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="wait: предел ожидания, с (по умолчанию 1800), по истечении код 124; "
         "watch: предел наблюдения (по умолчанию тот же)",
     )
+    p.add_argument(
+        "--kinds",
+        default="",
+        help="watch: виды событий через запятую; по умолчанию все, кроме started и step_done",
+    )
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
     )
@@ -549,12 +554,14 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
             )
         if args.devlab_command == "watch":
+            kinds = [k.strip() for k in args.kinds.split(",") if k.strip()] or None
             return devlab_snapshot.watch_command(
                 settings,
                 interval=(
                     args.interval if args.interval is not None else devlab_snapshot.WATCH_INTERVAL_S
                 ),
                 timeout=args.timeout,
+                kinds=kinds,
             )
         if args.devlab_command in ("base", "fetch", "drop"):
             return devlab_snapshot.branch_command(
