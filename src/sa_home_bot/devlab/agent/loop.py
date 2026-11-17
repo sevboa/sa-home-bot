@@ -422,10 +422,7 @@ class AgentLoop:
         summary = args.get("summary")
         if not isinstance(summary, str) or not summary.strip():
             return "ошибка: finish требует непустой summary", None
-        failures = await self._guard.verify()
-        if failures:
-            return FINISH_REJECTED + "\n".join(failures), None
-        failures = self._guard.verify_summary(summary)
+        failures = self._guard.verify_summary(summary) or await self._guard.verify()
         if failures:
             return FINISH_REJECTED + "\n".join(failures), None
         return "принято", summary.strip()

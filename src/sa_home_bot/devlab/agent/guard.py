@@ -51,10 +51,11 @@ class FinishGuard:
         spec = self._spec
         if not spec.require_verdict:
             return []
-        for line in summary.splitlines():
-            stripped = line.strip()
-            if stripped.startswith(VERDICT_ACCEPTED) or stripped.startswith(VERDICT_REWORK):
-                return []
+        if any(
+            line.strip().startswith((VERDICT_ACCEPTED, VERDICT_REWORK))
+            for line in summary.splitlines()
+        ):
+            return []
         return [
             "нет вердикта: добавь в summary строку "
             "«ВЕРДИКТ: принято» или «ВЕРДИКТ: доработать» и пункты замечаний"
