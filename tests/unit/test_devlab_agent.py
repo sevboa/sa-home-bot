@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import pytest
 from aiohttp import web
@@ -31,7 +32,7 @@ from sa_home_bot.devlab.agent.model import (
     parse_reply,
 )
 from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER, with_flow_reminder
-from sa_home_bot.devlab.agent.sandbox import LocalSandbox, SandboxPathError
+from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
     TOOL_EDIT_FILE,
@@ -621,6 +622,33 @@ def test_guard_rejection_texts_ask_to_fix_and_retry():
 
     assert "исправь и вызови" in FINISH_REJECTED
     assert "исправь и вызови" in STEP_REJECTED
+
+
+class GateSandbox(LocalSandbox):
+    def __init__(self, root: Path, state: dict) -> None:
+        super().__init__(root)
+        self._state = state
+
+    async def exec(self, argv, timeout_s):
+        self._state["now"] += 1
+        self._state["max"] = max(self._state["max"], self._state["now"])
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            self._state["now"] -= 1
+        return ExecResult(0, "ok")
+
+
+@pytest.mark.parametrize("shared", [True, False])
+async def test_full_runs_between_slots_go_by_turn(tmp_path, shared):
+    state = {"now": 0, "max": 0}
+    lock = asyncio.Lock() if shared else None
+    guards = [
+        FinishGuard(sandbox, AgentSpec(test_argv=GREEN_TEST), lock)
+        for sandbox in (GateSandbox(tmp_path, state) for _ in range(2))
+    ]
+    await asyncio.gather(*(guard.verify_green() for guard in guards))
+    assert state["max"] == (1 if shared else 2)
 
 
 async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):

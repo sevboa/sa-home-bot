@@ -83,6 +83,7 @@ class SlotRegistry:
     def __init__(self) -> None:
         self._bases: Counter[str] = Counter()
         self._lock = asyncio.Lock()
+        self.heavy = asyncio.Lock()
 
     @property
     def busy_bases(self) -> list[str]:
@@ -474,7 +475,7 @@ class AgentWorker(WorkerLoops):
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id), spend),
             ToolBox(sandbox, spec),
-            FinishGuard(sandbox, spec),
+            FinishGuard(sandbox, spec, self._settings.slots.heavy),
             self._limits_for(spend, entries),
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),

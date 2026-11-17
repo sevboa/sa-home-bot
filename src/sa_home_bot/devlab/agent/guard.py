@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
@@ -21,9 +22,15 @@ def _is_test_file(name: str) -> bool:
 
 
 class FinishGuard:
-    def __init__(self, sandbox: Sandbox, spec: AgentSpec) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        spec: AgentSpec,
+        heavy: asyncio.Lock | None = None,
+    ) -> None:
         self._sandbox = sandbox
         self._spec = spec
+        self._heavy = heavy or asyncio.Lock()
 
     async def verify(self) -> list[str]:
         spec = self._spec
@@ -38,13 +45,16 @@ class FinishGuard:
     async def verify_green(self) -> list[str]:
         spec = self._spec
         failures: list[str] = []
-        if spec.test_argv:
-            result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)
-            if not result.ok:
-                failures.append(
-                    "тесты не зелёные:\n" + result.summary(spec.output_chars, spec.test_timeout_s)
-                )
-        return failures + await self._checks()
+        async with self._heavy:
+            if spec.test_argv:
+                result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)
+                if not result.ok:
+                    failures.append(
+                        "тесты не зелёные:\n"
+                        + result.summary(spec.output_chars, spec.test_timeout_s)
+                    )
+            failures += await self._checks()
+        return failures
 
     async def verify_step(self) -> list[str]:
         spec = self._spec
