@@ -63,6 +63,7 @@ MSG_STOPPED = "stopped"
 MSG_TEST_DONE = "test_done"
 MSG_REQUEUE = "requeue"
 MSG_STALLED = "stalled"
+MSG_DEPENDENCY_FAILED = "dependency_failed"
 EXECUTOR_MESSAGES = (
     MSG_STARTED,
     MSG_STEP_DONE,
@@ -103,6 +104,8 @@ PAYLOAD_TAIL = "tail"
 PAYLOAD_VIA = "via"
 PAYLOAD_SILENT_MIN = "silent_min"
 PAYLOAD_EXECUTOR_ALIVE = "executor_alive"
+PAYLOAD_DEPENDENCY = "dependency"
+PAYLOAD_DEPENDENCY_STATUS = "dependency_status"
 VIA_TELEGRAM = "telegram"
 FAILURE_NAME = "name"
 FAILURE_EXCERPT = "excerpt"
