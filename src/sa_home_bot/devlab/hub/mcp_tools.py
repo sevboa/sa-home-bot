@@ -111,6 +111,7 @@ async def submit(
     priority: int = 0,
     profile: str = protocol.DEFAULT_PROFILE,
     purpose: str = protocol.PURPOSE_DEV,
+    depends_on: list[str] | None = None,
 ) -> Any:
     if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
         ctx.store.git_root, project, base_branch
@@ -129,6 +130,7 @@ async def submit(
         base_branch=base_branch,
         profile=profile,
         purpose=purpose,
+        depends_on=depends_on or (),
     )
     return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
 
@@ -308,6 +310,11 @@ TOOLS: tuple[Tool, ...] = (
                 "string",
                 "Назначение: dev (разработка, по умолчанию) или bench "
                 "(замер на стенде, уступает dev).",
+            ),
+            Param(
+                "depends_on",
+                "array",
+                "Список id заданий, которые должны завершиться (done) до начала этого.",
             ),
         ),
         submit,

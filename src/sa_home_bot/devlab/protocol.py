@@ -198,6 +198,7 @@ PARAM_ATTEMPTS = "attempts"
 PARAM_PROFILE = "profile"
 DEFAULT_PROFILE = "executor"
 PARAM_PURPOSE = "purpose"
+PARAM_DEPENDS_ON = "depends_on"
 PURPOSE_DEV = "dev"
 PURPOSE_BENCH = "bench"
 PURPOSES = (PURPOSE_DEV, PURPOSE_BENCH)

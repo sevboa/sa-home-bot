@@ -222,6 +222,13 @@ async def test_submit_with_purpose(client, store, alice):
     assert submitted["job"]["params"]["purpose"] == "bench"
 
 
+async def test_submit_with_depends_on(client, store, alice):
+    await register(client, store, alice)
+    _, first = await submit(client, alice)
+    _, second = await submit(client, alice, depends_on=[first["job"]["id"]])
+    assert second["job"]["params"]["depends_on"] == [first["job"]["id"]]
+
+
 async def test_release_requires_waiting_owner(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice)
