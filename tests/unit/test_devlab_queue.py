@@ -33,8 +33,8 @@ async def queue(tmp_path):
     await store.close()
 
 
-async def submit(queue, model=MODEL, priority=0, client=CLIENT):
-    return await queue.submit(client, PROJECT, model, TASK, priority)
+async def submit(queue, model=MODEL, priority=0, client=CLIENT, purpose=S.PURPOSE_DEV):
+    return await queue.submit(client, PROJECT, model, TASK, priority, purpose=purpose)
 
 
 async def running_job(queue):
@@ -155,7 +155,7 @@ async def test_submit_defaults_and_validation(queue):
 async def test_submit_profile(queue, profile, expected):
     kwargs = {"profile": profile} if profile is not None else {}
     job = await queue.submit(CLIENT, PROJECT, MODEL, TASK, **kwargs)
-    assert job.params == {S.PARAM_PROFILE: expected}
+    assert job.params == {S.PARAM_PROFILE: expected, S.PARAM_PURPOSE: S.PURPOSE_DEV}
 
 
 @pytest.mark.parametrize("bad_profile", ["Плохой", "", "a b", "A", "a.b"])
@@ -179,6 +179,41 @@ async def test_claim_order_priority_then_age(queue):
     order = [(await queue.claim(EXECUTOR, [MODEL])).id for _ in range(3)]
     assert order == [high.id, low.id, low2.id]
     assert await queue.claim(EXECUTOR, [MODEL]) is None
+
+
+@pytest.mark.parametrize(
+    "first_purpose, first_priority, second_purpose, second_priority, expected_order",
+    [
+        (S.PURPOSE_BENCH, 9, S.PURPOSE_DEV, 0, ["dev", "bench"]),
+        (S.PURPOSE_DEV, 0, S.PURPOSE_BENCH, 9, ["dev", "bench"]),
+    ],
+)
+async def test_claim_order_dev_before_bench(
+    queue, first_purpose, first_priority, second_purpose, second_priority, expected_order
+):
+    await submit(queue, priority=first_priority, purpose=first_purpose)
+    await submit(queue, priority=second_priority, purpose=second_purpose)
+    claimed = []
+    for _ in range(2):
+        job = await queue.claim(EXECUTOR, [MODEL])
+        assert job is not None
+        claimed.append(job.params[S.PARAM_PURPOSE])
+    assert claimed == expected_order
+    assert await queue.claim(EXECUTOR, [MODEL]) is None
+
+
+async def test_claim_only_bench_in_queue(queue):
+    bench = await submit(queue, priority=5, purpose=S.PURPOSE_BENCH)
+    claimed = await queue.claim(EXECUTOR, [MODEL])
+    assert claimed is not None
+    assert claimed.id == bench.id
+    assert claimed.params[S.PARAM_PURPOSE] == S.PURPOSE_BENCH
+    assert await queue.claim(EXECUTOR, [MODEL]) is None
+
+
+async def test_submit_rejects_bad_purpose(queue):
+    with pytest.raises(HubError, match="назначение"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, purpose="other")
 
 
 async def test_claim_filters_by_models(queue):

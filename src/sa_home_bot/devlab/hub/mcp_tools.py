@@ -110,6 +110,7 @@ async def submit(
     base_branch: str,
     priority: int = 0,
     profile: str = protocol.DEFAULT_PROFILE,
+    purpose: str = protocol.PURPOSE_DEV,
 ) -> Any:
     if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
         ctx.store.git_root, project, base_branch
@@ -127,6 +128,7 @@ async def submit(
         priority=priority,
         base_branch=base_branch,
         profile=profile,
+        purpose=purpose,
     )
     return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
 
@@ -277,7 +279,7 @@ TOOLS: tuple[Tool, ...] = (
     Tool(protocol.TOOL_PROJECTS, "Список зарегистрированных проектов.", (), projects),
     Tool(
         protocol.TOOL_SUBMIT,
-        "Поставить задание агенту в очередь. Базу нужно заранее запушить в ветку base/<имя>."
+        "Поставить задание агенту в очереь. Базу нужно заранее запушить в ветку base/<имя>."
         " Если модели нет в каталоге, задание всё равно встанет в очередь и будет ждать её;"
         " ответ предупредит об этом в warnings.",
         (
@@ -300,6 +302,12 @@ TOOLS: tuple[Tool, ...] = (
                 "profile",
                 "string",
                 "Профиль роли агента: executor (по умолчанию), executor-xs, tester, docs, devops.",
+            ),
+            Param(
+                "purpose",
+                "string",
+                "Назначение: dev (разработка, по умолчанию) или bench "
+                "(замер на стенде, уступает dev).",
             ),
         ),
         submit,
