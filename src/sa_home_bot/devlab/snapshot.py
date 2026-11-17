@@ -26,6 +26,9 @@ WAIT_INTERVAL_S = 20.0
 WAIT_TIMEOUT_S = 1800.0
 WAIT_REQUEST_TIMEOUT_S = 15
 WAIT_MAX_HUB_FAILURES = 3
+WATCH_PAGE = 100
+WATCH_PAYLOAD_CHARS = 300
+WATCH_INTERVAL_S = 10.0
 EXIT_TIMEOUT = 124
 SNAPSHOT_MESSAGE = "devlab snapshot"
 SNAPSHOT_IDENTITY = {
@@ -282,12 +285,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 HUB_OPENER = urllib.request.build_opener(NoRedirect)
 
 
-def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
+def call_tool(url: str, token: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     body = {
         "jsonrpc": protocol.MCP_JSONRPC,
         "id": 1,
         "method": protocol.MCP_METHOD_TOOLS_CALL,
-        "params": {"name": protocol.TOOL_STATUS, "arguments": {"id": job_id}},
+        "params": {"name": name, "arguments": arguments},
     }
     request = urllib.request.Request(
         url + protocol.HTTP_MCP_PATH,
@@ -328,6 +331,10 @@ def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
     if not isinstance(view, dict):
         raise HubUnavailable("ответ хаба не объект")
     return view
+
+
+def call_status(url: str, token: str, job_id: str) -> dict[str, Any]:
+    return call_tool(url, token, protocol.TOOL_STATUS, {"id": job_id})
 
 
 def wait_summary(job_id: str, view: dict[str, Any]) -> str:
@@ -382,4 +389,88 @@ def wait_command(
             print(f"Тайм-аут {timeout:g} с: задание не завершилось", file=sys.stderr)
             print(wait_summary(job_id, last))
             return EXIT_TIMEOUT
+        sleep(min(interval, remaining))
+
+
+def watch_line(message: dict[str, Any]) -> str:
+    payload = json.dumps(message["payload"], ensure_ascii=False)[:WATCH_PAYLOAD_CHARS]
+    return json.dumps(
+        {
+            "seq": message["seq"],
+            "job_id": message["job_id"],
+            "kind": message["kind"],
+            "payload": payload,
+        },
+        ensure_ascii=False,
+    )
+
+
+def watch_command(
+    settings: Settings,
+    *,
+    interval: float = WATCH_INTERVAL_S,
+    timeout: float = WAIT_TIMEOUT_S,
+    token_path: str = TOKEN_PATH,
+    call: Callable[[str, str, str, dict[str, Any]], dict[str, Any]] = call_tool,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    try:
+        if interval <= 0 or timeout <= 0:
+            raise SnapshotError("--interval и --timeout должны быть больше нуля")
+        token = read_token(token_path)
+        url = hub_url(settings)
+    except SnapshotError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    deadline = clock() + timeout
+    failures = 0
+    cursor = 0
+    while True:
+        try:
+            reply = call(url, token, protocol.TOOL_INBOX, {"since": cursor})
+        except HubUnavailable as exc:
+            failures += 1
+            if failures >= WAIT_MAX_HUB_FAILURES:
+                print(f"Ошибка: хаб недоступен {failures} опроса подряд: {exc}", file=sys.stderr)
+                return 1
+        except SnapshotError as exc:
+            print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
+            return 1
+        else:
+            failures = 0
+            messages = reply.get(protocol.FIELD_MESSAGES) or []
+            cursor = reply.get(protocol.FIELD_CURSOR, cursor)
+            if not messages:
+                break
+            continue
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return 0
+        sleep(min(interval, remaining))
+    while True:
+        try:
+            reply = call(url, token, protocol.TOOL_INBOX, {"since": cursor})
+            messages = reply.get(protocol.FIELD_MESSAGES) or []
+            fresh = reply.get(protocol.FIELD_CURSOR, cursor)
+            if messages:
+                for message in messages:
+                    print(watch_line(message), flush=True)
+                call(url, token, protocol.TOOL_ACK, {"upto": fresh})
+                cursor = fresh
+        except HubUnavailable as exc:
+            failures += 1
+            if failures >= WAIT_MAX_HUB_FAILURES:
+                print(f"Ошибка: хаб недоступен {failures} опроса подряд: {exc}", file=sys.stderr)
+                return 1
+        except SnapshotError as exc:
+            print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
+            return 1
+        else:
+            failures = 0
+            if len(messages) == WATCH_PAGE:
+                continue
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return 0
         sleep(min(interval, remaining))
