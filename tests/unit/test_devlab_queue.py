@@ -33,8 +33,12 @@ async def queue(tmp_path):
     await store.close()
 
 
-async def submit(queue, model=MODEL, priority=0, client=CLIENT, purpose=S.PURPOSE_DEV):
-    return await queue.submit(client, PROJECT, model, TASK, priority, purpose=purpose)
+async def submit(
+    queue, model=MODEL, priority=0, client=CLIENT, purpose=S.PURPOSE_DEV, depends_on=()
+):
+    return await queue.submit(
+        client, PROJECT, model, TASK, priority, purpose=purpose, depends_on=depends_on
+    )
 
 
 async def running_job(queue):
@@ -209,6 +213,46 @@ async def test_claim_only_bench_in_queue(queue):
     assert claimed.id == bench.id
     assert claimed.params[S.PARAM_PURPOSE] == S.PURPOSE_BENCH
     assert await queue.claim(EXECUTOR, [MODEL]) is None
+
+
+async def test_depends_on_blocks_until_done(queue):
+    a = await submit(queue, priority=0)
+    b = await submit(queue, priority=5, depends_on=[a.id])
+    first = await queue.claim(EXECUTOR, [MODEL])
+    assert first.id == a.id
+    assert await queue.claim(EXECUTOR, [MODEL]) is None
+    await queue.post_from_executor(a.id, S.MSG_DONE)
+    second = await queue.claim(EXECUTOR, [MODEL])
+    assert second.id == b.id
+
+
+async def test_depends_on_missing_raises(queue):
+    with pytest.raises(HubError, match="зависимость"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, depends_on=["nope"])
+
+
+async def test_depends_on_other_client_raises(queue):
+    other = await submit(queue, client=OTHER_CLIENT)
+    with pytest.raises(HubError, match="зависимость"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, depends_on=[other.id])
+
+
+async def test_submit_without_depends_on_has_no_key(queue):
+    job = await submit(queue)
+    assert S.PARAM_DEPENDS_ON not in job.params
+
+
+async def test_pending_work_false_when_waiting_on_running_dependency(queue):
+    a = await submit(queue)
+    await submit(queue, depends_on=[a.id])
+    await queue.claim(EXECUTOR, [MODEL])
+    assert await queue.pending_work() is False
+
+
+async def test_submit_depends_on_deduplicates_preserving_order(queue):
+    a = await submit(queue)
+    b = await submit(queue, depends_on=[a.id, a.id, a.id])
+    assert b.params.get(S.PARAM_DEPENDS_ON) == [a.id]
 
 
 async def test_submit_rejects_bad_purpose(queue):

@@ -20,6 +20,11 @@ from sa_home_bot.devlab.hub import joblogs
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
+READY_SQL = (
+    "NOT EXISTS (SELECT 1 FROM json_each(jobs.params, '$.depends_on') d "
+    "JOIN jobs dep ON dep.id = d.value WHERE dep.status != ?)"
+)
+
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 BRANCH_TAIL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 JOB_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -224,6 +229,7 @@ class HubQueue:
         base_branch: str | None = None,
         profile: str = protocol.DEFAULT_PROFILE,
         purpose: str = protocol.PURPOSE_DEV,
+        depends_on: Collection[str] = (),
     ) -> Job:
         if not model.strip() or not task.strip():
             raise HubError("у задания должны быть модель и task.md")
@@ -236,15 +242,22 @@ class HubQueue:
             raise HubError("профиль: латиница, цифры, дефис, подчёркивание")
         if purpose not in protocol.PURPOSES:
             raise HubError(f"назначение: {', '.join(protocol.PURPOSES)}")
+        deps = list(dict.fromkeys(depends_on))
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
                 raise HubError(f"проекта {project!r} нет")
+            for dep in deps:
+                cur = await conn.execute(
+                    "SELECT 1 FROM jobs WHERE id = ? AND client = ?", (dep, client)
+                )
+                if not await cur.fetchone():
+                    raise HubError(f"зависимость {dep!r}: задания нет")
             job_id = await self._free_id(conn)
-            params = json.dumps(
-                {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose},
-                ensure_ascii=False,
-            )
+            params_dict = {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose}
+            if deps:
+                params_dict[protocol.PARAM_DEPENDS_ON] = deps
+            params = json.dumps(params_dict, ensure_ascii=False)
             await conn.execute(
                 "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
                 " status, created, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -365,9 +378,11 @@ class HubQueue:
             args.extend([protocol.JOB_KIND_AGENT, *models, *busy_bases])
         if not fits:
             return None
+        args.append(protocol.STATUS_DONE)
         async with self._tx() as conn:
             cur = await conn.execute(
-                f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND ({' OR '.join(fits)})"
+                f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
+                f"({' OR '.join(fits)}) AND {READY_SQL}"
                 " ORDER BY (kind = ?) DESC, "
                 "(json_extract(params, '$.purpose') = ?) ASC, "
                 "priority DESC, seq LIMIT 1",
@@ -583,7 +598,8 @@ class HubQueue:
 
     async def pending_work(self) -> bool:
         cur = await self._db.conn.execute(
-            f"SELECT 1 FROM jobs WHERE status = ? AND kind IN ({_in(protocol.JOB_KINDS)})"
+            f"SELECT 1 FROM jobs WHERE status = ? AND "
+            f"kind IN ({_in(protocol.JOB_KINDS)}) AND {READY_SQL}"
             " UNION ALL"
             " SELECT 1 FROM messages m JOIN jobs j ON j.id = m.job_id"
             " WHERE m.direction = ? AND m.read_at IS NULL AND m.kind != ?"
@@ -592,6 +608,7 @@ class HubQueue:
             (
                 protocol.STATUS_QUEUED,
                 *protocol.JOB_KINDS,
+                protocol.STATUS_DONE,
                 protocol.DIRECTION_TO_EXECUTOR,
                 protocol.MSG_RELEASE,
             ),
