@@ -28,6 +28,7 @@ DEFAULT_MAX_WAIT_S = 1800.0
 DEFAULT_POLL_S = 5.0
 DEFAULT_PRIORITY_GRACE_S = 10.0
 DEFAULT_COMPANION_IDLE_STOP_S = 1800.0
+DEFAULT_MAIN_IDLE_STOP_S = 0.0
 DEFAULT_FREEZE_MAX_S = 300.0
 FREEZE_GUARD_POLL_S = 1.0
 ENGINE_FLAG = "--serve"
@@ -132,6 +133,7 @@ class SwitchSettings:
     freeze_max_s: float = DEFAULT_FREEZE_MAX_S
     llm_socket: str = ""
     stoppers: dict[str, list[str]] = field(default_factory=dict)
+    main_idle_stop_s: float = DEFAULT_MAIN_IDLE_STOP_S
 
 
 def resolve(settings: SwitchSettings, model: str) -> str:
@@ -341,6 +343,7 @@ def build_companion(switch: StrataSwitch, upstream: str) -> Companion | None:
 
 
 COMPANION_KEY = web.AppKey(COMPANION_NAME, Companion)
+MAIN_GUARD_KEY = web.AppKey("main_guard", asyncio.Task)
 
 
 class StrataSwitch:
@@ -455,6 +458,36 @@ class StrataSwitch:
             if self.clock() >= deadline:
                 raise SwitchBusy(BUSY_MESSAGE)
             await asyncio.sleep(self.settings.poll_s)
+
+    def main_idle_expired(self) -> bool:
+        if self.settings.main_idle_stop_s <= 0:
+            return False
+        if self.current is None or self.launching is not None or self.active > 0:
+            return False
+        if self.last_request_end is None:
+            return False
+        return self.clock() - self.last_request_end >= self.settings.main_idle_stop_s
+
+    async def idle_check(self) -> bool:
+        silent = self.silence_active()
+        if not (silent or self.main_idle_expired()):
+            return False
+        name = self.current
+        gap = self.clock() - self.last_request_end if self.last_request_end is not None else 0.0
+        unloaded = await self.unload_if_free()
+        if unloaded and not silent:
+            log.info(
+                "основная модель %s выгружена после %.0f с простоя", name, gap
+            )
+        return unloaded
+
+    async def idle_guard(self) -> None:
+        while True:
+            await asyncio.sleep(self.settings.poll_s)
+            try:
+                await self.idle_check()
+            except LaunchFailed as exc:
+                log.warning("основная модель: выгрузка по простою не удалась: %s", exc)
 
     def _is_free(self, idle_gap: float) -> bool:
         if self.current is None:
@@ -1035,6 +1068,15 @@ def build_app(
     app.router.add_post(RELEASE_PATH, release)
     app.router.add_post(SILENCE_PATH, silence)
     app[COMPANION_KEY] = companion
+
+    async def start_main_guard(app: web.Application) -> None:
+        app[MAIN_GUARD_KEY] = asyncio.create_task(switch.idle_guard())
+
+    async def stop_main_guard(app: web.Application) -> None:
+        await cancel_task(app[MAIN_GUARD_KEY])
+
+    app.on_startup.append(start_main_guard)
+    app.on_cleanup.append(stop_main_guard)
     if companion is not None:
 
         async def start_companion_guard(app: web.Application) -> None:
@@ -1149,6 +1191,7 @@ def load_settings(path: str | Path) -> SwitchSettings:
         freeze_max_s=float(data.get("freeze_max_s", DEFAULT_FREEZE_MAX_S)),
         llm_socket=str(data.get("llm_socket") or ""),
         stoppers=stoppers,
+        main_idle_stop_s=float(data.get("main_idle_stop_s", DEFAULT_MAIN_IDLE_STOP_S)),
     )
 
 
@@ -1174,10 +1217,6 @@ def main(argv: list[str] | None = None) -> None:
         )
     app = build_app(switch, args.upstream, freezer)
 
-    async def load_default(app: web.Application) -> None:
-        await switch.start()
-
-    app.on_startup.append(load_default)
     web.run_app(app, host=args.host, port=args.port, handler_cancellation=True)
 
 
