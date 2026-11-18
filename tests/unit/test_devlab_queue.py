@@ -577,6 +577,37 @@ async def test_submit_test_stores_params(queue):
     assert (await submit_test(queue)).params[S.FIELD_CMD] == ""
 
 
+async def test_submit_test_depends_on_blocks_until_done(queue):
+    a = await submit(queue)
+    test_job = await queue.submit_test(CLIENT, PROJECT, "test/c/1", depends_on=[a.id])
+    first = await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT))
+    assert first.id == a.id
+    assert await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT)) is None
+    await queue.post_from_executor(a.id, S.MSG_DONE)
+    second = await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT))
+    assert second.id == test_job.id
+
+
+@pytest.mark.parametrize(
+    "ref, deps, expect_error",
+    [
+        ("", ["dep1"], False),
+        ("", [], True),
+        ("", ["nonexistent"], True),
+    ],
+)
+async def test_submit_test_ref_from_dependency(queue, ref, deps, expect_error):
+    if deps and deps[0] != "nonexistent":
+        dep_job = await submit(queue)
+        deps = [dep_job.id]
+    if expect_error:
+        with pytest.raises(HubError):
+            await queue.submit_test(CLIENT, PROJECT, ref, depends_on=deps)
+    else:
+        job = await queue.submit_test(CLIENT, PROJECT, ref, depends_on=deps)
+        assert job.params[S.FIELD_REF] == protocol.AGENT_BRANCH_PREFIX + deps[0]
+
+
 @pytest.mark.parametrize("ref", ["", " ", "-x", "a b"])
 async def test_submit_test_rejects_bad_ref(queue, ref):
     with pytest.raises(HubError):

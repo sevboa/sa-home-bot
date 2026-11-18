@@ -229,6 +229,18 @@ async def test_submit_with_depends_on(client, store, alice):
     assert second["job"]["params"]["depends_on"] == [first["job"]["id"]]
 
 
+async def test_devlab_test_with_depends_on_and_missing_ref(client, store, alice):
+    await register(client, store, alice)
+    _, first = await submit(client, alice)
+    is_error, queued = await call(
+        client, alice, protocol.TOOL_TEST, project=PROJECT, ref="", depends_on=[first["job"]["id"]]
+    )
+    assert not is_error
+    expected_ref = protocol.AGENT_BRANCH_PREFIX + first["job"]["id"]
+    assert queued["job"]["params"][protocol.FIELD_REF] == expected_ref
+    assert queued["job"]["params"][protocol.PARAM_DEPENDS_ON] == [first["job"]["id"]]
+
+
 async def test_submit_with_fallback(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice, fallback="openrouter-free")

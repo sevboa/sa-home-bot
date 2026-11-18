@@ -219,6 +219,15 @@ class HubQueue:
         cur = await self._db.conn.execute("SELECT name FROM projects ORDER BY name")
         return [row["name"] for row in await cur.fetchall()]
 
+    @staticmethod
+    async def _check_deps(conn: aiosqlite.Connection, client: str, deps: list[str]) -> None:
+        for dep in deps:
+            cur = await conn.execute(
+                "SELECT 1 FROM jobs WHERE id = ? AND client = ?", (dep, client)
+            )
+            if not await cur.fetchone():
+                raise HubError(f"зависимость {dep!r}: задания нет")
+
     async def submit(
         self,
         client: str,
@@ -259,12 +268,7 @@ class HubQueue:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
                 raise HubError(f"проекта {project!r} нет")
-            for dep in deps:
-                cur = await conn.execute(
-                    "SELECT 1 FROM jobs WHERE id = ? AND client = ?", (dep, client)
-                )
-                if not await cur.fetchone():
-                    raise HubError(f"зависимость {dep!r}: задания нет")
+            await self._check_deps(conn, client, deps)
             job_id = await self._free_id(conn)
             params_dict = {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose}
             if deps:
@@ -292,10 +296,22 @@ class HubQueue:
             return await self._load(conn, job_id)
 
     async def submit_test(
-        self, client: str, project: str, ref: str, cmd: str = "", args: list[str] | None = None
+        self,
+        client: str,
+        project: str,
+        ref: str,
+        cmd: str = "",
+        args: list[str] | None = None,
+        depends_on: Collection[str] = (),
     ) -> Job:
         args = args or []
-        if not ref.strip() or ref.startswith("-") or any(c.isspace() for c in ref):
+        deps = list(dict.fromkeys(depends_on))
+        if not ref.strip():
+            if len(deps) == 1:
+                ref = protocol.AGENT_BRANCH_PREFIX + deps[0]
+            else:
+                raise HubError("ref: ветка или коммит без пробелов, не с «-»")
+        elif ref.startswith("-") or any(c.isspace() for c in ref):
             raise HubError("ref: ветка или коммит без пробелов, не с «-»")
         params = {
             protocol.FIELD_REF: ref,
@@ -306,6 +322,9 @@ class HubQueue:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
                 raise HubError(f"проекта {project!r} нет")
+            await self._check_deps(conn, client, deps)
+            if deps:
+                params[protocol.PARAM_DEPENDS_ON] = deps
             job_id = await self._free_id(conn)
             await conn.execute(
                 "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
