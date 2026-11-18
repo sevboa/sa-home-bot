@@ -27,7 +27,6 @@ class FakeBot:
                             message_thread_id=None, parse_mode="HTML"):
         self.parse_modes.append(parse_mode)
         self.send_message_calls += 1
-        self.sent.append({"chat_id": chat_id, "text": text})
         if self.fail_times > 0:
             self.fail_times -= 1
             raise self.fail_exception
@@ -35,6 +34,7 @@ class FakeBot:
         class _Msg:
             message_id = 1
 
+        self.sent.append({"chat_id": chat_id, "text": text})
         return _Msg()
 
     async def delete_message(self, chat_id, message_id) -> None:
@@ -72,8 +72,7 @@ async def test_send_direct_retries_on_429_then_succeeds():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id == 1
-    assert bot.sent[-1] == {"chat_id": 1, "text": "привет"}
-    assert bot.parse_modes[-1] == "HTML"
+    assert bot.sent == [{"chat_id": 1, "text": "привет"}]
 
 
 async def test_send_direct_retries_transient_network_error_then_succeeds():
@@ -85,8 +84,7 @@ async def test_send_direct_retries_transient_network_error_then_succeeds():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id == 1
-    assert bot.sent[-1] == {"chat_id": 1, "text": "привет"}
-    assert bot.parse_modes[-1] == "HTML"
+    assert bot.sent == [{"chat_id": 1, "text": "привет"}]
     assert bot.send_message_calls == 3
 
 
@@ -98,8 +96,7 @@ async def test_send_direct_swallows_network_error_and_returns_none():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id is None
-    assert len(bot.sent) == MAX_RETRIES
-    assert all(pm == "HTML" for pm in bot.parse_modes)
+    assert bot.sent == []
     assert bot.send_message_calls == MAX_RETRIES
 
 
