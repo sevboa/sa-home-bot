@@ -165,7 +165,34 @@ async def test_failover_retries_are_bounded_on_200_error_body():
     finally:
         await session.close()
         await sick.close()
-    assert len(bodies) == 3
+    assert len(bodies) == 6
+
+
+async def test_failover_exponential_backoff():
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    sick, _ = await gateway_server(error_body={"error": {"message": "апстрим"}})
+    session = aiohttp.ClientSession()
+    try:
+        chat = FailoverChat(
+            StaticCatalog(entry_at(sick, "a")),
+            lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=6,
+            retry_s=5.0,
+            retry_max_s=30.0,
+            sleep=record_sleep,
+        )
+        with pytest.raises(ModelError, match="все шлюзы.*апстрим"):
+            await chat.complete(MESSAGES, [])
+    finally:
+        await session.close()
+        await sick.close()
+
+    assert sleeps == [5.0, 10.0, 20.0, 30.0, 30.0]
 
 
 async def test_failover_non_transient_error_body_fails_at_once():

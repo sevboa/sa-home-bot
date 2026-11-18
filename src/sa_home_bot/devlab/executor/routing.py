@@ -16,8 +16,9 @@ from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 log = logging.getLogger(__name__)
 
 CATALOG_TTL_S = 15.0
-ROUTE_ROUNDS = 3
+ROUTE_ROUNDS = 6
 ROUTE_RETRY_S = 5.0
+ROUTE_RETRY_MAX_S = 60.0
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
 MODELS_ANY = "any"
@@ -129,6 +130,7 @@ class FailoverChat:
         model: str,
         rounds: int = ROUTE_ROUNDS,
         retry_s: float = ROUTE_RETRY_S,
+        retry_max_s: float = ROUTE_RETRY_MAX_S,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._catalog = catalog
@@ -136,6 +138,7 @@ class FailoverChat:
         self._model = model
         self._rounds = rounds
         self._retry_s = retry_s
+        self._retry_max_s = retry_max_s
         self._sleep = sleep
         self._preferred: str | None = None
 
@@ -145,7 +148,7 @@ class FailoverChat:
         last: ModelError | None = None
         for attempt in range(self._rounds):
             if attempt:
-                await self._sleep(self._retry_s)
+                await self._sleep(min(self._retry_s * 2 ** (attempt - 1), self._retry_max_s))
             entries = await self._ordered(fresh=attempt > 0)
             if not entries:
                 last = ModelError(f"модели {self._model!r} нет на живых шлюзах", transient=True)
