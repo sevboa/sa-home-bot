@@ -291,13 +291,18 @@ async def test_submit_depends_on_deduplicates_preserving_order(queue):
     assert b.params.get(S.PARAM_DEPENDS_ON) == [a.id]
 
 
+async def test_submit_rejects_bad_purpose(queue):
+    with pytest.raises(HubError, match="назначение"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, purpose="other")
+
+
 @pytest.mark.parametrize(
     "num_deps, base_branch, expect_error, check_base",
     [
         (0, None, False, lambda b: b.startswith("base/")),
         (0, "base/custom", False, lambda b: b == "base/custom"),
         (0, "agent/abc123", False, lambda b: b == "agent/abc123"),
-        (1, None, False, lambda b: b.startswith("agent/")),
+        (1, None, False, lambda b: b.startswith("agent/") and len(b) > len("agent/")),
         (1, "base/x", False, lambda b: b == "base/x"),
         (2, None, True, None),
         (0, "agent/", True, None),
