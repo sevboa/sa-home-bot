@@ -12,6 +12,26 @@
 - Активность: `active(now)` — `until is None or now < until`. Истёкшая запись не считается
   действующей: `SilenceService.load()` отдаёт `None`, но запись остаётся в БД (история).
 
+## Право и команда `/silent` (2026-11-18)
+
+- Команда `silent` (`right="silent"`, не universal, не в меню) — в `bot/commands.py`, описание
+  «тишина видеокарта: /silent [минуты|off|status]» → фактически «тишина видеокарты: /silent
+  [минуты|off|status]».
+- Право `GuestRight("silent", "🔇 Тишина видеокарты")` добавлено в `GUEST_RIGHTS` (`bot/guest_rights.py`):
+  владелец может выдать его гостю в `/guests`.
+- Обработчик `bot/handlers/gpu_silence.py` (`cmd_silent`), роутер подключён в `bot/setup.py` после
+  `devlab.router` (2026-11-18: тест `test_router_included_before_ai` требует, чтобы `devlab` шёл
+  сразу после `away` и раньше `ai`, поэтому между `away` и `devlab` вставить нельзя). Право проверяется вручную (гость без права получает `DENIED_TEXT`);
+  владелец проходит по `is_owner`.
+- Аргументы: пусто — тишина бессрочно (`minutes=None`); целое > 0 — минуты; `off` — снять;
+  `status` — состояние; остальное — подсказка про `/silent 30`, `/silent off`, `/silent status`.
+- Связь с «Альфред в городе»: при включении/продлении тишины Альфред уезжает до `state.until`
+  (или до потолка 24 ч, `MAX_AWAY` из `bot/away`) с причиной `SILENCE_AWAY_REASON = "тишина
+  видеокарты"` (`AwayService.start`/`extend`, `AwayError` от потолка глотается). `off` снимает
+  тишину и вызывает `do_back` (`bot/handlers/away.py`) — но Альфред возвращается только если
+  уехал из-за тишины (`reason == SILENCE_AWAY_REASON`).
+- `set_by` — `chat_id` подписи владельца/гостя, кто включил.
+
 ## Правило продления (`SilenceService.start`)
 
 - `minutes is None` → бессрочная (`until=None`); `minutes < 1` → `ValueError`.

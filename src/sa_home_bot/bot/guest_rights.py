@@ -73,6 +73,7 @@ GUEST_RIGHTS: list[GuestRight] = [
     GuestRight("downtime", "⏻ История отключений"),
     GuestRight("scan_now@monitor", "🔍 Форс-скан датчиков"),
     GuestRight("wake", "🔌 Разбудить ПК"),
+    GuestRight("silent", "🔇 Тишина видеокарты"),
 ]
 
 FINE_RIGHTS: list[GuestRight] = [

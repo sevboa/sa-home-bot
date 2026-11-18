@@ -54,6 +54,7 @@ from sa_home_bot.people import seed as people_seed
 from sa_home_bot.proto.addresses import LLM_ADDRESS
 from sa_home_bot.runtime import Runtime
 from sa_home_bot.sensors.power import read_power_events_sync
+from sa_home_bot.silence import SilenceService
 from sa_home_bot.subscriptions.book import SubscriptionBook, warn_group_log_config
 from sa_home_bot.subscriptions.guests import GuestStore
 from sa_home_bot.utils.lifespan import Lifespan
@@ -236,6 +237,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         )
 
     away = AwayService(store, settings)
+    silence = SilenceService(store)
     away_runner = AwayRunner(
         away,
         AwayReturn(
@@ -301,6 +303,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             bot_username=bot_username,
             active_ai_chats=active_ai_chats,
             away=away,
+            silence=silence,
             away_runner=away_runner,
             devlab_notifier=devlab_notifier,
             handle_signals=False,

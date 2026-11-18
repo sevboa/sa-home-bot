@@ -55,6 +55,10 @@ AWAY = Command(
     "away", "Альфред в городе: окно обслуживания", universal=False, menu=False, right="away"
 )
 BACK = Command("back", "вернуть Альфреда из города", universal=False, menu=False, right="away")
+SILENT = Command(
+    "silent", "тишина видеокарты: /silent [минуты|off|status]", universal=False, menu=False,
+    right="silent",
+)
 ALL_COMMANDS: list[Command] = [
     PING,
     INTERACTIVES,
@@ -76,6 +80,7 @@ ALL_COMMANDS: list[Command] = [
     DRAW,
     AWAY,
     BACK,
+    SILENT,
 ]
 
 UNIVERSAL_COMMANDS: list[Command] = [c for c in ALL_COMMANDS if c.universal]
