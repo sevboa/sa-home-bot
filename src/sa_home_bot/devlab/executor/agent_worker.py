@@ -127,6 +127,12 @@ def window_tokens(entries: list[CatalogEntry], local_cap: int) -> int:
     return min(windows, default=local_cap)
 
 
+def token_ceiling(entries: list[CatalogEntry], max_tokens: int) -> int:
+    if entries and all(entry.free and entry.remote for entry in entries):
+        return 0
+    return max_tokens
+
+
 class ModelUnavailable(Exception):
     pass
 
@@ -558,7 +564,7 @@ class AgentWorker(WorkerLoops):
             limits,
             context_tokens=window_tokens(entries, limits.context_tokens),
             max_cost_usd=limits.max_cost_usd * factor,
-            max_tokens=limits.max_tokens * factor,
+            max_tokens=token_ceiling(entries, limits.max_tokens) * factor,
         )
 
     async def _check_model(self, job: Job, project: ProjectSpec) -> None:

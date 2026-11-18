@@ -13,6 +13,7 @@ from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
+from sa_home_bot.devlab.agent.spend import JobSpend, SpendState
 from sa_home_bot.devlab.agent.trace import StepTrace
 from sa_home_bot.devlab.executor import agent_worker as agent_worker_module
 from sa_home_bot.devlab.executor.agent_worker import (
@@ -311,6 +312,39 @@ async def test_agent_window_comes_from_catalog(env, monkeypatch, entries, expect
 
     assert await env.status(job_id) == protocol.STATUS_DONE
     assert LimitsProbe.seen[0].context_tokens == expected
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ([], 1000),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, free=True)], 0),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=False, free=True)], 1000),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, free=False)], 1000),
+        (
+            [
+                CatalogEntry(MODEL, "or", "http://o", remote=True, free=True),
+                CatalogEntry(MODEL, "or", "http://o2", remote=False, free=True),
+            ],
+            1000,
+        ),
+    ],
+)
+def test_token_ceiling_by_catalog_entry(entries, expected):
+    assert agent_worker_module.token_ceiling(entries, 1000) == expected
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ([CatalogEntry(MODEL, "or", "http://o", remote=True, free=True)], 0),
+        ([CatalogEntry(MODEL, "or", "http://o", remote=False, free=True)], 3000),
+    ],
+)
+async def test_limits_for_token_ceiling(env, entries, expected):
+    worker = make_worker(env, ScriptedChatModel(), limits=AgentLimits(max_tokens=1000))
+    spend = JobSpend(SpendState(extensions=2), lambda state: None)
+    assert worker._limits_for(spend, entries).max_tokens == expected
 
 
 async def submit_profile(env, profile) -> str:
