@@ -11,18 +11,22 @@ DESCRIPTION = "Тишина видеокарты: status, set [минуты], of
 
 
 def add_silent_subparser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("silent", help="тишина видеокарты",
-                                   description=DESCRIPTION)
+    parser = subparsers.add_parser("silent", help="тишина видеокарты", description=DESCRIPTION)
     sub = parser.add_subparsers(dest="silent_command", required=True)
 
     set_p = sub.add_parser("set", help="включить тишину")
-    set_p.add_argument("minutes", nargs="?", type=int, default=None,
-                       help="минуты (без числа — бессрочно)")
+    set_p.add_argument(
+        "minutes", nargs="?", type=int, default=None, help="минуты (без числа — бессрочно)"
+    )
     sub.add_parser("off", help="снять тишину")
     sub.add_parser("status", help="показать состояние")
     for p in (set_p, sub.choices["off"]):
-        p.add_argument("--by", choices=("claude", "admin"), default="claude",
-                       help="кто включил (по умолчанию claude — владельцу уйдёт сообщение)")
+        p.add_argument(
+            "--by",
+            choices=("claude", "admin"),
+            default="claude",
+            help="кто включил (по умолчанию claude — владельцу уйдёт сообщение)",
+        )
     parser.set_defaults(_run=run)
 
 

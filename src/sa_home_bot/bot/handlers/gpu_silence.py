@@ -10,7 +10,7 @@ from sa_home_bot.bot.away_return import AwayRunner
 from sa_home_bot.bot.gpu_silence import away_for_silence, start_silence, until_text
 from sa_home_bot.bot.handlers.away import do_back
 from sa_home_bot.bot.middlewares import DENIED_TEXT
-from sa_home_bot.silence import SilenceService, SilenceState
+from sa_home_bot.silence import SilenceService
 from sa_home_bot.subscriptions.models import Subscription
 
 router = Router(name="gpu_silence")
@@ -25,10 +25,6 @@ def _allowed(subscription: Subscription | None) -> bool:
     return subscription is not None and (
         subscription.is_owner or subscription.allows_command(commands.SILENT.name)
     )
-
-
-def _until_text(state: SilenceState) -> str:
-    return until_text(state)
 
 
 @router.message(Command(commands.SILENT.name))
@@ -55,7 +51,7 @@ async def cmd_silent(
         return
     if args == "status":
         state = await silence.load()
-        text = f"🔇 Тишина видеокарты {_until_text(state)}." if state else "🔈 Тишины нет."
+        text = f"🔇 Тишина видеокарты {until_text(state)}." if state else "🔈 Тишины нет."
         await message.answer(text)
         return
     if args and not (args.isdigit() and int(args) > 0):
@@ -65,5 +61,5 @@ async def cmd_silent(
         silence, away, int(args) if args else None, set_by=str(subscription.chat_id)
     )
     await message.answer(
-        f"🔇 Тишина видеокарты {_until_text(state)}. Альфред в городе на это время."
+        f"🔇 Тишина видеокарты {until_text(state)}. Альфред в городе на это время."
     )
