@@ -427,7 +427,9 @@ class HubQueue:
             fits.append(f"(kind = ? AND model IN ({_in(models)}){free_base})")
             args.extend([protocol.JOB_KIND_AGENT, *models, *busy_bases])
             busy = "EXISTS (SELECT 1 FROM jobs r WHERE r.status = ? AND r.model = jobs.model)"
-            live = f" OR model NOT IN ({_in(live_models)})" if live_models else ""
+            live = ""
+            if live_models is not None:
+                live = f" OR model NOT IN ({_in(live_models)})" if live_models else " OR 1 = 1"
             fits.append(
                 f"(kind = ? AND json_extract(params, '$.fallback') IN ({_in(models)})"
                 f" AND ({busy}{live}){free_base})"

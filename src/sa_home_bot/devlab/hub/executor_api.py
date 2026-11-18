@@ -38,11 +38,11 @@ async def claim(request: web.Request) -> web.Response:
         raise HubError("claim: busy_bases — список строк")
     store = request.app[STORE_KEY]
     catalog = await store.models()
-    state = await silence_state(request.app)
-    if state is not None:
-        local = {m[protocol.MODEL_NAME] for m in catalog if not m.get(protocol.MODEL_REMOTE)}
+    live_models: list[str] | None = [m[protocol.MODEL_NAME] for m in catalog] or None
+    if await silence_state(request.app) is not None:
+        local = {m[protocol.MODEL_NAME] for m in catalog if not m.get(protocol.MODEL_REMOTE, True)}
         models = [m for m in models if m not in local]
-    live_models = [m[protocol.MODEL_NAME] for m in catalog]
+        live_models = [m for m in live_models or [] if m not in local]
     job = await store.queue.claim(
         request[PRINCIPAL_KEY].name,
         models,
@@ -134,14 +134,9 @@ async def heartbeat(request: web.Request) -> web.Response:
         await store.queue.note_progress(body.get(protocol.FIELD_PROGRESS))
         reply[protocol.FIELD_QUEUED] = await store.queue.queued_count()
         state = await silence_state(request.app)
-        if state is None:
-            reply[protocol.FIELD_SILENCE] = None
-        else:
-            reply[protocol.FIELD_SILENCE] = {
-                protocol.FIELD_SILENCE_UNTIL: (
-                    None if state.until is None else state.until.isoformat()
-                )
-            }
+        reply[protocol.FIELD_SILENCE] = state and {
+            protocol.FIELD_SILENCE_UNTIL: state.until and state.until.isoformat()
+        }
     elif principal.role == protocol.ROLE_GATEWAY:
         used_today = body.get(protocol.FIELD_USED_TODAY)
         if isinstance(used_today, dict):

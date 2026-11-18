@@ -58,3 +58,14 @@ async def store(tmp_path):
     await apply_migrations(db)
     yield Store(db)
     await db.close()
+
+
+@pytest_asyncio.fixture
+async def silence(tmp_path):
+    from sa_home_bot.silence import SilenceService
+
+    db = Database(tmp_path / "silence.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield SilenceService(Store(db))
+    await db.close()

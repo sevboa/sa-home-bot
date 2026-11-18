@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
-from sa_home_bot.db.store import Store
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import app as hub_app
 from sa_home_bot.devlab.hub import executor_api, http
 from sa_home_bot.devlab.hub import store as store_module
 from sa_home_bot.devlab.hub.store import HubStore
-from sa_home_bot.silence import SilenceService
 from sa_home_bot.utils.clock import utc_now
 from tests.unit.support.fakes import LOOPBACK, FakeNodes
 
@@ -28,12 +24,6 @@ API_PATHS = [
     protocol.HTTP_HEARTBEAT_PATH,
 ]
 
-NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
-
-
-def clock() -> datetime:
-    return NOW
-
 
 @pytest.fixture
 async def store(tmp_path):
@@ -45,29 +35,7 @@ async def store(tmp_path):
 
 
 @pytest.fixture
-async def silence_store(tmp_path):
-    db = Database(tmp_path / "silence.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
-
-
-@pytest.fixture
-async def silence(silence_store):
-    return SilenceService(silence_store, clock)
-
-
-@pytest.fixture
-async def client(store):
-    app = http.build_app(store, FakeNodes())
-    executor_api.add_routes(app)
-    async with TestClient(TestServer(app)) as test_client:
-        yield test_client
-
-
-@pytest.fixture
-async def client_with_silence(store, silence):
+async def client(store, silence):
     app = http.build_app(store, FakeNodes(), silence=silence)
     executor_api.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
@@ -196,10 +164,10 @@ async def test_poll_ignores_other_executors_jobs(client, store, executor):
     assert body[protocol.FIELD_MESSAGES] == []
 
 
-def gateway_beat(*names):
+def gateway_beat(*names, remote=True):
     return {
         protocol.FIELD_MODELS: [
-            {protocol.MODEL_NAME: name, "free": True, protocol.MODEL_REMOTE: False}
+            {protocol.MODEL_NAME: name, "free": True, protocol.MODEL_REMOTE: remote}
             for name in names
         ],
         protocol.FIELD_LIMITS: {"day_left": 5},
@@ -500,23 +468,26 @@ async def test_agent_steps_journal_is_limited_and_test_job_refuses_it(
     assert await upload(client, executor, test_job.id, b"x", protocol.LOG_FILE_STEPS) == 400
 
 
-@pytest.mark.parametrize("silence_active", [False, True])
-async def test_executor_heartbeat_silence(
-    client, client_with_silence, store, executor, silence, silence_active
-):
-    if silence_active:
-        await silence.start(30, set_by="test")
-    else:
-        await silence.off()
-    status, body = await call(
-        client_with_silence if silence_active else client,
-        protocol.HTTP_HEARTBEAT_PATH,
-        executor,
-        {protocol.FIELD_BUSY: False},
+@pytest.mark.parametrize("silent", [False, True])
+async def test_executor_heartbeat_reports_silence(client, executor, silence, silent):
+    if silent:
+        await silence.start(None)
+    _, body = await call(
+        client, protocol.HTTP_HEARTBEAT_PATH, executor, {protocol.FIELD_BUSY: False}
     )
-    assert status == 200
-    if silence_active:
-        assert body[protocol.FIELD_SILENCE] is not None
-        assert body[protocol.FIELD_SILENCE][protocol.FIELD_SILENCE_UNTIL] is not None
-    else:
-        assert body[protocol.FIELD_SILENCE] is None
+    expected = {protocol.FIELD_SILENCE_UNTIL: None} if silent else None
+    assert body[protocol.FIELD_SILENCE] == expected
+
+
+async def test_claim_in_silence_skips_local_models_and_takes_fallback(
+    client, store, executor, gateway, silence
+):
+    await call(client, protocol.HTTP_HEARTBEAT_PATH, gateway, gateway_beat(MODEL, remote=False))
+    await silence.start(30)
+    local = await store.queue.submit("me", PROJECT, MODEL, "task")
+    spare = await store.queue.submit("me", PROJECT, MODEL, "task", fallback="free")
+    _, body = await call(
+        client, protocol.HTTP_CLAIM_PATH, executor, {protocol.FIELD_MODELS: [MODEL, "free"]}
+    )
+    assert body[protocol.FIELD_JOB]["id"] == spare.id
+    assert (await store.queue.get_job(local.id)).status == protocol.STATUS_QUEUED
