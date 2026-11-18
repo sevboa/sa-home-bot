@@ -61,6 +61,17 @@ async def store(tmp_path):
 
 
 @pytest_asyncio.fixture
+async def reply_queue(tmp_path):
+    from sa_home_bot.bot.reply_queue import ReplyQueue
+
+    db = Database(tmp_path / "reply_queue.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield ReplyQueue(Store(db), clock=lambda: BASE_TIME)
+    await db.close()
+
+
+@pytest_asyncio.fixture
 async def silence(tmp_path):
     from sa_home_bot.silence import SilenceService
 
