@@ -36,9 +36,8 @@ class SilenceRelay:
                 timeout=self._timeout,
             ) as resp:
                 if resp.status == 200:
-                    if not self._ok:
-                        self._ok = True
-                    if self._sent == _NOT_SENT or self._sent != value:
+                    self._ok = True
+                    if self._sent != value:
                         log.info("Тишина видеокарты передана strata-switch: %s", value)
                     self._sent = value
                     return
