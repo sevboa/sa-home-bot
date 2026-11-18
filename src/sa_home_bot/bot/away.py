@@ -319,6 +319,29 @@ def local_tz() -> tzinfo:
     return datetime.now().astimezone().tzinfo or UTC
 
 
+def pending_entry(message: Message, dialogue_id: int, text: str, now: datetime) -> dict[str, Any]:
+    sender = message.from_user
+    return {
+        "dialogue_id": dialogue_id,
+        "last_message_id": message.message_id,
+        "thread_id": message.message_thread_id,
+        "chat_type": message.chat.type,
+        "is_topic": bool(getattr(message, "is_topic_message", None)),
+        "user": (
+            {
+                "id": sender.id,
+                "first_name": sender.first_name,
+                "last_name": sender.last_name,
+                "username": sender.username,
+            }
+            if sender is not None
+            else None
+        ),
+        "text": text,
+        "since": now.isoformat(),
+    }
+
+
 class AwayService:
     def __init__(
         self,
@@ -487,26 +510,7 @@ class AwayService:
         if content is not None:
             recorded = await self._record(message, dialogue, content, kind, media, now)
 
-        sender = message.from_user
-        entry = {
-            "dialogue_id": dialogue,
-            "last_message_id": message.message_id,
-            "thread_id": message.message_thread_id,
-            "chat_type": message.chat.type,
-            "is_topic": bool(getattr(message, "is_topic_message", None)),
-            "user": (
-                {
-                    "id": sender.id,
-                    "first_name": sender.first_name,
-                    "last_name": sender.last_name,
-                    "username": sender.username,
-                }
-                if sender is not None
-                else None
-            ),
-            "text": content if isinstance(content, str) else "",
-            "since": now.isoformat(),
-        }
+        entry = pending_entry(message, dialogue, content if isinstance(content, str) else "", now)
         key = str(chat_id)
         send_note = False
 

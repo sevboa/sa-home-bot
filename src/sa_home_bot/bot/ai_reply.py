@@ -21,6 +21,7 @@ from sa_home_bot.bot.alfred_voice import ALFRED_PREFIX_HTML
 from sa_home_bot.bot.interactives.engine import Interactives
 from sa_home_bot.bot.notifier import Notifier, chunk_text, notify_admins
 from sa_home_bot.bot.pending_actions import PendingActions
+from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.rich_stream import RichDraftPolicy, RichStreamSession
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.bot.tool_debug import ToolCalls
@@ -136,6 +137,9 @@ async def _run_turn(
     speech_remark = ai_flow.SpeechRemarkBox()
     streaming_session = rich_session if _is_private(message) else None
     turn_plan = await _plan_interactive_turn(message, services, history)
+    queue = ReplyQueue(services.store) if message.chat is not None else None
+    if queue is not None:
+        await queue.put(message, dialogue_id)
     try:
         raw = await _request_reply(
             message,
@@ -151,6 +155,8 @@ async def _run_turn(
             return None
         if raw == ai_flow.SILENT_REPLY:
             await _wait_for_tool_photo(message, services, streaming_session)
+            if queue is not None:
+                await queue.finish(message.chat.id, message.message_id)
             return None
         if not raw.strip():
             await _report_empty_reply(message, services)
@@ -163,6 +169,8 @@ async def _run_turn(
         await services.store.record_ai_turn(
             message.chat.id, sent_message_id, dialogue_id, "assistant", raw, utc_now()
         )
+        if queue is not None:
+            await queue.finish(message.chat.id, message.message_id)
         await _after_delivery(
             message, services, dialogue_id, history, speech_remark, dismissal, turn_plan, raw
         )
