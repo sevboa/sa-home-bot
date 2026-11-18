@@ -186,6 +186,7 @@ class DevlabConfig(BaseModel):
     owner_wait_s: float = Field(default=3600.0, ge=0)
     freeze_max_s: float = Field(default=300.0, gt=0)
     neighbor_socket: str = ""
+    switch_url: str = ""
     test_image: str = "docker.io/library/python:3.13-slim"
     test_cpuset: str = Field(default="6-11,18-23", pattern=CPUSET_PATTERN)
     test_cpus: float = Field(default=12.0, gt=0)

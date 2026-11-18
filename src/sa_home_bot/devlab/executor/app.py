@@ -16,6 +16,7 @@ from sa_home_bot.devlab.executor.podman import PodmanTestRunner
 from sa_home_bot.devlab.executor.routing import MODELS_ANY, GatewayModels, ModelCatalog
 from sa_home_bot.devlab.executor.runner import TestRunner
 from sa_home_bot.devlab.executor.service import ExecutorService
+from sa_home_bot.devlab.executor.silence_relay import SilenceRelay
 from sa_home_bot.devlab.executor.sweep import sweep_orphans
 from sa_home_bot.devlab.executor.worker import (
     TestWorker,
@@ -128,6 +129,7 @@ async def run_executor(
             )
         )
     service = ExecutorService(settings.node.id or socket.gethostname(), busy)
+    relay = SilenceRelay(cfg.switch_url) if cfg.switch_url else None
     server = ProtoServer(cfg.socket, service, token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
@@ -146,7 +148,9 @@ async def run_executor(
         asyncio.create_task(tester.run(heartbeat=False)),
         *(asyncio.create_task(agent.run(heartbeat=False)) for agent in agents),
         asyncio.create_task(
-            beat_forever(hub, busy, (tester, *agents), cfg.heartbeat_interval_s, agents[0])
+            beat_forever(
+                hub, busy, (tester, *agents), cfg.heartbeat_interval_s, agents[0], relay=relay
+            )
         ),
     ]
     try:
@@ -162,6 +166,8 @@ async def run_executor(
         await stop_following(neighbor, gate)
         log.info("Останов службы devlab...")
         await gateways.close()
+        if relay is not None:
+            await relay.close()
         await server.stop()
         await hub.close()
         log.info("Служба devlab остановлена чисто")
@@ -173,10 +179,13 @@ async def beat_forever(
     workers: tuple[WorkerLoops, ...],
     interval_s: float,
     scrubber: WorkerLoops,
+    relay: SilenceRelay | None = None,
 ) -> None:
     async def beat() -> None:
         jobs = [job for worker in workers for job in worker.jobs]
         progress = {key: n for worker in workers for key, n in worker.progress.items()}
-        await send_heartbeat(hub, busy, jobs, progress)
+        reply = await send_heartbeat(hub, busy, jobs, progress)
+        if relay is not None:
+            await relay.push(reply)
 
     await forever(beat, interval_s, "Heartbeat", scrubber.scrub)

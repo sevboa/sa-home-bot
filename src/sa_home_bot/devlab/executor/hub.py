@@ -52,9 +52,8 @@ class ExecutorHub(HubHttp):
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise HubRequestError(f"{path}: {type(exc).__name__}") from exc
 
-    async def heartbeat_queued(self, body: dict[str, Any]) -> int:
-        data = await self._post(protocol.HTTP_HEARTBEAT_PATH, body)
-        return int(data.get(protocol.FIELD_QUEUED, 0))
+    async def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._post(protocol.HTTP_HEARTBEAT_PATH, body)
 
     async def claim(
         self, kinds: list[str], models: Sequence[str] = (), busy_bases: Sequence[str] = ()

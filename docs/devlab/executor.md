@@ -320,3 +320,14 @@
 `tests/unit/test_devlab_podman_runner.py` (раннер с фейковым запуском обёртки: argv, кэш образа,
 таймаут, cancel, очистка), `tests/unit/test_devlab_agent_sandbox.py` (песочница агента) и `tests/unit/test_devlab_wrapper_script.py` (настоящий текст обёртки в `sh`
 с фейковым `podman`: валидация `cpuset` и имени файла `sync-out`).
+
+## Тишина видеокарты (2026-11-18)
+Каждый heartbeat (`send_heartbeat`) возвращает полный ответ хаба целиком, а не только счётчик
+`queued`; в ответе есть поле `silence` (`{"until": ISO | null}`, `protocol.FIELD_SILENCE`). Если в
+конфиге задан `switch_url` (адрес strata-switch), `run_executor` создаёт `SilenceRelay`
+(`executor/silence_relay.py`) и `beat_forever` после heartbeat пересылает значение `silence` в
+`POST /v1/silence` телом `{"silence": <то же значение>}`: strata-switch после перезапуска получает
+тишину заново. Сессия создаётся лениво при первом `push` и закрывается в `close` рядом с
+`gateways.close()` при останове. Сбой (HTTP не 200, `aiohttp.ClientError`, таймаут) не поднимается,
+предупреждение в лог только при первой неудаче подряд; при успехе и изменении значения —
+`info`. Ответ без `silence` (старый хаб) не пересылается. `switch_url` пустой — пересылки нет.

@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -77,8 +78,10 @@ async def send_heartbeat(
     busy: BusyTracker,
     jobs: Sequence[str],
     progress: Mapping[str, int] | None = None,
-) -> None:
-    busy.set_queued(await hub.heartbeat_queued(heartbeat_body(jobs, progress)))
+) -> dict[str, Any]:
+    reply = await hub.heartbeat(heartbeat_body(jobs, progress))
+    busy.set_queued(int(reply.get(protocol.FIELD_QUEUED, 0)))
+    return reply
 
 
 async def forever(
