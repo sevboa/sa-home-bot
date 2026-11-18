@@ -52,6 +52,7 @@ SILENCE_CODE = "gpu_silence"
 SILENCE_FOREVER_TEXT = "тишина видеокарты до /silent off"
 SILENCE_UNTIL_TEXT = "тишина видеокарты до {until}"
 SILENCE_TIME_FORMAT = "%d.%m %H:%M"
+SILENCE_BAD_BODY = 'тело: {"silence": null | {"until": ISO | null}}'
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
 AUTH_HEADER = "Authorization"
@@ -384,32 +385,23 @@ class StrataSwitch:
             until=self.silence_until.astimezone().strftime(SILENCE_TIME_FORMAT)
         )
 
+    def _free_stopper(self) -> list[str] | None:
+        if self.current is None or self.launching is not None or self.active > 0:
+            return None
+        return self.settings.stoppers.get(self.current)
+
+    def _remember_stop(self, code: int) -> None:
+        if code == 0:
+            self.current = None
+
     async def unload_if_free(self) -> bool:
-        if self.current is None:
-            return False
-        if self.launching is not None:
-            return False
-        if self.active > 0:
-            return False
-        stopper = self.settings.stoppers.get(self.current)
-        if stopper is None:
+        if self._free_stopper() is None:
             return False
         async with self._lock:
-            if self.current is None:
-                return False
-            if self.launching is not None:
-                return False
-            if self.active > 0:
-                return False
-            stopper = self.settings.stoppers.get(self.current)
+            stopper = self._free_stopper()
             if stopper is None:
                 return False
-
-            def _remember_stop(code: int) -> None:
-                if code == 0:
-                    self.current = None
-
-            await guarded_launch(self.run, stopper, _remember_stop)
+            await guarded_launch(self.run, stopper, self._remember_stop)
         return self.current is None
 
     async def acquire(self, model: str, immediate: bool = False, client: str = "") -> None:
@@ -476,6 +468,37 @@ class StrataSwitch:
 
 def json_error(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
+
+
+def parse_silence(payload: object) -> tuple[bool, datetime | None]:
+    if not isinstance(payload, dict) or SILENCE_FIELD not in payload:
+        raise ValueError(SILENCE_BAD_BODY)
+    value = payload[SILENCE_FIELD]
+    if value is None:
+        return False, None
+    if not isinstance(value, dict):
+        raise ValueError(SILENCE_BAD_BODY)
+    until = value.get(SILENCE_UNTIL_FIELD)
+    if until is None:
+        return True, None
+    if not isinstance(until, str):
+        raise ValueError(SILENCE_BAD_BODY)
+    moment = datetime.fromisoformat(until)
+    if moment.tzinfo is None:
+        raise ValueError(SILENCE_BAD_BODY)
+    return True, moment
+
+
+async def unload_for_silence(switch: StrataSwitch, companion: Companion | None) -> None:
+    if companion is not None:
+        try:
+            await companion.release()
+        except COMPANION_ERRORS as exc:
+            log.warning("компаньон: остановка по тишине не удалась: %s", exc)
+    try:
+        await switch.unload_if_free()
+    except LaunchFailed as exc:
+        log.warning("основная модель: выгрузка по тишине не удалась: %s", exc)
 
 
 def silence_error(text: str) -> web.Response:
@@ -990,46 +1013,15 @@ def build_app(
     async def silence(request: web.Request) -> web.Response:
         try:
             payload = await request.json()
+            silent, until = parse_silence(payload)
         except (ValueError, UnicodeDecodeError):
-            return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-        if not isinstance(payload, dict):
-            return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-        if SILENCE_FIELD not in payload:
-            return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-        silence_value = payload[SILENCE_FIELD]
-        if silence_value is None:
-            switch.silent = False
-            switch.silence_until = None
-        elif isinstance(silence_value, dict):
-            until_value = silence_value.get(SILENCE_UNTIL_FIELD)
-            if until_value is None:
-                switch.silent = True
-                switch.silence_until = None
-            elif isinstance(until_value, str):
-                try:
-                    until_dt = datetime.fromisoformat(until_value)
-                except ValueError:
-                    return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-                if until_dt.tzinfo is None:
-                    return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-                switch.silent = True
-                switch.silence_until = until_dt
-            else:
-                return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-        else:
-            return json_error(400, "тело: {\"silence\": null | {\"until\": ISO | null}}")
-        if companion is not None:
-            try:
-                await companion.release()
-            except LaunchFailed as exc:
-                log.warning("компаньон: остановка по тишине не удалась: %s", exc)
-        try:
-            await switch.unload_if_free()
-        except LaunchFailed as exc:
-            log.warning("основная модель: выгрузка по тишине не удалась: %s", exc)
+            return json_error(400, SILENCE_BAD_BODY)
+        switch.silent, switch.silence_until = silent, until
+        if switch.silence_active():
+            await unload_for_silence(switch, companion)
         return web.json_response(
             {
-                "silence": silence_value,
+                "silence": payload[SILENCE_FIELD],
                 "active": switch.silence_active(),
                 "current": switch.current,
                 "companion_running": companion.running if companion else False,

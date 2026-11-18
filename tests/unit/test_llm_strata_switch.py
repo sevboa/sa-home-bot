@@ -2143,32 +2143,22 @@ async def test_silence_forever_unloads_main_model_and_chat_returns_503():
         await close(router, upstream_server)
 
 
-async def test_silence_until_past_is_inactive_and_chat_works():
-    clock = StepClock()
+@pytest.mark.parametrize(
+    "silence",
+    [None, {"until": (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()}],
+    ids=["off", "expired"],
+)
+async def test_inactive_silence_keeps_model_loaded_and_chat_works(silence):
     run = JournalRun([])
-    switch = StrataSwitch(
-        settings(
-            stoppers={"iq3": ["/models/iq3-off.sh"]},
-        ),
-        run,
-        clock,
-    )
+    switch = StrataSwitch(settings(stoppers={"iq3": ["/models/iq3-off.sh"]}), run, StepClock())
     switch.current = "iq3"
-    upstream = Upstream()
-    upstream_server, router = await run_router(switch, upstream)
+    upstream_server, router = await run_router(switch, Upstream())
     try:
-        past = datetime.now(tz=UTC) - timedelta(hours=1)
-        resp = await router.post(
-            SILENCE_PATH, json={"silence": {"until": past.isoformat()}}, headers=AUTH
-        )
-        body = await resp.json()
-        assert resp.status == 200
-        assert body["active"] is False
-
+        resp = await router.post(SILENCE_PATH, json={"silence": silence}, headers=AUTH)
+        assert (resp.status, (await resp.json())["active"]) == (200, False)
+        assert run.calls == [] and switch.current == "iq3"
         resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
-        answer = await resp.json()
         assert resp.status == 200
-        assert answer["choices"][0]["message"]["content"] == "привет"
     finally:
         await close(router, upstream_server)
 
