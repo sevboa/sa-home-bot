@@ -719,6 +719,51 @@ class HubQueue:
                 )
         return flagged
 
+    async def flag_waiting(
+        self,
+        threshold_s: float,
+        executor_alive: bool,
+        live_models: Collection[str],
+        now: datetime | None = None,
+    ) -> list[Message]:
+        now = now or utc_now()
+        flagged: list[Message] = []
+        async with self._tx() as conn:
+            cur = await conn.execute(
+                "SELECT id, model, params, created FROM jobs "
+                f"WHERE status = ? AND kind = ? AND {READY_SQL} "
+                "ORDER BY seq",
+                (protocol.STATUS_QUEUED, protocol.JOB_KIND_AGENT, protocol.STATUS_DONE),
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                created = datetime.fromisoformat(row["created"])
+                waited = (now - created).total_seconds()
+                if waited < threshold_s:
+                    continue
+                model = row["model"]
+                params = json.loads(row["params"])
+                fallback = params.get(protocol.PARAM_FALLBACK, "")
+                if not executor_alive:
+                    kind = protocol.MSG_EXECUTOR_OFFLINE
+                elif model not in live_models and fallback not in live_models:
+                    kind = protocol.MSG_WAITING_MODEL
+                else:
+                    continue
+                cur = await conn.execute(
+                    "SELECT 1 FROM messages WHERE job_id = ? AND kind = ?",
+                    (row["id"], kind),
+                )
+                if await cur.fetchone():
+                    continue
+                payload = {protocol.PAYLOAD_WAITED_MIN: int(waited // 60)}
+                flagged.append(
+                    await self._post(
+                        conn, row["id"], protocol.DIRECTION_TO_CLIENT, kind, payload
+                    )
+                )
+        return flagged
+
     async def purge(self, retention_days: int, now: datetime | None = None) -> int:
         border = ((now or utc_now()) - timedelta(days=retention_days)).isoformat()
         async with self._tx() as conn:
