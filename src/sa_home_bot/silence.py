@@ -61,33 +61,33 @@ class SilenceService:
         return None
 
     async def start(self, minutes: int | None, set_by: str = "") -> SilenceState:
+        if minutes is not None and minutes < 1:
+            raise ValueError("срок тишины — от 1 минуты")
         now = self._clock()
-        if minutes is not None:
-            if minutes < 1:
-                raise ValueError("minutes must be >= 1")
-            end = now + timedelta(minutes=minutes)
-        current = SilenceState.from_json(await self.store.get_state(GPU_SILENCE_KEY))
-        if current is not None and current.active(now):
-            until = None if minutes is None or current.until is None else max(current.until, end)
-            started_at = current.started_at
-        else:
-            until = end if minutes is not None else None
-            started_at = now
-        fresh = SilenceState(until=until, started_at=started_at, set_by=set_by)
+        end = None if minutes is None else now + timedelta(minutes=minutes)
+        result: list[SilenceState] = []
 
         def fn(raw: str | None) -> str | None:
+            current = SilenceState.from_json(raw)
+            if current is not None and current.active(now):
+                until = None if end is None or current.until is None else max(current.until, end)
+                fresh = SilenceState(until=until, started_at=current.started_at, set_by=set_by)
+            else:
+                fresh = SilenceState(until=end, started_at=now, set_by=set_by)
+            result.append(fresh)
             return fresh.to_json()
 
         await self.store.update_state(GPU_SILENCE_KEY, fn)
-        return fresh
+        return result[-1]
 
     async def off(self) -> bool:
-        raw = await self.store.get_state(GPU_SILENCE_KEY)
-        if raw is None:
-            return False
+        now = self._clock()
+        was_active: list[bool] = []
 
         def fn(raw: str | None) -> str | None:
+            current = SilenceState.from_json(raw)
+            was_active.append(current is not None and current.active(now))
             return None
 
         await self.store.update_state(GPU_SILENCE_KEY, fn)
-        return True
+        return was_active[-1]

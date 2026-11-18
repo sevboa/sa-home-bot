@@ -49,21 +49,16 @@ async def test_start(store, seed, minutes, expected_until, expected_started_at):
     state = await SilenceService(store, clock).start(minutes, set_by="me")
     assert state.until == expected_until
     assert state.started_at == expected_started_at
-    stored = await SilenceService(store, clock).load()
-    if expected_until is None:
-        assert stored is not None and stored.until is None
-    elif isinstance(seed, datetime):
-        assert stored is not None and stored.until == expected_until
+    assert (await SilenceService(store, clock).load()).until == expected_until
 
 
-async def test_expired_silence_load_none_and_off(store):
+async def test_expired_silence_is_inactive(store):
     await seed_silence(
         store,
         SilenceState(until=NOW - timedelta(minutes=5), started_at=NOW - timedelta(minutes=60)),
     )
     service = SilenceService(store, clock)
     assert await service.load() is None
-    assert await service.off() is True
     assert await service.off() is False
 
 
