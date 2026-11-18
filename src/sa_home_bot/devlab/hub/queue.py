@@ -156,6 +156,21 @@ def _valid_base_branch(name: str) -> bool:
     return bool(tail) and BRANCH_TAIL_RE.match(tail) is not None and ".." not in name
 
 
+def fix_task_text(ref: str, payload: dict[str, Any]) -> str:
+    lines = [f"# fix: красный прогон {ref}", ""]
+    for failure in payload.get(protocol.PAYLOAD_FAILURES, []):
+        lines.append(f"- {failure[protocol.FAILURE_NAME]}")
+        lines.append(f"  {failure[protocol.FAILURE_EXCERPT]}")
+    lines += [
+        "```",
+        payload.get(protocol.PAYLOAD_TAIL, "")[-protocol.FIX_TAIL_CHARS :],
+        "```",
+        "",
+        "Почини упавшие тесты минимальной правкой, не меняя смысла тестов; прогони их и `checks`.",
+    ]
+    return "\n".join(lines)
+
+
 def _test_result(payload: dict[str, Any]) -> None:
     exit_code = payload.get(protocol.PAYLOAD_EXIT_CODE)
     duration = payload.get(protocol.PAYLOAD_DURATION_S)
@@ -246,6 +261,78 @@ class HubQueue:
             if not await cur.fetchone():
                 raise HubError(f"зависимость {dep!r}: задания нет")
 
+    @staticmethod
+    async def _insert_agent_job(
+        conn: aiosqlite.Connection,
+        client: str,
+        project: str,
+        model: str,
+        task: str,
+        base_branch: str | None,
+        priority: int,
+        profile: str,
+        purpose: str,
+        depends_on: Collection[str] = (),
+        fallback: str = "",
+        extra_params: dict[str, Any] | None = None,
+    ) -> Job:
+        job_id = await HubQueue._free_id(conn)
+        params_dict = {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose}
+        deps = list(dict.fromkeys(depends_on))
+        if deps:
+            params_dict[protocol.PARAM_DEPENDS_ON] = deps
+        if fallback:
+            params_dict[protocol.PARAM_FALLBACK] = fallback
+        if extra_params:
+            params_dict.update(extra_params)
+        await conn.execute(
+            "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
+            " status, created, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                protocol.JOB_KIND_AGENT,
+                project,
+                client,
+                model,
+                task,
+                base_branch or protocol.BASE_BRANCH_PREFIX + job_id,
+                priority,
+                protocol.STATUS_QUEUED,
+                utc_now().isoformat(),
+                json.dumps(params_dict, ensure_ascii=False),
+            ),
+        )
+        return await HubQueue._load(conn, job_id)
+
+    @staticmethod
+    async def _maybe_fix_job(
+        conn: aiosqlite.Connection, job: Job, payload: dict[str, Any]
+    ) -> None:
+        fix_model = job.params.get(protocol.PARAM_FIX_MODEL, "")
+        round_no = job.params.get(protocol.PARAM_FIX_ROUND, 0)
+        if (
+            payload.get(protocol.PAYLOAD_EXIT_CODE) != 0
+            and fix_model
+            and round_no < protocol.FIX_MAX_ROUNDS
+        ):
+            ref = job.params[protocol.FIELD_REF]
+            await HubQueue._insert_agent_job(
+                conn,
+                job.client,
+                job.project,
+                fix_model,
+                fix_task_text(ref, payload),
+                ref,
+                0,
+                protocol.FIX_PROFILE,
+                protocol.PURPOSE_FIX,
+                extra_params={
+                    protocol.PARAM_FIX_OF: job.id,
+                    protocol.PARAM_FIX_ROUND: round_no + 1,
+                    protocol.PARAM_FIX_MODEL: fix_model,
+                },
+            )
+
     async def submit(
         self,
         client: str,
@@ -287,31 +374,19 @@ class HubQueue:
             if not await cur.fetchone():
                 raise HubError(f"проекта {project!r} нет")
             await self._check_deps(conn, client, deps)
-            job_id = await self._free_id(conn)
-            params_dict = {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose}
-            if deps:
-                params_dict[protocol.PARAM_DEPENDS_ON] = deps
-            if fallback:
-                params_dict[protocol.PARAM_FALLBACK] = fallback
-            params = json.dumps(params_dict, ensure_ascii=False)
-            await conn.execute(
-                "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
-                " status, created, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    job_id,
-                    protocol.JOB_KIND_AGENT,
-                    project,
-                    client,
-                    model.strip(),
-                    task,
-                    base_branch or protocol.BASE_BRANCH_PREFIX + job_id,
-                    priority,
-                    protocol.STATUS_QUEUED,
-                    utc_now().isoformat(),
-                    params,
-                ),
+            return await HubQueue._insert_agent_job(
+                conn,
+                client,
+                project,
+                model.strip(),
+                task,
+                base_branch,
+                priority,
+                profile,
+                purpose,
+                deps,
+                fallback,
             )
-            return await self._load(conn, job_id)
 
     async def submit_test(
         self,
@@ -321,6 +396,8 @@ class HubQueue:
         cmd: str = "",
         args: list[str] | None = None,
         depends_on: Collection[str] = (),
+        fix_model: str = "",
+        fix_round: int = 0,
     ) -> Job:
         args = args or []
         deps = list(dict.fromkeys(depends_on))
@@ -328,11 +405,20 @@ class HubQueue:
             ref = protocol.AGENT_BRANCH_PREFIX + deps[0]
         if not ref.strip() or ref.startswith("-") or any(c.isspace() for c in ref):
             raise HubError("ref: ветка или коммит без пробелов, не с «-»")
+        fix_model = fix_model.strip()
+        if fix_model and not _valid_base_branch(ref):
+            raise HubError(
+                "fix_model: ref прогона должен быть веткой base/<имя> или agent/<id>"
+            )
         params = {
             protocol.FIELD_REF: ref,
             protocol.FIELD_CMD: cmd.strip(),
             protocol.FIELD_ARGS: args,
         }
+        if fix_model:
+            params[protocol.PARAM_FIX_MODEL] = fix_model
+        if fix_round > 0:
+            params[protocol.PARAM_FIX_ROUND] = fix_round
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
@@ -522,6 +608,8 @@ class HubQueue:
                     await self._set_status(conn, job, target)
                     if target in (protocol.STATUS_FAILED, protocol.STATUS_STOPPED):
                         await HubQueue._notify_dependents(conn, job, target)
+            if kind == protocol.MSG_TEST_DONE:
+                await HubQueue._maybe_fix_job(conn, job, payload)
             await conn.execute(
                 "UPDATE jobs SET tokens = tokens + ?, cost_usd = cost_usd + ? WHERE id = ?",
                 (tokens, cost, job_id),

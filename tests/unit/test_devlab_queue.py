@@ -9,7 +9,7 @@ import pytest
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.queue import SCHEMA as S_QUEUE_SCHEMA
-from sa_home_bot.devlab.hub.queue import TransitionRefused, in_windows
+from sa_home_bot.devlab.hub.queue import TransitionRefused, fix_task_text, in_windows
 from sa_home_bot.devlab.hub.store import HUB_DB_NAME, HubStore
 from sa_home_bot.utils.clock import utc_now
 
@@ -712,6 +712,105 @@ async def test_test_done_finishes_job_and_keeps_result(queue):
     message = await queue.last_message(job.id, S.MSG_TEST_DONE)
     assert message.payload[S.PAYLOAD_EXIT_CODE] == 1
     assert [m.kind for m in await queue.inbox(CLIENT)] == [S.MSG_TEST_DONE]
+
+
+async def test_fix_task_text_lists_failures_and_tail():
+    text = fix_task_text("base/x", done_payload())
+    assert text == (
+        "# fix: красный прогон base/x\n"
+        "\n"
+        "- t::a\n"
+        "  assert 1 == 2\n"
+        "```\n"
+        "1 failed\n"
+        "```\n"
+        "\n"
+        "Почини упавшие тесты минимальной правкой, не меняя смысла тестов; прогони их и `checks`."
+    )
+
+
+async def test_fix_task_text_without_failures():
+    text = fix_task_text(
+        "agent/x1",
+        done_payload(**{S.PAYLOAD_FAILURES: [], S.PAYLOAD_TAIL: "хвост лога"}),
+    )
+    assert "- t::a" not in text
+    assert "```\nхвост лога\n```" in text
+    assert text.endswith(
+        "Почини упавшие тесты минимальной правкой, не меняя смысла тестов; прогони их и `checks`."
+    )
+
+
+async def test_submit_test_stores_fix_params(queue):
+    job = await queue.submit_test(CLIENT, PROJECT, "base/x", fix_model=MODEL, fix_round=1)
+    assert job.params[S.PARAM_FIX_MODEL] == MODEL
+    assert job.params[S.PARAM_FIX_ROUND] == 1
+    plain = await submit_test(queue)
+    assert S.PARAM_FIX_MODEL not in plain.params
+    assert S.PARAM_FIX_ROUND not in plain.params
+
+
+async def test_submit_test_fix_model_with_agent_ref(queue):
+    dep = await submit(queue)
+    job = await queue.submit_test(CLIENT, PROJECT, S.AGENT_BRANCH_PREFIX + dep.id, fix_model=MODEL)
+    assert job.params[S.PARAM_FIX_MODEL] == MODEL
+
+
+@pytest.mark.parametrize("ref", ["test/alice/1", "1234567890a"])
+async def test_submit_test_fix_model_needs_branch_ref(queue, ref):
+    with pytest.raises(HubError, match="base/<имя> или agent/<id>"):
+        await queue.submit_test(CLIENT, PROJECT, ref, fix_model=MODEL)
+
+
+async def test_red_test_run_with_fix_model_creates_fix_job(queue):
+    dep = await submit(queue)
+    ref = S.AGENT_BRANCH_PREFIX + dep.id
+    test_job = await queue.submit_test(CLIENT, PROJECT, ref, fix_model=MODEL)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(test_job.id, S.MSG_TEST_DONE, done_payload())
+    fix_jobs = [
+        j
+        for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])
+        if j.params.get(S.PARAM_PURPOSE) == S.PURPOSE_FIX
+    ]
+    assert len(fix_jobs) == 1
+    fix = fix_jobs[0]
+    assert fix.client == CLIENT
+    assert fix.project == PROJECT
+    assert fix.model == MODEL
+    assert fix.base_branch == ref
+    assert fix.params[S.PARAM_PROFILE] == S.FIX_PROFILE
+    assert fix.params[S.PARAM_FIX_OF] == test_job.id
+    assert fix.params[S.PARAM_FIX_ROUND] == 1
+    assert fix.params[S.PARAM_FIX_MODEL] == MODEL
+    assert fix.task.startswith(f"# fix: красный прогон {ref}")
+    assert "t::a" in fix.task
+
+
+async def test_green_test_run_with_fix_model_creates_no_fix_job(queue):
+    test_job = await queue.submit_test(CLIENT, PROJECT, "base/x", fix_model=MODEL)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(
+        test_job.id, S.MSG_TEST_DONE, done_payload(**{S.PAYLOAD_EXIT_CODE: 0})
+    )
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
+
+
+async def test_red_test_run_without_fix_model_creates_no_fix_job(queue):
+    test_job = await submit_test(queue)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(test_job.id, S.MSG_TEST_DONE, done_payload())
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
+
+
+async def test_red_test_run_at_fix_round_limit_creates_no_fix_job(queue):
+    test_job = await queue.submit_test(
+        CLIENT, PROJECT, "base/x", fix_model=MODEL, fix_round=S.FIX_MAX_ROUNDS
+    )
+    assert test_job.params[S.PARAM_FIX_ROUND] == S.FIX_MAX_ROUNDS
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(test_job.id, S.MSG_TEST_DONE, done_payload())
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
 
 
 async def test_test_job_transitions(queue):

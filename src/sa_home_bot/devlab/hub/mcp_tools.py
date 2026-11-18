@@ -159,6 +159,7 @@ async def test(
     args: list[str] | None = None,
     wait: int = 0,
     depends_on: list[str] | None = None,
+    fix_model: str = "",
 ) -> Any:
     if not 0 <= wait <= protocol.TEST_WAIT_MAX_S:
         raise HubError(f"wait: от 0 до {protocol.TEST_WAIT_MAX_S} секунд")
@@ -171,7 +172,7 @@ async def test(
             f"HEAD:{protocol.TEST_BRANCH_PREFIX}{ctx.client}/<n>"
         )
     job = await ctx.store.queue.submit_test(
-        ctx.client, project, ref, cmd, args, depends_on=depends_on or ()
+        ctx.client, project, ref, cmd, args, depends_on=depends_on or (), fix_model=fix_model
     )
     if wait:
         job = await ctx.store.queue.wait_terminal(job.id, wait)
@@ -354,6 +355,11 @@ TOOLS: tuple[Tool, ...] = (
                 "array",
                 "Список id заданий, которые должны завершиться (done) до прогона. "
                 "С одной зависимостью и пустым ref гоняется её ветка agent/<id>.",
+            ),
+            Param(
+                "fix_model",
+                "string",
+                "Модель для автоматического fix при красном прогоне.",
             ),
         ),
         test,
