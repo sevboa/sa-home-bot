@@ -34,10 +34,11 @@ async def queue(tmp_path):
 
 
 async def submit(
-    queue, model=MODEL, priority=0, client=CLIENT, purpose=S.PURPOSE_DEV, depends_on=()
+    queue, model=MODEL, priority=0, client=CLIENT, purpose=S.PURPOSE_DEV, depends_on=(), fallback=""
 ):
     return await queue.submit(
-        client, PROJECT, model, TASK, priority, purpose=purpose, depends_on=depends_on
+        client, PROJECT, model, TASK, priority, purpose=purpose, depends_on=depends_on,
+        fallback=fallback,
     )
 
 
@@ -240,6 +241,44 @@ async def test_depends_on_other_client_raises(queue):
 async def test_submit_without_depends_on_has_no_key(queue):
     job = await submit(queue)
     assert S.PARAM_DEPENDS_ON not in job.params
+
+
+async def test_submit_fallback_same_as_model_raises(queue):
+    with pytest.raises(HubError, match="совпадает"):
+        await queue.submit(CLIENT, PROJECT, MODEL, TASK, fallback=MODEL)
+
+
+async def test_fallback_claimed_when_primary_busy(queue):
+    plain = await submit(queue)
+    job = await submit(queue, fallback="remote")
+    claimed = await queue.claim(EXECUTOR, [MODEL])
+    assert claimed.id == plain.id
+    claimed = await queue.claim(EXECUTOR, ["remote"])
+    assert claimed.id == job.id
+    assert claimed.model == "remote"
+    assert claimed.params[S.PARAM_ORIGINAL_MODEL] == MODEL
+    assert claimed.params[S.PARAM_FALLBACK] == "remote"
+
+
+async def test_fallback_not_taken_when_primary_free_and_live(queue):
+    await submit(queue, fallback="remote")
+    assert await queue.claim(EXECUTOR, ["remote"], live_models=[MODEL, "remote"]) is None
+
+
+async def test_fallback_taken_when_primary_not_live(queue):
+    job = await submit(queue, fallback="remote")
+    claimed = await queue.claim(EXECUTOR, ["remote"], live_models=["remote"])
+    assert claimed.id == job.id
+    assert claimed.model == "remote"
+    assert claimed.params[S.PARAM_ORIGINAL_MODEL] == MODEL
+
+
+async def test_normal_claim_no_model_swap(queue):
+    job = await submit(queue)
+    claimed = await queue.claim(EXECUTOR, [MODEL])
+    assert claimed.id == job.id
+    assert claimed.model == MODEL
+    assert S.PARAM_ORIGINAL_MODEL not in claimed.params
 
 
 async def test_pending_work_false_when_waiting_on_running_dependency(queue):

@@ -112,6 +112,7 @@ async def submit(
     profile: str = protocol.DEFAULT_PROFILE,
     purpose: str = protocol.PURPOSE_DEV,
     depends_on: list[str] | None = None,
+    fallback: str = "",
 ) -> Any:
     if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
         ctx.store.git_root, project, base_branch
@@ -131,6 +132,7 @@ async def submit(
         profile=profile,
         purpose=purpose,
         depends_on=depends_on or (),
+        fallback=fallback,
     )
     return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
 
@@ -315,6 +317,11 @@ TOOLS: tuple[Tool, ...] = (
                 "depends_on",
                 "array",
                 "Список id заданий, которые должны завершиться (done) до начала этого.",
+            ),
+            Param(
+                "fallback",
+                "string",
+                "Запасная удалённая модель: берётся, если основная занята или недоступна.",
             ),
         ),
         submit,
