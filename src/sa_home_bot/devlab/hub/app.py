@@ -12,6 +12,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
+from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import connect_http, executor_api, git_http, mcp_http
 from sa_home_bot.devlab.hub.http import build_app
 from sa_home_bot.devlab.hub.nodes import NodeDirectory, SwarmNodes
@@ -45,9 +46,20 @@ async def purge_loop(
 async def stall_loop(store: HubStore, threshold_s: float, interval_s: float) -> None:
     while True:
         try:
-            flagged = await store.queue.flag_stalled(threshold_s, await store.executor_alive())
+            alive = await store.executor_alive()
+            flagged = await store.queue.flag_stalled(threshold_s, alive)
             for message in flagged:
                 log.warning("Задание %s без вестей: %s", message.job_id, message.payload)
+            models = await store.models()
+            live_models = [m[protocol.MODEL_NAME] for m in models]
+            waiting = await store.queue.flag_waiting(threshold_s, alive, live_models)
+            for message in waiting:
+                log.warning(
+                    "Задание %s ждёт в очереди: %s %s",
+                    message.job_id,
+                    message.kind,
+                    message.payload,
+                )
         except Exception:
             log.exception("Проверка застоя заданий не удалась")
         await asyncio.sleep(interval_s)

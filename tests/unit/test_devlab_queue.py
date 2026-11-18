@@ -869,6 +869,50 @@ async def test_flag_stalled_ignores_other_states_and_kinds(queue):
     assert await queue.flag_stalled(STALL_S, True, far) == []
 
 
+@pytest.mark.parametrize(
+    "executor_alive, live_models, fallback, expected_kind",
+    [
+        (False, [MODEL], "", S.MSG_EXECUTOR_OFFLINE),
+        (True, [], "", S.MSG_WAITING_MODEL),
+        (True, [], "remote", S.MSG_WAITING_MODEL),
+        (True, ["remote"], "remote", None),
+        (True, [MODEL], "", None),
+        (True, [OTHER_MODEL], "", S.MSG_WAITING_MODEL),
+    ],
+)
+async def test_flag_waiting(queue, executor_alive, live_models, fallback, expected_kind):
+    await submit(queue, fallback=fallback)
+    now = utc_now()
+    far = now + timedelta(seconds=STALL_S + 60)
+    messages = await queue.flag_waiting(STALL_S, executor_alive, live_models, far)
+    if expected_kind is None:
+        assert messages == []
+    else:
+        assert len(messages) == 1
+        assert messages[0].kind == expected_kind
+        assert messages[0].payload == {S.PAYLOAD_WAITED_MIN: 31}
+        again = await queue.flag_waiting(STALL_S, executor_alive, live_models, far)
+        assert again == []
+
+
+async def test_flag_waiting_skips_unready_dependency(queue):
+    a = await submit(queue)
+    await submit(queue, depends_on=[a.id])
+    await queue.claim(EXECUTOR, [MODEL])
+    now = utc_now()
+    far = now + timedelta(seconds=STALL_S + 60)
+    messages = await queue.flag_waiting(STALL_S, True, [], far)
+    assert messages == []
+
+
+async def test_flag_waiting_skips_young_job(queue):
+    await submit(queue)
+    now = utc_now()
+    soon = now + timedelta(seconds=STALL_S - 60)
+    messages = await queue.flag_waiting(STALL_S, True, [], soon)
+    assert messages == []
+
+
 async def test_progress_change_counts_as_news(queue):
     job = await running_job(queue)
     start = utc_now()
