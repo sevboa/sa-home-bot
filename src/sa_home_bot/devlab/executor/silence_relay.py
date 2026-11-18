@@ -27,9 +27,7 @@ class SilenceRelay:
         if protocol.FIELD_SILENCE not in reply:
             return
         value = reply[protocol.FIELD_SILENCE]
-        demand: Any = None
-        if protocol.FIELD_LOCAL_DEMAND in reply:
-            demand = reply[protocol.FIELD_LOCAL_DEMAND]
+        demand = reply.get(protocol.FIELD_LOCAL_DEMAND)
         if self._session is None:
             self._session = aiohttp.ClientSession()
         body = {SILENCE_FIELD: value}

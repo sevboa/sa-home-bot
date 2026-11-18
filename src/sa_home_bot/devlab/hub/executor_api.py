@@ -141,12 +141,9 @@ async def heartbeat(request: web.Request) -> web.Response:
         reply[protocol.FIELD_SILENCE] = state and {
             protocol.FIELD_SILENCE_UNTIL: state.until and state.until.isoformat()
         }
-        if state is None:
-            catalog = await store.models()
-            demand = await store.queue.local_demand(local_models(catalog))
-            reply[protocol.FIELD_LOCAL_DEMAND] = demand
-        else:
-            reply[protocol.FIELD_LOCAL_DEMAND] = False
+        reply[protocol.FIELD_LOCAL_DEMAND] = state is None and await store.queue.local_demand(
+            local_models(await store.models())
+        )
     elif principal.role == protocol.ROLE_GATEWAY:
         used_today = body.get(protocol.FIELD_USED_TODAY)
         if isinstance(used_today, dict):
