@@ -11,6 +11,7 @@ from sa_home_bot.bot.wake_state import remember as remember_wake_info
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.addresses import MONITOR_SERVICE, NODE_SERVICE
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, Address, ProtoError
+from sa_home_bot.silence import SilenceService
 
 log = logging.getLogger(__name__)
 
@@ -239,7 +240,11 @@ class WakeOutcome:
     detail: str
 
 
-async def wake_swarm_node_core(node_link: ServiceLink, store: Store, node_id: str) -> WakeOutcome:
+async def wake_swarm_node_core(
+    node_link: ServiceLink, store: Store, node_id: str, *, force: bool = False
+) -> WakeOutcome:
+    if not force and await SilenceService(store).load() is not None:
+        return WakeOutcome(False, f"🔇 Тишина видеокарты: «{node_id}» не будим.")
     info = await resolve_wake_info(node_link, store, node_id)
     if info is None:
         return WakeOutcome(

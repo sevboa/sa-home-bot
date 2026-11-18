@@ -30,6 +30,7 @@
 - [vpn-services/](vpn-services/README.md) — служба `vpn`, `vpn_check`, `reality/`, подписка Hiddify.
 - [platform-llm/](platform-llm/README.md) — служба `llm`: Ollama, транспорт OpenAI
   (`platform-llm/openai-backend.md`), STT/TTS, генерация картинок,
-  маршрутизатор моделей Strata (`platform-llm/strata-switch.md`).
+  маршрутизатор моделей Strata (`platform-llm/strata-switch.md`), тишина видеокарты
+  (`platform-llm/silence.md`).
 - [platform/](platform/README.md) — конфиг, база данных, здоровье и пороги, бэкапы, торренты, задачи.
 - [deploy/extras.md](deploy/extras.md) — extras в `pyproject.toml` и причины пинов зависимостей.

@@ -10,6 +10,7 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.proto.messages import ERR_UNKNOWN_ACTION, ProtoError
+from sa_home_bot.silence import SilenceService
 
 ALFRED_WAKE = {"mac": "7c:83:34:b4:59:ac", "ip": "192.168.0.100", "broadcast": "192.168.0.255"}
 WINPC_WAKE = {"mac": "04:92:26:da:63:7c", "ip": "192.168.0.105", "broadcast": "192.168.0.255"}
@@ -98,6 +99,22 @@ async def test_ensure_service_ready_wakes_unreachable_node(store):
     assert await wake_core.ensure_service_ready(link, store, "winpc", "llm") == wake_core.READY
     assert link.commands[0] == ("send_wol", {"mac": WINPC_WAKE["mac"]}, "alfred")
     assert link.commands[-1][0] == "warmup"
+
+
+async def test_ensure_service_ready_blocked_by_silence(store):
+    link = FakeNodeLink(OWN_STATE, wake_reveals={"winpc:llm": {"asleep": True}})
+    await SilenceService(store).start(30)
+    outcome = await wake_core.ensure_service_ready(link, store, "winpc", "llm")
+    assert outcome == wake_core.UNREACHABLE
+    assert not any(c[0] == "send_wol" for c in link.commands)
+
+
+async def test_wake_swarm_node_core_force_wakes_despite_silence(store):
+    link = FakeNodeLink(OWN_STATE)
+    await SilenceService(store).start(30)
+    outcome = await wake_core.wake_swarm_node_core(link, store, "winpc", force=True)
+    assert outcome.ok
+    assert link.commands == [("send_wol", {"mac": WINPC_WAKE["mac"]}, "alfred")]
 
 
 async def test_ensure_service_ready_unreachable_when_node_never_comes_up(store):
