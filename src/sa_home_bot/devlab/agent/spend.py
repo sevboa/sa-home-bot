@@ -20,6 +20,7 @@ class SpendState(BaseModel):
     reported_cost: float = 0.0
     reported_tokens: int = 0
     extensions: int = 0
+    model: str = ""
 
 
 class JobSpend:
@@ -54,6 +55,12 @@ class JobSpend:
 
     def extend(self) -> None:
         self._update(extensions=self._state.extensions + 1)
+
+    def switch_model(self, model: str) -> None:
+        if self._state.model and self._state.model != model:
+            self._update(model=model, extensions=self._state.extensions + 1)
+        elif not self._state.model:
+            self._update(model=model)
 
     def take_report(self) -> dict[str, Any]:
         state = self._state

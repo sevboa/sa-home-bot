@@ -482,6 +482,7 @@ class AgentWorker(WorkerLoops):
         run.sandbox = sandbox
         await (sandbox.resume() if held else sandbox.start())
         spend = self._spend_of(job)
+        spend.switch_model(job.model)
         entries = await self._catalog.entries(job.model)
         rules = await self._rules(run, project, repo.base, external)
         loop = AgentLoop(
