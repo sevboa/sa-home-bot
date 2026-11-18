@@ -37,6 +37,14 @@ def parse_context(raw: Any) -> int:
         return 0
 
 
+def _exhausted(used: dict[str, Any]) -> bool:
+    def zero(key: str) -> bool:
+        value = used.get(key)
+        return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
+    return any(zero(key) for key in (protocol.LIMIT_RPD_LEFT, protocol.LIMIT_PROVIDER_LEFT))
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     name: str
@@ -47,9 +55,12 @@ class CatalogEntry:
     price_out: float = 0.0
     remote: bool = True
     context: int = 0
+    exhausted: bool = False
 
     @classmethod
     def from_hub(cls, data: dict[str, Any]) -> CatalogEntry:
+        limits = data.get(protocol.FIELD_LIMITS)
+        used = limits.get(data[protocol.MODEL_NAME]) if isinstance(limits, dict) else None
         return cls(
             name=data[protocol.MODEL_NAME],
             gateway=data.get(protocol.MODEL_GATEWAY, ""),
@@ -59,6 +70,7 @@ class CatalogEntry:
             price_out=float(data.get(protocol.MODEL_PRICE_OUT) or 0),
             remote=bool(data.get(protocol.MODEL_REMOTE, True)),
             context=parse_context(data.get(protocol.MODEL_CONTEXT)),
+            exhausted=isinstance(used, dict) and _exhausted(used),
         )
 
     def price(self, tokens_in: int, tokens_out: int) -> float:
@@ -103,11 +115,11 @@ class ModelCatalog:
     async def names(self, kind: str = MODELS_ANY) -> list[str]:
         all_entries = await self._all()
         if kind == MODELS_LOCAL:
-            filtered = [e for e in all_entries if e.url and not e.remote]
+            filtered = [e for e in all_entries if e.url and not e.remote and not e.exhausted]
         elif kind == MODELS_REMOTE:
-            filtered = [e for e in all_entries if e.url and e.remote]
+            filtered = [e for e in all_entries if e.url and e.remote and not e.exhausted]
         else:
-            filtered = [e for e in all_entries if e.url]
+            filtered = [e for e in all_entries if e.url and not e.exhausted]
         return sorted({entry.name for entry in filtered})
 
     async def entries(self, model: str, fresh: bool = False) -> list[CatalogEntry]:
