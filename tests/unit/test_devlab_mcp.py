@@ -229,6 +229,17 @@ async def test_submit_with_depends_on(client, store, alice):
     assert second["job"]["params"]["depends_on"] == [first["job"]["id"]]
 
 
+@pytest.mark.parametrize("deps", [0, 1, 2])
+async def test_submit_without_base_branch_needs_single_dependency(client, store, alice, deps):
+    await register(client, store, alice)
+    first = [(await submit(client, alice))[1]["job"]["id"] for _ in range(deps)]
+    arguments = {"project": PROJECT, "model": MODEL, "task": "# t", "depends_on": first}
+    is_error, reply = await call(client, alice, protocol.TOOL_SUBMIT, **arguments)
+    assert is_error is (deps != 1)
+    if deps == 1:
+        assert reply["job"]["base_branch"] == protocol.AGENT_BRANCH_PREFIX + first[0]
+
+
 async def test_devlab_test_with_depends_on_and_missing_ref(client, store, alice):
     await register(client, store, alice)
     _, first = await submit(client, alice)

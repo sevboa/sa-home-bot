@@ -107,15 +107,19 @@ async def submit(
     project: str,
     model: str,
     task: str,
-    base_branch: str,
+    base_branch: str = "",
     priority: int = 0,
     profile: str = protocol.DEFAULT_PROFILE,
     purpose: str = protocol.PURPOSE_DEV,
     depends_on: list[str] | None = None,
     fallback: str = "",
 ) -> Any:
-    if await ctx.store.queue.has_project(project) and not await repos.branch_exists(
-        ctx.store.git_root, project, base_branch
+    if not base_branch and len(depends_on or []) != 1:
+        raise HubError("base_branch: обязателен, если зависимостей не ровно одна")
+    if (
+        base_branch
+        and await ctx.store.queue.has_project(project)
+        and not await repos.branch_exists(ctx.store.git_root, project, base_branch)
     ):
         raise HubError(
             f"в хабе нет ветки {base_branch!r}: запушь её, "
@@ -128,7 +132,7 @@ async def submit(
         model,
         task,
         priority=priority,
-        base_branch=base_branch,
+        base_branch=base_branch or None,
         profile=profile,
         purpose=purpose,
         depends_on=depends_on or (),
@@ -301,8 +305,8 @@ TOOLS: tuple[Tool, ...] = (
             Param(
                 "base_branch",
                 "string",
-                "Ветка базы в репозитории проекта, уже запушенная: base/<имя>.",
-                required=True,
+                "Ветка базы в репозитории проекта, уже запушенная: base/<имя>. "
+                "Можно не указывать при ровно одной зависимости: база — её ветка agent/<id>.",
             ),
             Param("priority", "integer", "Приоритет, больше — раньше. По умолчанию 0."),
             Param(
