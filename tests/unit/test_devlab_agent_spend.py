@@ -235,6 +235,62 @@ async def test_failover_without_live_gateways():
         await failover([], None).complete(MESSAGES, [])  # type: ignore[arg-type]
 
 
+async def test_failover_silence_waits_and_succeeds():
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    silence_body = {"error": "тишина видеокарты до /silent off", "code": "gpu_silence"}
+    sick_bodies: list = []
+    alive_bodies: list = []
+
+    async def sick_handler(request):
+        sick_bodies.append(await request.json())
+        return web.json_response(silence_body, status=503)
+
+    async def alive_handler(request):
+        alive_bodies.append(await request.json())
+        return web.json_response(
+            reply_body("ок", usage={"prompt_tokens": 5, "completion_tokens": 2})
+        )
+
+    sick_app = web.Application()
+    sick_app.router.add_post(protocol.HTTP_CHAT_PATH, sick_handler)
+    sick_server = TestServer(sick_app)
+    await sick_server.start_server()
+
+    alive_app = web.Application()
+    alive_app.router.add_post(protocol.HTTP_CHAT_PATH, alive_handler)
+    alive_server = TestServer(alive_app)
+    await alive_server.start_server()
+
+    session = aiohttp.ClientSession()
+    try:
+        chat = FailoverChat(
+            StaticCatalog(
+                entry_at(sick_server, "a"),
+                entry_at(alive_server, "b"),
+            ),
+            lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=2,
+            retry_s=0.0,
+            silence_wait_s=60.0,
+            sleep=record_sleep,
+        )
+        reply = await chat.complete(MESSAGES, [])
+    finally:
+        await session.close()
+        await sick_server.close()
+        await alive_server.close()
+
+    assert reply.content == "ок"
+    assert len(sick_bodies) == 3
+    assert len(alive_bodies) == 1
+    assert sleeps == [60.0, 60.0, 60.0]
+
+
 def test_price_reply_rules():
     paid = CatalogEntry("m", "g", "u", price_in=1.0, price_out=2.0)
     free = CatalogEntry("m", "g", "u", free=True, price_in=1.0, price_out=2.0)

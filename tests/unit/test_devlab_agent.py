@@ -502,6 +502,28 @@ async def test_gateway_chat_timeout_and_http_error():
         await server.close()
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "silence", "transient"),
+    [
+        (503, '{"error": "тишина видеокарты до /silent off", "code": "gpu_silence"}', True, True),
+        (503, '{"error": "лежит"}', False, True),
+    ],
+)
+async def test_gateway_chat_silence_detection(status, body, silence, transient):
+    async def handler(request):
+        return web.json_response(json.loads(body), status=status)
+
+    server, chat = await run_gateway(handler)
+    try:
+        with pytest.raises(ModelError) as info:
+            await chat.complete([], [])
+    finally:
+        await chat.close()
+        await server.close()
+    assert info.value.silence is silence
+    assert info.value.transient is transient
+
+
 def test_parse_reply_rejects_garbage():
     with pytest.raises(ModelError):
         parse_reply({"choices": []})

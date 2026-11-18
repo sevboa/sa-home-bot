@@ -19,6 +19,7 @@ CATALOG_TTL_S = 15.0
 ROUTE_ROUNDS = 6
 ROUTE_RETRY_S = 5.0
 ROUTE_RETRY_MAX_S = 60.0
+SILENCE_WAIT_S = 60.0
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
 MODELS_ANY = "any"
@@ -131,6 +132,7 @@ class FailoverChat:
         rounds: int = ROUTE_ROUNDS,
         retry_s: float = ROUTE_RETRY_S,
         retry_max_s: float = ROUTE_RETRY_MAX_S,
+        silence_wait_s: float = SILENCE_WAIT_S,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._catalog = catalog
@@ -139,6 +141,7 @@ class FailoverChat:
         self._rounds = rounds
         self._retry_s = retry_s
         self._retry_max_s = retry_max_s
+        self._silence_wait_s = silence_wait_s
         self._sleep = sleep
         self._preferred: str | None = None
 
@@ -146,24 +149,40 @@ class FailoverChat:
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> ModelReply:
         last: ModelError | None = None
-        for attempt in range(self._rounds):
+        attempt = 0
+        while attempt < self._rounds:
             if attempt:
                 await self._sleep(min(self._retry_s * 2 ** (attempt - 1), self._retry_max_s))
             entries = await self._ordered(fresh=attempt > 0)
             if not entries:
                 last = ModelError(f"модели {self._model!r} нет на живых шлюзах", transient=True)
+                attempt += 1
                 continue
-            for entry in entries:
+            i = 0
+            silence_count = 0
+            while i < len(entries):
+                entry = entries[i]
                 try:
                     reply = await self._make_chat(entry).complete(messages, tools)
                 except ModelError as exc:
                     if not exc.transient:
                         raise
+                    if exc.silence:
+                        log.info("Тишина видеокарты, модель %s ждёт: %s", self._model, exc)
+                        await self._sleep(self._silence_wait_s)
+                        silence_count += 1
+                        if silence_count >= 3:
+                            silence_count = 0
+                            i += 1
+                        continue
                     log.warning("Шлюз %s модели %s: %s", entry.gateway, self._model, exc)
                     last = exc
+                    silence_count = 0
+                    i += 1
                     continue
                 self._preferred = entry.gateway
                 return price_reply(entry, reply)
+            attempt += 1
         assert last is not None
         raise ModelError(f"все шлюзы модели {self._model!r} отказали: {last}")
 
