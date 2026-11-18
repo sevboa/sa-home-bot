@@ -808,6 +808,7 @@ async def test_flag_stalled_ignores_other_states_and_kinds(queue):
         (False, [MODEL], "", S.MSG_EXECUTOR_OFFLINE),
         (True, [], "", S.MSG_WAITING_MODEL),
         (True, [], "remote", S.MSG_WAITING_MODEL),
+        (True, ["remote"], "remote", None),
         (True, [MODEL], "", None),
         (True, [OTHER_MODEL], "", S.MSG_WAITING_MODEL),
     ],
