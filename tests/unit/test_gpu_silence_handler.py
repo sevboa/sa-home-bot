@@ -56,14 +56,20 @@ def _kit(store, tmp_path):
     ("pre", "args", "expected"),
     [
         ("", "", r"🔇 Тишина видеокарты до /silent off\. Альфред в городе на это время\."),
-        ("",
-         "30",
-         r"🔇 Тишина видеокарты до \d{2}\.\d{2} \d{2}:\d{2}\."
-         r" Альфред в городе на это время\."),
+        (
+            "",
+            "30",
+            r"🔇 Тишина видеокарты до \d{2}\.\d{2} \d{2}:\d{2}\."
+            r" Альфред в городе на это время\.",
+        ),
         ("30", "status", r"🔇 Тишина видеокарты до \d{2}\.\d{2} \d{2}:\d{2}\."),
         ("30", "off", r"🔈 Тишина снята\. Альфред вернулся в замок\. Ждать ответа некому\."),
-        ("", "скоро", r"Не понял\. /silent — до /silent off, /silent 30 — на 30 минут, "
-         r"/silent off — снять, /silent status — состояние\."),
+        (
+            "",
+            "скоро",
+            r"Не понял\. /silent — до /silent off, /silent 30 — на 30 минут, "
+            r"/silent off — снять, /silent status — состояние\.",
+        ),
     ],
     ids=["infinite", "minutes", "status", "off", "unknown"],
 )
@@ -102,26 +108,10 @@ async def test_cmd_silent_minutes_matches_silence_and_away(store, tmp_path):
     assert state.until == silence_state.until == T0 + timedelta(minutes=30)
 
 
-async def test_cmd_silent_off_returns_alfred(store, tmp_path):
+@pytest.mark.parametrize(("subscription", "allowed"), [(DENIED_SUB, False), (SILENT_SUB, True)])
+async def test_cmd_silent_guest_needs_silent_right(store, tmp_path, subscription, allowed):
     silence, away, _ = _kit(store, tmp_path)
-    await call("30", silence, away, Runner())
-    msg = await call("off", silence, away, Runner())
-    assert "🔈 Тишина снята." in msg.sent[-1]
-    assert await away.load() is None
-    assert await silence.load() is None
-
-
-async def test_cmd_silent_denied_for_guest_without_right(store, tmp_path):
-    silence, away, _ = _kit(store, tmp_path)
-    msg = await call("30", silence, away, Runner(), subscription=DENIED_SUB)
-    assert msg.sent[-1] == DENIED_TEXT
-    assert await silence.load() is None
-    assert await away.load() is None
-
-
-async def test_cmd_silent_allowed_for_guest_with_right(store, tmp_path):
-    silence, away, _ = _kit(store, tmp_path)
-    msg = await call("30", silence, away, Runner(), subscription=SILENT_SUB)
-    assert "🔇 Тишина видеокарты" in msg.sent[-1]
-    assert await silence.load() is not None
-    assert await away.load() is not None
+    msg = await call("30", silence, away, Runner(), subscription=subscription)
+    assert (msg.sent[-1] == DENIED_TEXT) is not allowed
+    assert (await silence.load() is not None) is allowed
+    assert (await away.load() is not None) is allowed
