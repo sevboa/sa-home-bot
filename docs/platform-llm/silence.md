@@ -31,6 +31,20 @@
 - Открыто: бессрочная тишина держит Альфреда в городе только 24 ч (потолок `MAX_AWAY`), продления
   отъезда по таймеру пока нет — повторный `/silent` продлевает.
 
+## CLI `sa-home-bot silent` (2026-11-18)
+
+- Команды: `silent status`, `silent set [минуты]` (`minutes` — `nargs="?", type=int`, без числа —
+  бессрочно), `silent off`; `--by claude|admin` у `set` и `off` (`claude` по умолчанию).
+- Разбор БД и печать — как в `away_cli.py`: БД не найдена → код 2; печать через `html.unescape`;
+  `set` с `minutes < 1` → `ValueError` из `SilenceService.start` в stderr, код 1.
+- Логика «тишина + Альфред в городе» вынесена в общий модуль `bot/gpu_silence.py`
+  (`SILENCE_AWAY_REASON`, `until_text`, `start_silence`, `away_for_silence`) — его зовут и
+  обработчик `bot/handlers/gpu_silence.py`, и `silence_cli.py`.
+- `off` снимает тишину и, если Альфред в городе с `SILENCE_AWAY_REASON`, вызывает `away.back()`
+  (без `AwayRunner`, поэтому kick-обратного прохода нет).
+- При `--by claude` после `set`/`off` — заметка владельцу через `queue_notice`
+  («Claude включил тишину видеокарты. …» / «Claude снял тишину видеокарты. …»), как в `away_cli.py`.
+
 ## Правило продления (`SilenceService.start`)
 
 - `minutes is None` → бессрочная (`until=None`); `minutes < 1` → `ValueError`.
