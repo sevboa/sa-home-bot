@@ -272,9 +272,6 @@ async def test_non_model_failure_still_fails_job(env, monkeypatch):
     job_id = await submit(env)
 
     class StuckLoop(AgentLoop):
-        def __init__(self, model, tools, guard, limits, **kwargs) -> None:
-            super().__init__(model, tools, guard, limits, **kwargs)
-
         async def run(self, system: str, task: str, resume: Dialog | None = None) -> AgentResult:
             return AgentResult(AgentStatus.STUCK, reason="застрял")
 
