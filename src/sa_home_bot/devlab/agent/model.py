@@ -12,6 +12,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELD
 from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
 from sa_home_bot.devlab.usage import usage_cost
+from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
 
 MODEL_TIMEOUT_S = 1800.0
 ERROR_SNIPPET_CHARS = 300
@@ -22,9 +23,10 @@ log = logging.getLogger(__name__)
 
 
 class ModelError(Exception):
-    def __init__(self, message: str, transient: bool = False) -> None:
+    def __init__(self, message: str, transient: bool = False, silence: bool = False) -> None:
         super().__init__(message)
         self.transient = transient
+        self.silence = silence
 
 
 class PaidFreeModelError(ModelError):
@@ -113,6 +115,7 @@ class GatewayChat:
                     raise ModelError(
                         f"шлюз ответил HTTP {resp.status}: {error_text(text)}",
                         transient=resp.status >= 500 or resp.status == 429,
+                        silence=is_silence(resp.status, text),
                     )
                 data = await resp.json(content_type=None)
         except TimeoutError as exc:
@@ -129,6 +132,16 @@ def error_text(body: str) -> str:
         return body[:ERROR_SNIPPET_CHARS]
     message = parsed.get(protocol.FIELD_ERROR) if isinstance(parsed, dict) else None
     return str(message if message is not None else body)[:ERROR_SNIPPET_CHARS]
+
+
+def is_silence(status: int, body: str) -> bool:
+    if status != SILENCE_STATUS:
+        return False
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("code") == SILENCE_CODE
 
 
 def provider_error(data: Any) -> ModelError | None:

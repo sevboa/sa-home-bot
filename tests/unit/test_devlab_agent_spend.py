@@ -20,6 +20,7 @@ from sa_home_bot.devlab.executor.routing import (
     ModelCatalog,
     price_reply,
 )
+from sa_home_bot.llm.strata_switch import SILENCE_CODE
 from sa_home_bot.utils.files import load_model
 from tests.unit import test_devlab_executor as executor_tests
 from tests.unit.support.fakes import ScriptedChatModel, StaticCatalog, local_entry
@@ -233,6 +234,41 @@ async def test_failover_all_gateways_down_fails_and_client_error_does_not_switch
 async def test_failover_without_live_gateways():
     with pytest.raises(ModelError, match="нет на живых шлюзах"):
         await failover([], None).complete(MESSAGES, [])  # type: ignore[arg-type]
+
+
+async def test_failover_silence_waits_without_spending_rounds():
+    sleeps: list[float] = []
+    calls = 0
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            return web.json_response({"error": "тишина", "code": SILENCE_CODE}, status=503)
+        return web.json_response(reply_body("ок"))
+
+    app = web.Application()
+    app.router.add_post(protocol.HTTP_CHAT_PATH, handler)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    try:
+        chat = FailoverChat(
+            StaticCatalog(entry_at(server, "a")),
+            lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=2,
+            silence_wait_s=60.0,
+            sleep=record_sleep,
+        )
+        reply = await chat.complete(MESSAGES, [])
+    finally:
+        await session.close()
+        await server.close()
+    assert (reply.content, calls, sleeps) == ("ок", 4, [60.0, 60.0, 60.0])
 
 
 def test_price_reply_rules():
