@@ -229,6 +229,12 @@ async def test_submit_with_depends_on(client, store, alice):
     assert second["job"]["params"]["depends_on"] == [first["job"]["id"]]
 
 
+async def test_submit_with_fallback(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice, fallback="openrouter-free")
+    assert submitted["job"]["params"]["fallback"] == "openrouter-free"
+
+
 async def test_release_requires_waiting_owner(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice)

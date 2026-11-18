@@ -230,6 +230,7 @@ class HubQueue:
         profile: str = protocol.DEFAULT_PROFILE,
         purpose: str = protocol.PURPOSE_DEV,
         depends_on: Collection[str] = (),
+        fallback: str = "",
     ) -> Job:
         if not model.strip() or not task.strip():
             raise HubError("у задания должны быть модель и task.md")
@@ -251,6 +252,9 @@ class HubQueue:
                 base_branch = protocol.AGENT_BRANCH_PREFIX + deps[0]
             elif len(deps) > 1:
                 raise HubError("несколько зависимостей: укажи base_branch")
+        fallback = fallback.strip()
+        if fallback and fallback == model.strip():
+            raise HubError("запасная модель совпадает с основной")
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
@@ -265,6 +269,8 @@ class HubQueue:
             params_dict = {protocol.PARAM_PROFILE: profile, protocol.PARAM_PURPOSE: purpose}
             if deps:
                 params_dict[protocol.PARAM_DEPENDS_ON] = deps
+            if fallback:
+                params_dict[protocol.PARAM_FALLBACK] = fallback
             params = json.dumps(params_dict, ensure_ascii=False)
             await conn.execute(
                 "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
@@ -371,6 +377,7 @@ class HubQueue:
         models: Collection[str],
         kinds: Collection[str] = (protocol.JOB_KIND_AGENT,),
         busy_bases: Collection[str] = (),
+        live_models: Collection[str] | None = None,
     ) -> Job | None:
         unknown = [k for k in kinds if k not in protocol.JOB_KINDS]
         if unknown:
@@ -384,6 +391,16 @@ class HubQueue:
             free_base = f" AND base_branch NOT IN ({_in(busy_bases)})" if busy_bases else ""
             fits.append(f"(kind = ? AND model IN ({_in(models)}){free_base})")
             args.extend([protocol.JOB_KIND_AGENT, *models, *busy_bases])
+            busy = "EXISTS (SELECT 1 FROM jobs r WHERE r.status = ? AND r.model = jobs.model)"
+            live = f" OR model NOT IN ({_in(live_models)})" if live_models else ""
+            fits.append(
+                f"(kind = ? AND json_extract(params, '$.fallback') IN ({_in(models)})"
+                f" AND ({busy}{live}){free_base})"
+            )
+            args.extend([protocol.JOB_KIND_AGENT, *models, protocol.STATUS_RUNNING])
+            if live_models:
+                args.extend(live_models)
+            args.extend(busy_bases)
         if not fits:
             return None
         args.append(protocol.STATUS_DONE)
@@ -401,6 +418,16 @@ class HubQueue:
                 return None
             job = _job(row)
             self._check_transition(job, protocol.STATUS_RUNNING)
+            if protocol.PARAM_FALLBACK in job.params and job.model not in models:
+                params = {**job.params, protocol.PARAM_ORIGINAL_MODEL: job.model}
+                await conn.execute(
+                    "UPDATE jobs SET model = ?, params = ? WHERE id = ?",
+                    (
+                        job.params[protocol.PARAM_FALLBACK],
+                        json.dumps(params, ensure_ascii=False),
+                        job.id,
+                    ),
+                )
             await conn.execute(
                 "UPDATE jobs SET status = ?, executor = ?, started = COALESCE(started, ?),"
                 " finished = NULL WHERE id = ?",

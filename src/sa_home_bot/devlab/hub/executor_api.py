@@ -36,8 +36,13 @@ async def claim(request: web.Request) -> web.Response:
     busy_bases = body.get(protocol.FIELD_BUSY_BASES, [])
     if not isinstance(busy_bases, list) or not all(isinstance(b, str) for b in busy_bases):
         raise HubError("claim: busy_bases — список строк")
-    job = await request.app[STORE_KEY].queue.claim(
-        request[PRINCIPAL_KEY].name, models, kinds, busy_bases
+    store = request.app[STORE_KEY]
+    job = await store.queue.claim(
+        request[PRINCIPAL_KEY].name,
+        models,
+        kinds,
+        busy_bases,
+        live_models=[m[protocol.MODEL_NAME] for m in await store.models()],
     )
     return web.json_response({protocol.FIELD_JOB: asdict(job) if job else None})
 
