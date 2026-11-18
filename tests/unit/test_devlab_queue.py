@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 import pytest
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.queue import SCHEMA as S_QUEUE_SCHEMA
-from sa_home_bot.devlab.hub.queue import TransitionRefused
+from sa_home_bot.devlab.hub.queue import TransitionRefused, in_windows
 from sa_home_bot.devlab.hub.store import HUB_DB_NAME, HubStore
 from sa_home_bot.utils.clock import utc_now
 
@@ -46,6 +46,48 @@ async def running_job(queue):
     job = await submit(queue)
     await queue.claim(EXECUTOR, [MODEL])
     return job
+
+
+@pytest.fixture
+async def bench_queue(tmp_path):
+    store = HubStore(tmp_path, bench_windows=["01:00-07:00"])
+    await store.open()
+    await store.queue.add_project(PROJECT)
+    yield store.queue
+    await store.close()
+
+
+WINDOWS_CASES = [
+    ([], time(12, 0), True),
+    (["01:00-07:00"], time(3, 0), True),
+    (["01:00-07:00"], time(7, 0), False),
+    (["23:00-07:00"], time(23, 30), True),
+    (["23:00-07:00"], time(6, 59), True),
+    (["23:00-07:00"], time(12, 0), False),
+]
+
+
+@pytest.mark.parametrize(("windows", "moment", "expected"), WINDOWS_CASES)
+def test_in_windows(windows, moment, expected):
+    assert in_windows(windows, moment) is expected
+
+
+def test_in_windows_bad():
+    with pytest.raises(ValueError, match="25:00-x"):
+        in_windows(["25:00-x"], time(0, 0))
+
+
+async def test_bench_claim_outside_window(bench_queue):
+    bench = await submit(bench_queue, purpose=S.PURPOSE_BENCH)
+    assert await bench_queue.claim(EXECUTOR, [MODEL], now=datetime(2026, 11, 18, 12, 0)) is None
+    found = await bench_queue.claim(EXECUTOR, [MODEL], now=datetime(2026, 11, 18, 3, 0))
+    assert found.id == bench.id
+
+
+async def test_dev_claim_outside_bench_window(bench_queue):
+    job = await submit(bench_queue)
+    claimed = await bench_queue.claim(EXECUTOR, [MODEL], now=datetime(2026, 11, 18, 12, 0))
+    assert claimed.id == job.id
 
 
 async def waiting_job(queue):

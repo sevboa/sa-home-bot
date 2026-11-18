@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -60,11 +61,11 @@ def new_token() -> str:
 
 
 class HubStore:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, bench_windows: Collection[str] = ()) -> None:
         self._db = Database(data_dir / HUB_DB_NAME)
         self.git_root = data_dir / GIT_DIR_NAME
         self.logs_root = data_dir / LOGS_DIR_NAME
-        self.queue = queue.HubQueue(self._db, self.logs_root)
+        self.queue = queue.HubQueue(self._db, self.logs_root, bench_windows)
 
     async def open(self) -> None:
         await self._db.open()

@@ -87,7 +87,7 @@ def build_hub_app(
 async def run_hub(settings: Settings) -> None:
     cfg = settings.devlab_hub
     host = cfg.bind_host or await tailscale_address()
-    store = HubStore(cfg.data_dir)
+    store = HubStore(cfg.data_dir, cfg.bench_windows)
     await store.open()
     wake_db = Database(cfg.data_dir / WAKE_DB_NAME)
     await wake_db.open()
