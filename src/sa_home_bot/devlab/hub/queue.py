@@ -498,7 +498,7 @@ class HubQueue:
             ):
                 raise HubError(f"задание {job_id} ({job.kind}): {kind} недопустим")
             if kind == protocol.MSG_REQUEUE:
-                if not is_test or job.status != protocol.STATUS_RUNNING:
+                if job.status != protocol.STATUS_RUNNING:
                     raise HubError(
                         f"задание {job_id} ({job.kind}, {job.status}): {kind} недопустим"
                     )
@@ -527,11 +527,19 @@ class HubQueue:
         self, conn: aiosqlite.Connection, job: Job, payload: dict[str, Any]
     ) -> tuple[str, dict[str, Any]]:
         attempts = int(job.params.get(protocol.PARAM_ATTEMPTS, 0))
-        if attempts >= protocol.TEST_MAX_REQUEUES:
+        limit = (
+            protocol.TEST_MAX_REQUEUES
+            if job.kind == protocol.JOB_KIND_TEST
+            else protocol.AGENT_MAX_REQUEUES
+        )
+        if attempts >= limit:
             self._check_transition(job, protocol.STATUS_FAILED)
             await self._set_status(conn, job, protocol.STATUS_FAILED)
             await HubQueue._notify_dependents(conn, job, protocol.STATUS_FAILED)
-            text = f"исполнитель перезапускался во время прогона {attempts + 1} раз"
+            if job.kind == protocol.JOB_KIND_TEST:
+                text = f"исполнитель перезапускался во время прогона {attempts + 1} раз"
+            else:
+                text = f"модель недоступна, задание возвращалось в очередь {attempts + 1} раз"
             return protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
         params = {**job.params, protocol.PARAM_ATTEMPTS: attempts + 1}
         await conn.execute(

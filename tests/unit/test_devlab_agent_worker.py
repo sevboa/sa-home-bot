@@ -256,17 +256,36 @@ async def test_outbox_survives_unreachable_hub_and_restart(env):
     assert await env.inbox_kinds() == STARTED_DONE
 
 
-async def test_model_failure_marks_job_failed_and_keeps_partial(env):
+async def test_model_failure_requeues_job_and_keeps_wip(env):
     job_id = await submit(env)
     worker = make_worker(env, ScriptedChatModel(WRITE_DONE, ModelError("шлюз лёг")))
 
     assert await worker.claim_once()
 
+    assert await env.status(job_id) == protocol.STATUS_QUEUED
+    requeued = await env.store.queue.last_message(job_id, protocol.MSG_REQUEUE)
+    assert "шлюз лёг" in requeued.payload[protocol.PAYLOAD_TEXT]
+    assert await hub_branch(env, wip_of(job_id))
+
+
+async def test_non_model_failure_still_fails_job(env, monkeypatch):
+    job_id = await submit(env)
+
+    class StuckLoop(AgentLoop):
+        def __init__(self, model, tools, guard, limits, **kwargs) -> None:
+            super().__init__(model, tools, guard, limits, **kwargs)
+
+        async def run(self, system: str, task: str, resume: Dialog | None = None) -> AgentResult:
+            return AgentResult(AgentStatus.STUCK, reason="застрял")
+
+    monkeypatch.setattr(agent_worker_module, "AgentLoop", StuckLoop)
+    worker = make_worker(env, ScriptedChatModel())
+
+    assert await worker.claim_once()
+
     assert await env.status(job_id) == protocol.STATUS_FAILED
     failed = await env.store.queue.last_message(job_id, protocol.MSG_FAILED)
-    assert "шлюз лёг" in failed.payload[protocol.PAYLOAD_TEXT]
-    assert await hub_branch(env, wip_of(job_id)) is None
-    assert await hub_branch(env, agent_of(job_id))
+    assert "застрял" in failed.payload[protocol.PAYLOAD_TEXT]
 
 
 class LimitsProbe(AgentLoop):
@@ -486,13 +505,13 @@ async def test_steps_journal_is_uploaded_after_done(env):
     assert '"write_file"' in tail["text"]
 
 
-async def test_steps_journal_is_uploaded_after_failed(env):
+async def test_steps_journal_is_uploaded_after_model_failure(env):
     job_id = await submit(env)
     worker = make_worker(env, ScriptedChatModel(WRITE_DONE, ModelError("шлюз лёг")))
 
     assert await worker.claim_once()
 
-    assert await env.status(job_id) == protocol.STATUS_FAILED
+    assert await env.status(job_id) == protocol.STATUS_QUEUED
     entries = uploaded_steps(env, job_id)
     assert entries[-1]["status"] == "model_failed"
     assert entries[1]["calls"][0]["name"] == "write_file"

@@ -959,23 +959,47 @@ async def test_requeue_does_not_wake_terminal_waiter(queue):
     assert (await waiting).status == S.STATUS_DONE
 
 
-async def test_requeue_limit_fails_job_with_reason(queue):
-    job = await claimed_test(queue)
-    for _ in range(S.TEST_MAX_REQUEUES):
+async def claimed_job(queue, kind):
+    if kind == S.JOB_KIND_TEST:
+        return await claimed_test(queue)
+    job = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    return job
+
+
+@pytest.mark.parametrize(
+    ("kind", "limit", "phrase"),
+    [
+        (S.JOB_KIND_TEST, S.TEST_MAX_REQUEUES, "перезапускался"),
+        (S.JOB_KIND_AGENT, S.AGENT_MAX_REQUEUES, "возвращалось"),
+    ],
+    ids=("test", "agent"),
+)
+async def test_requeue_limit_fails_job_with_reason(queue, kind, limit, phrase):
+    job = await claimed_job(queue, kind)
+    for _ in range(limit):
         await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor=EXECUTOR)
-        await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+        if kind == S.JOB_KIND_TEST:
+            await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+        else:
+            await queue.claim(EXECUTOR, [MODEL])
     await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor=EXECUTOR)
     after = await queue.get_job(job.id)
     assert after.status == S.STATUS_FAILED
     message = await queue.last_message(job.id, S.MSG_FAILED)
-    assert str(S.TEST_MAX_REQUEUES + 1) in message.payload[S.PAYLOAD_TEXT]
+    assert str(limit + 1) in message.payload[S.PAYLOAD_TEXT]
+    assert phrase in message.payload[S.PAYLOAD_TEXT]
 
 
-async def test_requeue_rejected_for_agent_job(queue):
+async def test_requeue_returns_agent_job_to_queue(queue):
     job = await running_job(queue)
-    with pytest.raises(HubError):
-        await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor=EXECUTOR)
-    assert (await queue.get_job(job.id)).status == S.STATUS_RUNNING
+    await queue.post_from_executor(job.id, S.MSG_REQUEUE, executor=EXECUTOR)
+    after = await queue.get_job(job.id)
+    assert (after.status, after.executor, after.finished) == (S.STATUS_QUEUED, None, None)
+    assert after.params[S.PARAM_ATTEMPTS] == 1
+    assert [m.kind for m in await queue.inbox(CLIENT)] == [S.MSG_REQUEUE]
+    again = await queue.claim(EXECUTOR, [MODEL])
+    assert again.id == job.id
 
 
 async def test_requeue_rejected_when_not_running(queue):
