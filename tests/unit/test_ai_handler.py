@@ -8,6 +8,7 @@ import pytest
 
 from sa_home_bot.bot import ai_flow, ai_lines, ai_reply, ai_turns, voice_mode
 from sa_home_bot.bot.handlers import ai as ai_handler
+from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -1836,9 +1837,7 @@ async def test_cmd_ai_blocked_reply_marks_queue_blocked_and_records_nothing(stor
         tool_calls=ToolCalls(),
     )
 
-    from sa_home_bot.bot.reply_queue import ReplyQueue
-    queue = ReplyQueue(store)
-    entries = await queue.entries()
+    entries = await ReplyQueue(store).entries()
     assert len(entries) == 1
     assert entries["1"]["blocked"] is True
     rows = await store.ai_turns_for_dialogue(1, message.message_id)

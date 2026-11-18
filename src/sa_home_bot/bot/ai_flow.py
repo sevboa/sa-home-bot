@@ -56,7 +56,7 @@ from sa_home_bot.llm_chat import ChatStats, run_chat_loop
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.proto.addresses import LLM_ADDRESS, LLM_NODE, LLM_SERVICE, node_address
 from sa_home_bot.proto.errors import ServiceUnavailableError
-from sa_home_bot.proto.messages import Address, ProtoError
+from sa_home_bot.proto.messages import ERR_BAD_REQUEST, Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.utils.clock import utc_now
 
@@ -362,8 +362,6 @@ class _AlfredTurn:
             answer = await self._ask()
             return answer, None, False
         except ProtoError as exc:
-            from sa_home_bot.proto.messages import ERR_BAD_REQUEST
-
             reason = f"{exc.code} — {exc.message}"
             is_hard = exc.code == ERR_BAD_REQUEST
             return None, reason, is_hard
