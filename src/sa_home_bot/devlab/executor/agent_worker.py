@@ -618,6 +618,10 @@ class AgentWorker(WorkerLoops):
             )
             return
         reason = f"{FAILURE_PREFIX[result.status]}: {result.reason}"
+        if result.status is AgentStatus.MODEL_FAILED:
+            await self._retry(lambda: run.repo.flush(), None)
+            await self.send(job.id, protocol.MSG_REQUEUE, {protocol.PAYLOAD_TEXT: reason, **usage})
+            return
         await self._abandon(run, reason)
         await self.send(job.id, protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: reason, **usage})
 
