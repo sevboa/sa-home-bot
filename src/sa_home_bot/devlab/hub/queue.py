@@ -447,9 +447,16 @@ class HubQueue:
                 f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
                 f"({' OR '.join(fits)}) AND {READY_SQL}{bench}"
                 " ORDER BY (kind = ?) DESC, "
-                "(json_extract(params, '$.purpose') = ?) ASC, "
+                "CASE json_extract(params, '$.purpose') "
+                "WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END ASC, "
                 "priority DESC, seq LIMIT 1",
-                (*args, *bench_args, protocol.JOB_KIND_TEST, protocol.PURPOSE_BENCH),
+                (
+                    *args,
+                    *bench_args,
+                    protocol.JOB_KIND_TEST,
+                    protocol.PURPOSE_FIX,
+                    protocol.PURPOSE_BENCH,
+                ),
             )
             row = await cur.fetchone()
             if row is None:
