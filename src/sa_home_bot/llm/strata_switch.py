@@ -645,7 +645,7 @@ class EngineFreezer:
         if self.holders == 1 and not self.frozen:
             self.expired = False
             self.frozen = self._find()
-            self.frozen_since = self._clock()
+            self.frozen_since = self._clock() if self.frozen else None
             self._signal(self.frozen, signal.SIGSTOP)
             log.info("основная модель заморожена на время приоритета: %s", self.frozen)
 
@@ -657,10 +657,10 @@ class EngineFreezer:
 
     def thaw(self) -> None:
         pids = self.frozen
-        if not pids:
-            return
         self.frozen = []
         self.frozen_since = None
+        if not pids:
+            return
         self._signal(pids, signal.SIGCONT)
         log.info("основная модель разморожена: %s", pids)
 

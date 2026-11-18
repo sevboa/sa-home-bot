@@ -1842,6 +1842,17 @@ def test_freezer_thaws_after_max_and_does_not_refreeze_for_held_priority():
     assert sent.sent[-1] == (41, signal.SIGSTOP)
 
 
+def test_freezer_hold_with_no_processes_does_not_set_frozen_since():
+    clock = StepClock(step=0.0)
+    freezer, sent = frozen_engine(pids=[], clock=clock, max_s=5.0)
+    freezer.hold()
+    clock.now += 10.0
+    assert freezer.expire_if_stuck() is False
+    assert freezer.expire_if_stuck() is False
+    assert sent.sent == []
+    assert freezer.frozen_since is None
+
+
 async def test_gate_hold_blocks_normal_admission_and_freezes_engine():
     freezer, sent = frozen_engine()
     gate = PriorityGate(StepClock(step=0.0), 0.01, 0.0, freezer)
