@@ -1842,6 +1842,17 @@ def test_freezer_thaws_after_max_and_does_not_refreeze_for_held_priority():
     assert sent.sent[-1] == (41, signal.SIGSTOP)
 
 
+def test_freezer_hold_with_no_processes_does_not_set_frozen_since():
+    clock = StepClock(step=0.0)
+    freezer, sent = frozen_engine(pids=[], clock=clock, max_s=5.0)
+    freezer.hold()
+    clock.now += 10.0
+    assert freezer.expire_if_stuck() is False
+    assert freezer.expire_if_stuck() is False
+    assert sent.sent == []
+    assert freezer.frozen_since is None
+
+
 async def test_gate_hold_blocks_normal_admission_and_freezes_engine():
     freezer, sent = frozen_engine()
     gate = PriorityGate(StepClock(step=0.0), 0.01, 0.0, freezer)
@@ -2177,6 +2188,53 @@ async def test_unload_if_free_returns_false_when_active_request():
     result = await switch.unload_if_free()
     assert result is False
     assert run.calls == []
+
+
+@pytest.mark.parametrize(
+    ("main_idle_stop_s", "now", "active", "expected"),
+    [
+        (600.0, 1000.0, 0, True),
+        (0.0, 1000.0, 0, False),
+        (600.0, 1000.0, 1, False),
+        (600.0, 599.0, 0, False),
+    ],
+    ids=["истёк", "нуль", "занят", "не истёк"],
+)
+async def test_main_idle_expired(main_idle_stop_s, now, active, expected):
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch = StrataSwitch(
+        settings(main_idle_stop_s=main_idle_stop_s), run, StepClock(start=now, step=0.0)
+    )
+    switch.current = "iq3"
+    switch.active = active
+    switch.last_request_end = 0.0
+    assert switch.main_idle_expired() is expected
+
+
+async def test_idle_guard_step_unloads_main_model_after_idle():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch = StrataSwitch(
+        settings(main_idle_stop_s=600.0, stoppers={"iq3": ["/models/iq3-off.sh"]}),
+        run,
+        StepClock(start=1000.0, step=0.0),
+    )
+    switch.current = "iq3"
+    switch.last_request_end = 0.0
+    assert await switch.idle_check() is True
+    assert run.calls == [["/models/iq3-off.sh"]]
+    assert switch.current is None
+
+
+def test_load_settings_reads_main_idle_stop_s(tmp_path: Path):
+    path = tmp_path / "main_idle.toml"
+    path.write_text(
+        'default = "iq3"\nmain_idle_stop_s = 600\n[launchers]\niq3 = ["/models/iq3-on.sh"]\n',
+        encoding="utf-8",
+    )
+    loaded = load_settings(path)
+    assert loaded.main_idle_stop_s == 600.0
 
 
 @pytest.mark.parametrize(
