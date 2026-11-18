@@ -153,6 +153,10 @@ async def _run_turn(
         )
         if raw is None:
             return None
+        if raw == ai_flow.BLOCKED_REPLY:
+            if queue is not None:
+                await queue.block(message.chat.id)
+            return None
         if raw == ai_flow.SILENT_REPLY:
             await _wait_for_tool_photo(message, services, streaming_session)
             if queue is not None:

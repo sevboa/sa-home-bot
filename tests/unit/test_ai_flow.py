@@ -12,7 +12,7 @@ from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.config import LlmConfig, Settings
 from sa_home_bot.llm.prompt import ROUTE_OK, THINK_MARKER
-from sa_home_bot.proto.messages import ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
+from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ERR_INTERNAL, ERR_UNAVAILABLE, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.subscriptions.models import Subscription
 from tests.unit.support.fakes import FakeNotifier
@@ -207,6 +207,12 @@ def _clear_profile_cache():
     ai_flow._profile_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _single_attempt(monkeypatch):
+    monkeypatch.setattr(ai_flow, "REPLY_ATTEMPTS", 1)
+    monkeypatch.setattr(ai_flow, "REPLY_RETRY_DELAYS_S", (0.0, 0.0))
+
+
 async def test_fast_path_no_narrative_when_node_already_up(store):
     message = FakeMessage()
     link = FakeNodeLink(
@@ -388,8 +394,8 @@ async def test_empty_answer_after_round_limit_is_still_a_hiccup(store):
 
     raw = await _ask(message, link, store, "...")
 
-    assert raw is None
-    assert message.answers == [ai_lines.ALBERT_HICCUP]
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers == [ai_lines.ALBERT_RAN_OFF]
 
 
 def test_think_marker_survives_llm_service_transforms(tmp_path):
@@ -463,8 +469,8 @@ async def test_unavailable_wake_sent_but_still_unreachable_after_30s(store, monk
 
     raw = await _ask(message, link, store)
 
-    assert raw is None
-    assert message.answers == [ai_lines.STEPS_TEXT, ai_lines.ALBERT_UNAVAILABLE]
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers == [ai_lines.STEPS_TEXT, ai_lines.ALBERT_RAN_OFF]
     assert link.wol_sent == [{"mac": MYCRAFT_WAKE["mac"]}]
 
 
@@ -480,8 +486,8 @@ async def test_ask_discovers_unavailable_despite_fresh_presence_reports_immediat
 
     raw = await _ask(message, link, store)
 
-    assert raw is None
-    assert message.answers == [ai_lines.ALBERT_UNAVAILABLE]
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers == [ai_lines.ALBERT_RAN_OFF]
     assert link.wol_sent == []
 
 
@@ -497,12 +503,12 @@ async def test_wake_succeeds_but_warmup_fails_after_wake(store, monkeypatch):
 
     raw = await _ask(message, link, store, notifier=notifier)
 
-    assert raw is None
+    assert raw == ai_flow.BLOCKED_REPLY
     assert message.answers == [
         ai_lines.STEPS_TEXT,
         ai_lines.ARNOLD_WAKING,
         ai_lines.STEPS_TEXT,
-        ai_lines.ALBERT_ASLEEP,
+        ai_lines.ALBERT_RAN_OFF,
     ]
     assert link.command_calls[-1] == ("warmup", {}, "mycraft")
     assert len(notifier.sent) == 1
@@ -515,8 +521,8 @@ async def test_node_alive_but_service_down_skips_wake_reports_crashed(store):
 
     raw = await _ask(message, link, store, notifier=notifier)
 
-    assert raw is None
-    assert message.answers == [ai_lines.ALBERT_UNAVAILABLE]
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers == [ai_lines.ALBERT_RAN_OFF]
     assert link.wol_sent == []
     assert link.command_calls == []
     assert len(notifier.sent) == 1
@@ -1092,12 +1098,12 @@ async def test_asleep_warmup_fails_answers_as_albert(store, mode):
 
     raw = await _ask(message, link, store, notifier=notifier, rich_session=session)
 
-    assert raw is None
+    assert raw == ai_flow.BLOCKED_REPLY
     assert _shown(message, session) == _expected(
         mode,
-        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_ASLEEP],
+        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_RAN_OFF],
         statuses=[ai_lines.STEPS_TEXT_PLAIN],
-        finalized=[ai_lines.ALBERT_ASLEEP_MD],
+        finalized=[ai_lines.ALBERT_RAN_OFF_MD],
     )
     assert link.wol_sent == []
     assert link.command_calls == [("warmup", {}, "mycraft")]
@@ -1136,12 +1142,12 @@ async def test_unavailable_and_no_wake_data_gives_up_immediately(store, monkeypa
 
     raw = await _ask(message, link, store, rich_session=session)
 
-    assert raw is None
+    assert raw == ai_flow.BLOCKED_REPLY
     assert _shown(message, session) == _expected(
         mode,
-        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_UNAVAILABLE],
+        plain=[ai_lines.STEPS_TEXT, ai_lines.ALBERT_RAN_OFF],
         statuses=[ai_lines.STEPS_TEXT_PLAIN],
-        finalized=[ai_lines.ALBERT_UNAVAILABLE_MD],
+        finalized=[ai_lines.ALBERT_RAN_OFF_MD],
     )
     assert link.wol_sent == []
     assert link.command_calls == []
@@ -1154,9 +1160,9 @@ async def test_internal_error_answers_user_and_notifies_admin(store, mode):
 
     raw = await _ask(message, link, store, notifier=notifier, rich_session=session)
 
-    assert raw is None
+    assert raw == ai_flow.BLOCKED_REPLY
     assert _shown(message, session) == _expected(
-        mode, plain=[ai_lines.ALBERT_HICCUP], finalized=[ai_lines.ALBERT_HICCUP_MD]
+        mode, plain=[ai_lines.ALBERT_RAN_OFF], finalized=[ai_lines.ALBERT_RAN_OFF_MD]
     )
     assert "Ollama" not in "".join(message.answers)
     assert link.wol_sent == []
@@ -1256,3 +1262,78 @@ async def test_perform_dismissal_blocked_machine_keeps_remark(store, node_respon
 
     assert message.answers == [expected_text]
     assert notifier.sent == []
+
+
+async def test_retry_turns_transient_error_into_success(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "REPLY_ATTEMPTS", 3)
+    monkeypatch.setattr(ai_flow, "REPLY_RETRY_DELAYS_S", (0.0, 0.0))
+    monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
+    message = FakeMessage()
+    notifier = _notifier()
+    link = FakeNodeLink(
+        chat_results=[
+            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            ProtoError(ERR_UNAVAILABLE, "нода недоступна"),
+            {"response": "Ответ"},
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        model_profile={"name": "solo", "router": False, "thinking_hidden": False, "num_ctx": 8192},
+    )
+
+    raw = await _ask(message, link, store, notifier=notifier)
+
+    assert raw == "Ответ"
+    assert ai_lines.ALBERT_RAN_OFF not in message.answers
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "ответ с попытки 2" in admin_text
+
+
+async def test_retry_exhausted_all_attempts_blocks_reply(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "REPLY_ATTEMPTS", 3)
+    monkeypatch.setattr(ai_flow, "REPLY_RETRY_DELAYS_S", (0.0, 0.0))
+    monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
+    message = FakeMessage()
+    notifier = _notifier()
+    link = FakeNodeLink(
+        chat_results=[
+            ProtoError(ERR_INTERNAL, "внутренняя ошибка"),
+            ProtoError(ERR_INTERNAL, "внутренняя ошибка"),
+            ProtoError(ERR_INTERNAL, "внутренняя ошибка"),
+        ],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        model_profile={"name": "solo", "router": False, "thinking_hidden": False, "num_ctx": 8192},
+    )
+
+    raw = await _ask(message, link, store, notifier=notifier)
+
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers[-1] == ai_lines.ALBERT_RAN_OFF
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "после попыток: 3" in admin_text
+
+
+async def test_retry_bad_request_is_hard_failure(store, monkeypatch):
+    monkeypatch.setattr(ai_flow, "REPLY_ATTEMPTS", 3)
+    monkeypatch.setattr(ai_flow, "REPLY_RETRY_DELAYS_S", (0.0, 0.0))
+    monkeypatch.setattr(llm_chat, "CHAT_RETRY_DELAYS_S", (0.0, 0.0))
+    message = FakeMessage()
+    notifier = _notifier()
+    link = FakeNodeLink(
+        chat_results=[ProtoError(ERR_BAD_REQUEST, "плохой запрос")],
+        get_state_routes={"mycraft:llm": {"asleep": False}},
+        model_profile={"name": "solo", "router": False, "thinking_hidden": False, "num_ctx": 8192},
+    )
+
+    raw = await _ask(message, link, store, notifier=notifier)
+
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert message.answers[-1] == ai_lines.ALBERT_RAN_OFF
+    assert len(notifier.sent) == 1
+    admin_chat_id, admin_text = notifier.sent[0]
+    assert admin_chat_id == 999
+    assert "после попыток: 1" in admin_text

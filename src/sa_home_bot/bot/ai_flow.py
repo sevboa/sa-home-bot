@@ -22,12 +22,8 @@ from sa_home_bot.bot.ai_context import (
     replied_picture_note,
 )
 from sa_home_bot.bot.ai_lines import (
-    ALBERT_ASLEEP,
-    ALBERT_ASLEEP_MD,
-    ALBERT_HICCUP,
-    ALBERT_HICCUP_MD,
-    ALBERT_UNAVAILABLE,
-    ALBERT_UNAVAILABLE_MD,
+    ALBERT_RAN_OFF,
+    ALBERT_RAN_OFF_MD,
     ARNOLD_WAKING,
     ARNOLD_WAKING_MD,
     STEPS_TEXT,
@@ -59,7 +55,7 @@ from sa_home_bot.llm.prompt import parse_router_level, wrap_context_note
 from sa_home_bot.llm_chat import ChatStats, run_chat_loop
 from sa_home_bot.people.book import PeopleBook
 from sa_home_bot.proto.addresses import LLM_ADDRESS, LLM_NODE, LLM_SERVICE, node_address
-from sa_home_bot.proto.errors import ServiceUnavailableError, is_service_unavailable
+from sa_home_bot.proto.errors import ServiceUnavailableError
 from sa_home_bot.proto.messages import Address, ProtoError
 from sa_home_bot.subscriptions.book import SubscriptionBook
 from sa_home_bot.utils.clock import utc_now
@@ -67,6 +63,9 @@ from sa_home_bot.utils.clock import utc_now
 log = logging.getLogger(__name__)
 
 SILENT_REPLY = "\x00silent"
+BLOCKED_REPLY = "\x00blocked"
+REPLY_ATTEMPTS = 3
+REPLY_RETRY_DELAYS_S = (10.0, 30.0)
 
 PROFILE_TTL_S = 300.0
 _profile_cache: dict[str, tuple[float, ModelProfileSummary | None]] = {}
@@ -301,6 +300,41 @@ class _AlfredTurn:
     async def run(self) -> str | None:
         await self._prepare_context_note()
         await self._plan_context_window()
+
+        failure_reasons: list[str] = []
+
+        for attempt in range(1, REPLY_ATTEMPTS + 1):
+            if attempt >= 2:
+                delay = REPLY_RETRY_DELAYS_S[min(attempt - 2, len(REPLY_RETRY_DELAYS_S) - 1)]
+                await asyncio.sleep(delay)
+
+            answer, reason, is_hard = await self._attempt()
+            if answer is not None:
+                if attempt == 1:
+                    return answer
+                await notify_admins(
+                    self.book,
+                    self.notifier,
+                    f"⚠️ /ai (chat={self.log_chat_id}): "
+                    f"ответ с попытки {attempt}, сбои: {'; '.join(failure_reasons)}",
+                )
+                return answer
+
+            failure_reasons.append(reason)
+            if is_hard:
+                break
+
+        await self._announce_albert(ALBERT_RAN_OFF, ALBERT_RAN_OFF_MD)
+        await notify_admins(
+            self.book,
+            self.notifier,
+            f"⛔ /ai (chat={self.log_chat_id}): "
+            f"Альфред не ответил после попыток: {len(failure_reasons)}, "
+            f"вопрос ждёт в очереди: {'; '.join(failure_reasons)}",
+        )
+        return BLOCKED_REPLY
+
+    async def _attempt(self) -> tuple[str | None, str | None, bool]:
         outcome = await wake_core.ensure_service_ready(
             self.node_link,
             self.store,
@@ -312,44 +346,30 @@ class _AlfredTurn:
             on_phase_change=self._on_phase_change,
         )
         if outcome == wake_core.CRASHED:
-            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-            await notify_admins(
-                self.book,
-                self.notifier,
-                f"🔥 /ai (chat={self.log_chat_id}): нода «{LLM_NODE}» жива, служба "
-                f"«{LLM_SERVICE}» не отвечает — WoL не поможет, нужен ручной перезапуск службы",
+            reason = (
+                f"нода «{LLM_NODE}» жива, служба «{LLM_SERVICE}» не отвечает — "
+                f"WoL не поможет, нужен ручной перезапуск службы"
             )
-            return None
+            return None, reason, True
         if outcome == wake_core.UNREACHABLE:
-            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-            return None
+            reason = f"нода «{LLM_NODE}» недоступна"
+            return None, reason, False
         if outcome == wake_core.WARMUP_FAILED:
-            await self._announce_albert(ALBERT_ASLEEP, ALBERT_ASLEEP_MD)
-            await notify_admins(
-                self.book,
-                self.notifier,
-                f"⚠️ /ai (chat={self.log_chat_id}): прогрев {LLM_NODE}/{LLM_SERVICE} не подтверждён",
-            )
-            return None
-        return await self._ask_ready_service()
+            reason = f"прогрев {LLM_NODE}/{LLM_SERVICE} не подтверждён"
+            return None, reason, False
 
-    async def _ask_ready_service(self) -> str | None:
         try:
-            return await self._ask()
+            answer = await self._ask()
+            return answer, None, False
         except ProtoError as exc:
-            if is_service_unavailable(exc):
-                await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-            else:
-                await self._announce_albert(ALBERT_HICCUP, ALBERT_HICCUP_MD)
-                await notify_admins(
-                    self.book,
-                    self.notifier,
-                    f"⚠️ /ai (chat={self.log_chat_id}): {exc.code} — {exc.message}",
-                )
-            return None
-        except ServiceUnavailableError:
-            await self._announce_albert(ALBERT_UNAVAILABLE, ALBERT_UNAVAILABLE_MD)
-            return None
+            from sa_home_bot.proto.messages import ERR_BAD_REQUEST
+
+            reason = f"{exc.code} — {exc.message}"
+            is_hard = exc.code == ERR_BAD_REQUEST
+            return None, reason, is_hard
+        except ServiceUnavailableError as exc:
+            reason = f"служба недоступна: {exc}"
+            return None, reason, False
 
     async def _prepare_context_note(self) -> None:
         message = self.message

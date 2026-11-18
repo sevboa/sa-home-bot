@@ -1818,3 +1818,30 @@ async def test_handlers_ignore_chats_without_the_chat_right(
     assert message.sent == []
     assert len(await store.ai_turns_for_dialogue(1, 500)) == 1
     assert await store.ai_turns_for_dialogue(1, message.message_id) == []
+
+
+async def test_cmd_ai_blocked_reply_marks_queue_blocked_and_records_nothing(store, monkeypatch):
+    async def fake_blocked(
+        message, node_link, store_, config, history, dialogue_id, book, notifier, dismissal=None,
+        tool_calls=None, speech_remark=None, rich_session=None
+    ):
+        return ai_flow.BLOCKED_REPLY
+
+    monkeypatch.setattr(ai_flow, "request_alfred", fake_blocked)
+    message = FakeMessage(1, text="/ai привет")
+
+    await ai_handler.cmd_ai(
+        message, node_link=None, store=store, config=_plain_settings(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        tool_calls=ToolCalls(),
+    )
+
+    from sa_home_bot.bot.reply_queue import ReplyQueue
+    queue = ReplyQueue(store)
+    entries = await queue.entries()
+    assert len(entries) == 1
+    assert entries["1"]["blocked"] is True
+    rows = await store.ai_turns_for_dialogue(1, message.message_id)
+    assert len(rows) == 1
+    assert rows[0]["role"] == "user"
+    assert rows[0]["content"] == "привет"
