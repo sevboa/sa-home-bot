@@ -233,7 +233,7 @@ async def test_devlab_test_with_depends_on_and_missing_ref(client, store, alice)
     await register(client, store, alice)
     _, first = await submit(client, alice)
     is_error, queued = await call(
-        client, alice, protocol.TOOL_TEST, project=PROJECT, ref="", depends_on=[first["job"]["id"]]
+        client, alice, protocol.TOOL_TEST, project=PROJECT, depends_on=[first["job"]["id"]]
     )
     assert not is_error
     expected_ref = protocol.AGENT_BRANCH_PREFIX + first["job"]["id"]

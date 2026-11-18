@@ -306,12 +306,9 @@ class HubQueue:
     ) -> Job:
         args = args or []
         deps = list(dict.fromkeys(depends_on))
-        if not ref.strip():
-            if len(deps) == 1:
-                ref = protocol.AGENT_BRANCH_PREFIX + deps[0]
-            else:
-                raise HubError("ref: ветка или коммит без пробелов, не с «-»")
-        elif ref.startswith("-") or any(c.isspace() for c in ref):
+        if not ref.strip() and len(deps) == 1:
+            ref = protocol.AGENT_BRANCH_PREFIX + deps[0]
+        if not ref.strip() or ref.startswith("-") or any(c.isspace() for c in ref):
             raise HubError("ref: ветка или коммит без пробелов, не с «-»")
         params = {
             protocol.FIELD_REF: ref,

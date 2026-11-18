@@ -588,24 +588,16 @@ async def test_submit_test_depends_on_blocks_until_done(queue):
     assert second.id == test_job.id
 
 
-@pytest.mark.parametrize(
-    "ref, deps, expect_error",
-    [
-        ("", ["dep1"], False),
-        ("", [], True),
-        ("", ["nonexistent"], True),
-    ],
-)
-async def test_submit_test_ref_from_dependency(queue, ref, deps, expect_error):
-    if deps and deps[0] != "nonexistent":
-        dep_job = await submit(queue)
-        deps = [dep_job.id]
-    if expect_error:
-        with pytest.raises(HubError):
-            await queue.submit_test(CLIENT, PROJECT, ref, depends_on=deps)
-    else:
-        job = await queue.submit_test(CLIENT, PROJECT, ref, depends_on=deps)
-        assert job.params[S.FIELD_REF] == protocol.AGENT_BRANCH_PREFIX + deps[0]
+async def test_submit_test_ref_from_single_dependency(queue):
+    dep = await submit(queue)
+    job = await queue.submit_test(CLIENT, PROJECT, "", depends_on=[dep.id])
+    assert job.params[S.FIELD_REF] == S.AGENT_BRANCH_PREFIX + dep.id
+
+
+@pytest.mark.parametrize("deps", [[], ["nonexistent"]])
+async def test_submit_test_empty_ref_needs_one_known_dependency(queue, deps):
+    with pytest.raises(HubError):
+        await queue.submit_test(CLIENT, PROJECT, "", depends_on=deps)
 
 
 @pytest.mark.parametrize("ref", ["", " ", "-x", "a b"])

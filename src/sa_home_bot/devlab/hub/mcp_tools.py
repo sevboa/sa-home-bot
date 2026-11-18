@@ -150,7 +150,7 @@ async def test_outcome(ctx: Context, job: Any) -> Any:
 async def test(
     ctx: Context,
     project: str,
-    ref: str,
+    ref: str = "",
     cmd: str = "",
     args: list[str] | None = None,
     wait: int = 0,
