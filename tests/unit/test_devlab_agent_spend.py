@@ -344,6 +344,23 @@ def test_replies_counter_grows_per_record():
     assert spend.replies() == 2
 
 
+@pytest.mark.parametrize(
+    "initial_model,new_model,expected_extensions,expected_model",
+    [
+        ("", "model-a", 0, "model-a"),
+        ("model-a", "model-a", 0, "model-a"),
+        ("model-a", "model-b", 1, "model-b"),
+    ],
+)
+def test_switch_model(initial_model, new_model, expected_extensions, expected_model):
+    saved = []
+    state = SpendState(model=initial_model)
+    spend = JobSpend(state, saved.append)
+    spend.switch_model(new_model)
+    assert spend.extensions == expected_extensions
+    assert spend._state.model == expected_model
+
+
 def test_catalog_entry_reads_context_from_hub():
     entry = CatalogEntry.from_hub({protocol.MODEL_NAME: "m", protocol.MODEL_CONTEXT: 65536})
     bare = CatalogEntry.from_hub({protocol.MODEL_NAME: "m"})
