@@ -17,6 +17,7 @@ from sa_home_bot.bot.handlers import (
     control,
     devlab,
     draw,
+    gpu_silence,
     interactives,
     invites,
     items,
@@ -67,6 +68,7 @@ def build_dispatcher(
     dp.include_router(basic.router)
     dp.include_router(away.router)
     dp.include_router(devlab.router)
+    dp.include_router(gpu_silence.router)
     dp.include_router(tool_debug.router)
     dp.include_router(pending_actions.router)
     dp.include_router(interactives.router)

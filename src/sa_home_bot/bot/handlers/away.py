@@ -95,10 +95,10 @@ async def cmd_back(
     if not _is_owner(subscription):
         await message.answer(DENIED_TEXT)
         return
-    await message.answer(await _do_back(away, away_runner))
+    await message.answer(await do_back(away, away_runner))
 
 
-async def _do_back(away: AwayService, runner: AwayRunner | None) -> str:
+async def do_back(away: AwayService, runner: AwayRunner | None) -> str:
     try:
         state, immediate = await away.back()
     except AwayError as exc:
@@ -136,7 +136,7 @@ async def cb_away(
                 state, away.now(), await _owner_tz(away, callback.from_user)
             )
         elif action == CB_BACK:
-            text = await _do_back(away, away_runner)
+            text = await do_back(away, away_runner)
         else:
             await callback.answer()
             return
