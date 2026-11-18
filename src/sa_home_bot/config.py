@@ -263,6 +263,7 @@ class DevlabHubConfig(BaseModel):
     stall_check_s: float = Field(default=60.0, gt=0)
     executor_node: str = "mycraft"
     hub_node: str = "alfred"
+    bench_windows: list[str] = Field(default_factory=list)
 
 
 OPTIONAL_CPUSET_PATTERN = r"^(|" + CPUSET_PATTERN[1:-1] + ")$"

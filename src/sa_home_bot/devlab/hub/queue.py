@@ -8,7 +8,7 @@ import secrets
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -182,10 +182,28 @@ def _in(values: Collection[Any]) -> str:
     return ",".join("?" * len(values))
 
 
+def in_windows(windows: Collection[str], moment: time) -> bool:
+    if not windows:
+        return True
+    for window in windows:
+        try:
+            start, end = (time.fromisoformat(part) for part in window.split("-", maxsplit=1))
+        except ValueError as exc:
+            raise ValueError(f"окно стенда {window!r}: ожидается HH:MM-HH:MM") from exc
+        if start <= end:
+            if start <= moment < end:
+                return True
+        elif moment >= start or moment < end:
+            return True
+    return False
+
+
 class HubQueue:
-    def __init__(self, db: Database, logs_root: Path) -> None:
+    def __init__(self, db: Database, logs_root: Path, bench_windows: Collection[str] = ()) -> None:
         self._db = db
         self.logs_root = logs_root
+        self._bench_windows = list(bench_windows)
+        in_windows(self._bench_windows, time(0, 0))
         self._lock = asyncio.Lock()
         self._finish_events: dict[str, asyncio.Event] = {}
 
@@ -378,6 +396,7 @@ class HubQueue:
         kinds: Collection[str] = (protocol.JOB_KIND_AGENT,),
         busy_bases: Collection[str] = (),
         live_models: Collection[str] | None = None,
+        now: datetime | None = None,
     ) -> Job | None:
         unknown = [k for k in kinds if k not in protocol.JOB_KINDS]
         if unknown:
@@ -404,14 +423,15 @@ class HubQueue:
         if not fits:
             return None
         args.append(protocol.STATUS_DONE)
+        bench, bench_args = self._bench_filter(now)
         async with self._tx() as conn:
             cur = await conn.execute(
                 f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
-                f"({' OR '.join(fits)}) AND {READY_SQL}"
+                f"({' OR '.join(fits)}) AND {READY_SQL}{bench}"
                 " ORDER BY (kind = ?) DESC, "
                 "(json_extract(params, '$.purpose') = ?) ASC, "
                 "priority DESC, seq LIMIT 1",
-                (*args, protocol.JOB_KIND_TEST, protocol.PURPOSE_BENCH),
+                (*args, *bench_args, protocol.JOB_KIND_TEST, protocol.PURPOSE_BENCH),
             )
             row = await cur.fetchone()
             if row is None:
@@ -635,10 +655,19 @@ class HubQueue:
         row = await cur.fetchone()
         return row["n"] if row else 0
 
-    async def pending_work(self) -> bool:
+    def _bench_filter(self, now: datetime | None) -> tuple[str, list[Any]]:
+        if in_windows(self._bench_windows, (now or datetime.now()).time()):
+            return "", []
+        return (
+            " AND COALESCE(json_extract(params, '$.purpose'), '') != ?",
+            [protocol.PURPOSE_BENCH],
+        )
+
+    async def pending_work(self, now: datetime | None = None) -> bool:
+        bench, bench_args = self._bench_filter(now)
         cur = await self._db.conn.execute(
             f"SELECT 1 FROM jobs WHERE status = ? AND "
-            f"kind IN ({_in(protocol.JOB_KINDS)}) AND {READY_SQL}"
+            f"kind IN ({_in(protocol.JOB_KINDS)}) AND {READY_SQL}{bench}"
             " UNION ALL"
             " SELECT 1 FROM messages m JOIN jobs j ON j.id = m.job_id"
             " WHERE m.direction = ? AND m.read_at IS NULL AND m.kind != ?"
@@ -648,6 +677,7 @@ class HubQueue:
                 protocol.STATUS_QUEUED,
                 *protocol.JOB_KINDS,
                 protocol.STATUS_DONE,
+                *bench_args,
                 protocol.DIRECTION_TO_EXECUTOR,
                 protocol.MSG_RELEASE,
             ),
