@@ -235,6 +235,10 @@ async def test_claim_order_priority_then_age(queue):
     [
         (S.PURPOSE_BENCH, 9, S.PURPOSE_DEV, 0, ["dev", "bench"]),
         (S.PURPOSE_DEV, 0, S.PURPOSE_BENCH, 9, ["dev", "bench"]),
+        (S.PURPOSE_DEV, 9, S.PURPOSE_FIX, 0, ["fix", "dev"]),
+        (S.PURPOSE_FIX, 0, S.PURPOSE_DEV, 9, ["fix", "dev"]),
+        (S.PURPOSE_BENCH, 9, S.PURPOSE_FIX, 0, ["fix", "bench"]),
+        (S.PURPOSE_FIX, 0, S.PURPOSE_BENCH, 9, ["fix", "bench"]),
     ],
 )
 async def test_claim_order_dev_before_bench(
@@ -249,6 +253,24 @@ async def test_claim_order_dev_before_bench(
         claimed.append(job.params[S.PARAM_PURPOSE])
     assert claimed == expected_order
     assert await queue.claim(EXECUTOR, [MODEL]) is None
+
+
+async def test_fix_with_unclosed_dependency_yields_to_dev(queue):
+    x = await submit(queue, priority=0, purpose=S.PURPOSE_DEV)
+    a = await submit(queue, priority=0, purpose=S.PURPOSE_FIX, depends_on=[x.id])
+    b = await submit(queue, priority=5, purpose=S.PURPOSE_DEV)
+    first = await queue.claim(EXECUTOR, [MODEL])
+    assert first.id == b.id
+    assert first.params[S.PARAM_PURPOSE] == S.PURPOSE_DEV
+    second = await queue.claim(EXECUTOR, [MODEL])
+    assert second.id == x.id
+    assert second.params[S.PARAM_PURPOSE] == S.PURPOSE_DEV
+    assert await queue.claim(EXECUTOR, [MODEL]) is None
+    await queue.post_from_executor(b.id, S.MSG_DONE)
+    await queue.post_from_executor(x.id, S.MSG_DONE)
+    third = await queue.claim(EXECUTOR, [MODEL])
+    assert third.id == a.id
+    assert third.params[S.PARAM_PURPOSE] == S.PURPOSE_FIX
 
 
 async def test_claim_only_bench_in_queue(queue):
