@@ -150,14 +150,15 @@ async def test_outcome(ctx: Context, job: Any) -> Any:
 async def test(
     ctx: Context,
     project: str,
-    ref: str,
+    ref: str = "",
     cmd: str = "",
     args: list[str] | None = None,
     wait: int = 0,
+    depends_on: list[str] | None = None,
 ) -> Any:
     if not 0 <= wait <= protocol.TEST_WAIT_MAX_S:
         raise HubError(f"wait: от 0 до {protocol.TEST_WAIT_MAX_S} секунд")
-    if await ctx.store.queue.has_project(project) and not await repos.ref_exists(
+    if not depends_on and await ctx.store.queue.has_project(project) and not await repos.ref_exists(
         ctx.store.git_root, project, ref
     ):
         raise HubError(
@@ -165,7 +166,9 @@ async def test(
             f"git push {protocol.HTTP_GIT_PREFIX}{project}{protocol.GIT_REPO_SUFFIX} "
             f"HEAD:{protocol.TEST_BRANCH_PREFIX}{ctx.client}/<n>"
         )
-    job = await ctx.store.queue.submit_test(ctx.client, project, ref, cmd, args)
+    job = await ctx.store.queue.submit_test(
+        ctx.client, project, ref, cmd, args, depends_on=depends_on or ()
+    )
     if wait:
         job = await ctx.store.queue.wait_terminal(job.id, wait)
     return {"job": job_view(job, with_task=False), "result": await test_outcome(ctx, job)}
@@ -334,13 +337,19 @@ TOOLS: tuple[Tool, ...] = (
         " дождались) вернётся задание, а результат test_done придёт в devlab_inbox.",
         (
             Param("project", "string", "Имя зарегистрированного проекта.", required=True),
-            Param("ref", "string", "Ветка или коммит в репозитории проекта.", required=True),
+            Param("ref", "string", "Ветка или коммит в репозитории проекта."),
             Param("cmd", "string", "Команда; пусто: из .devlab.toml проекта."),
             Param("args", "array", "Аргументы команды: пути, -k, -x."),
             Param(
                 "wait",
                 "integer",
                 f"Сколько секунд ждать результата, до {protocol.TEST_WAIT_MAX_S}. По умолчанию 0.",
+            ),
+            Param(
+                "depends_on",
+                "array",
+                "Список id заданий, которые должны завершиться (done) до прогона. "
+                "С одной зависимостью и пустым ref гоняется её ветка agent/<id>.",
             ),
         ),
         test,

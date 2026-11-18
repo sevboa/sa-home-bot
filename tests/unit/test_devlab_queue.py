@@ -621,6 +621,29 @@ async def test_submit_test_stores_params(queue):
     assert (await submit_test(queue)).params[S.FIELD_CMD] == ""
 
 
+async def test_submit_test_depends_on_blocks_until_done(queue):
+    a = await submit(queue)
+    test_job = await queue.submit_test(CLIENT, PROJECT, "test/c/1", depends_on=[a.id])
+    first = await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT))
+    assert first.id == a.id
+    assert await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT)) is None
+    await queue.post_from_executor(a.id, S.MSG_DONE)
+    second = await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_TEST, S.JOB_KIND_AGENT))
+    assert second.id == test_job.id
+
+
+async def test_submit_test_ref_from_single_dependency(queue):
+    dep = await submit(queue)
+    job = await queue.submit_test(CLIENT, PROJECT, "", depends_on=[dep.id])
+    assert job.params[S.FIELD_REF] == S.AGENT_BRANCH_PREFIX + dep.id
+
+
+@pytest.mark.parametrize("deps", [[], ["nonexistent"]])
+async def test_submit_test_empty_ref_needs_one_known_dependency(queue, deps):
+    with pytest.raises(HubError):
+        await queue.submit_test(CLIENT, PROJECT, "", depends_on=deps)
+
+
 @pytest.mark.parametrize("ref", ["", " ", "-x", "a b"])
 async def test_submit_test_rejects_bad_ref(queue, ref):
     with pytest.raises(HubError):
