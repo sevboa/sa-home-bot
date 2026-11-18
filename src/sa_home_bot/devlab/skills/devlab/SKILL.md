@@ -62,6 +62,13 @@ description: Отдать задачу агенту-разработчику н�
      провал зависимости приходит в ящик как `dependency_failed`;
    - `fallback=<модель>` — запасная удалённая модель: берётся, если основная занята или недоступна,
      фактическая модель видна в `devlab_status` (`model`, `params.original_model`).
+5. Сразу после постановки подпишись на ящик событиями: инструмент Monitor с командой
+   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed`
+   из каталога репозитория и `timeout_ms` 1800000. Каждая строка — JSON
+   `{"seq","job_id","kind","payload"}` — приходит уведомлением сразу, без опроса; в ящике и чужие
+   задания, свои отличай по `job_id`. Монитор истёк, а задания ещё идут — запусти заново. Нет
+   инструмента Monitor — `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (одно
+   уведомление на `done`/`failed`/`stopped`/`waiting_owner`, предел 1800 с, код 124 — запусти снова).
 
 ## Каждое возвращение к работе: ящик
 Всякий раз, когда вернулся к задаче или владелец спрашивает «что с агентом»:
@@ -79,8 +86,8 @@ description: Отдать задачу агенту-разработчику н�
      если задание всё ещё `running` и исполнитель не отвечает, `devlab_stop`, затем `devlab_resume`.
    - `done`: переходи к приёмке.
 3. Зависшее `queued` или `running` без вестей: `devlab_status`; для `running` см. `stalled` выше;
-   при необходимости спроси владельца, `devlab_stop`. Ожидание: `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (останавливается на `done`,
-   `failed`, `stopped` и на `waiting_owner`, придёт одно уведомление), затем `devlab_status id=<id>`.
+   при необходимости спроси владельца, `devlab_stop`. Ожидание — монитор ящика из «Постановки»,
+   п. 5; на событие `question` отвечай сразу, если ответ следует из задачи.
 
 ## Приёмка результата
 1. Забрать: `nodectl devlab fetch <id>` — печатает локальный ref `refs/devlab/agent/<id>`

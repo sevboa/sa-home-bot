@@ -23,8 +23,12 @@
 4. `nodectl devlab base <имя>` (push `base/<имя>`), затем `devlab_submit`.
 5. При каждом возвращении к работе: `devlab_inbox` и `devlab_ack`, ответы через `devlab_answer`,
    `devlab_resume` (замечания, другая модель), `devlab_stop`, `devlab_release`. Ожидание вне MCP:
-   `nodectl devlab wait <id>` фоновым вызовом Bash (останавливается и на `waiting_owner`), затем
-   `devlab_status` Последняя строка stdout `wait` — JSON `{"id","status","result"?}`. (2026-11-01: `sleep 60` в Bash блокируется, долгий MCP-вызов обрывается).
+   инструмент Monitor на `nodectl devlab watch --timeout 1790 --kinds …` — каждое сообщение ящика
+   приходит событием, перезапуск по истечении. Запасной путь без Monitor: `nodectl devlab wait <id>`
+   фоновым вызовом Bash (останавливается и на `waiting_owner`), затем `devlab_status`; последняя
+   строка stdout `wait` — JSON `{"id","status","result"?}`. (2026-11-01: `sleep 60` в Bash
+   блокируется, долгий MCP-вызов обрывается.) 2026-11-19: скил переведён с `wait` на `watch` —
+   `wait` с пределом 1800 с держал вопрос агента (потолок токенов) без ответа до тайм-аута.
 6. Приёмка: `nodectl devlab fetch <id>`, ревью диффа по правилам проекта,
    `devlab_test ref=agent/<id> wait=0` (новое test-задание, свой `job.id`) + `nodectl devlab wait <job.id>` + `devlab_status id=<job.id>`, перенос в `dev/<id>` в отдельном worktree (коммиты поимённо), отчёт,
    `nodectl devlab drop agent/<id> base/<имя>`.
