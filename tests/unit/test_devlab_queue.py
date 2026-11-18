@@ -913,6 +913,23 @@ async def test_flag_waiting_skips_young_job(queue):
     assert messages == []
 
 
+@pytest.mark.parametrize(
+    ("status", "models", "expected"),
+    [
+        ("queued", {MODEL}, True),
+        ("running", {MODEL}, True),
+        ("waiting_owner", {MODEL}, False),
+        ("done", {MODEL}, False),
+        ("queued", {OTHER_MODEL}, False),
+        ("queued", set(), False),
+    ],
+    ids=["queued", "running", "waiting_owner", "done", "чужая модель", "пустой набор"],
+)
+async def test_local_demand_matches_active_jobs_with_model(queue, status, models, expected):
+    await SETUPS[status](queue)
+    assert await queue.local_demand(models) is expected
+
+
 async def test_progress_change_counts_as_news(queue):
     job = await running_job(queue)
     start = utc_now()

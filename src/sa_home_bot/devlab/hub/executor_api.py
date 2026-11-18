@@ -24,6 +24,10 @@ async def json_body(request: web.Request) -> dict[str, Any]:
     return body
 
 
+def local_models(catalog: list[dict]) -> set[str]:
+    return {m[protocol.MODEL_NAME] for m in catalog if not m.get(protocol.MODEL_REMOTE, True)}
+
+
 @roles(protocol.ROLE_EXECUTOR)
 async def claim(request: web.Request) -> web.Response:
     body = await json_body(request)
@@ -40,7 +44,7 @@ async def claim(request: web.Request) -> web.Response:
     catalog = await store.models()
     live_models: list[str] | None = [m[protocol.MODEL_NAME] for m in catalog] or None
     if await silence_state(request.app) is not None:
-        local = {m[protocol.MODEL_NAME] for m in catalog if not m.get(protocol.MODEL_REMOTE, True)}
+        local = local_models(catalog)
         models = [m for m in models if m not in local]
         live_models = [m for m in live_models or [] if m not in local]
     job = await store.queue.claim(
@@ -137,6 +141,9 @@ async def heartbeat(request: web.Request) -> web.Response:
         reply[protocol.FIELD_SILENCE] = state and {
             protocol.FIELD_SILENCE_UNTIL: state.until and state.until.isoformat()
         }
+        reply[protocol.FIELD_LOCAL_DEMAND] = state is None and await store.queue.local_demand(
+            local_models(await store.models())
+        )
     elif principal.role == protocol.ROLE_GATEWAY:
         used_today = body.get(protocol.FIELD_USED_TODAY)
         if isinstance(used_today, dict):

@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.llm.strata_switch import SILENCE_FIELD, SILENCE_PATH
+from sa_home_bot.llm.strata_switch import MAIN_DEMAND_FIELD, SILENCE_FIELD, SILENCE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -27,19 +27,25 @@ class SilenceRelay:
         if protocol.FIELD_SILENCE not in reply:
             return
         value = reply[protocol.FIELD_SILENCE]
+        demand = reply.get(protocol.FIELD_LOCAL_DEMAND)
         if self._session is None:
             self._session = aiohttp.ClientSession()
+        body = {SILENCE_FIELD: value}
+        if protocol.FIELD_LOCAL_DEMAND in reply:
+            body[MAIN_DEMAND_FIELD] = demand
         try:
             async with self._session.post(
                 self._url.rstrip("/") + SILENCE_PATH,
-                json={SILENCE_FIELD: value},
+                json=body,
                 timeout=self._timeout,
             ) as resp:
                 if resp.status == 200:
                     self._ok = True
-                    if self._sent != value:
-                        log.info("Тишина видеокарты передана strata-switch: %s", value)
-                    self._sent = value
+                    if self._sent != (value, demand):
+                        log.info(
+                            "Тишина видеокарты передана strata-switch: %s, спрос %s", value, demand
+                        )
+                    self._sent = (value, demand)
                     return
                 reason = f"HTTP {resp.status}"
         except (aiohttp.ClientError, TimeoutError) as exc:
