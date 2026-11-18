@@ -63,10 +63,12 @@ description: Отдать задачу агенту-разработчику н�
    - `fallback=<модель>` — запасная удалённая модель: берётся, если основная занята или недоступна,
      фактическая модель видна в `devlab_status` (`model`, `params.original_model`).
 5. Сразу после постановки подпишись на ящик событиями: инструмент Monitor с командой
-   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed`
+   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed,test_done`
    из каталога репозитория и `timeout_ms` 1800000. Каждая строка — JSON
    `{"seq","job_id","kind","payload"}` — приходит уведомлением сразу, без опроса; в ящике и чужие
-   задания, свои отличай по `job_id`. Монитор истёк, а задания ещё идут — запусти заново. Нет
+   задания, свои отличай по `job_id`. Монитор истёк или упал (хаб недоступен, например при рестарте
+   ноды хаба), а задания ещё идут — запусти заново и сразу сверь `devlab_status` своих заданий:
+   итоги, пришедшие пока монитора не было, сами не повторятся. Нет
    инструмента Monitor — `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (одно
    уведомление на `done`/`failed`/`stopped`/`waiting_owner`, предел 1800 с, код 124 — запусти снова).
 
@@ -99,8 +101,9 @@ description: Отдать задачу агенту-разработчику н�
    - соответствие критериям приёмки, а не только зелёные тесты;
    - документация в `docs/` обновлена, если поведение менялось.
 3. Полный прогон на mycraft: `devlab_test project=<проект> ref=agent/<id> wait=0`
-   (снимок не нужен). Ответ создаёт новое test-задание со своим `job.id` (это не `<id>` агента): ждать
-   `nodectl devlab wait <job.id>` фоном, затем `devlab_status id=<job.id>` за `result`; подробности
+   (снимок не нужен). Ответ создаёт новое test-задание со своим `job.id` (это не `<id>` агента): итог
+   придёт в монитор ящика событием `test_done` (без монитора — `nodectl devlab wait <job.id>` фоном),
+   затем `devlab_status id=<job.id>` за `result`; подробности
    `devlab_test_log id=<job.id>`. Подробнее: скил `devlab-test`.
 4. Есть замечания или падения: `devlab_resume id=<id> text=<конкретные замечания по файлам и
    строкам>` (при необходимости другая модель; при `failed` и непонятной причине смотри журнал шагов:
