@@ -81,6 +81,13 @@ async def typing_action(bot: Bot, chat_id: int, message_thread_id: int | None = 
         await indicator.stop()
 
 
+PARSE_ERROR_MARK = "can't parse entities"
+
+
+def is_parse_error(exc: BaseException) -> bool:
+    return isinstance(exc, TelegramBadRequest) and PARSE_ERROR_MARK in str(exc)
+
+
 def is_permanent_send_error(exc: BaseException) -> bool:
     return isinstance(exc, (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound))
 
@@ -119,8 +126,11 @@ async def send_with_retry(
             await asyncio.sleep(wait)
         except Exception as exc:
             if not await _wait_and_report_if_retryable(exc, action, chat_id, attempt):
-                if outcome is not None and not is_permanent_send_error(exc):
-                    outcome["transient"] = True
+                if outcome is not None:
+                    if is_parse_error(exc):
+                        outcome["parse_error"] = True
+                    elif not is_permanent_send_error(exc):
+                        outcome["transient"] = True
                 return None
     if outcome is not None:
         outcome["transient"] = True
@@ -257,6 +267,9 @@ class Notifier:
         message_thread_id: int | None = None,
         outcome: dict | None = None,
     ) -> int | None:
+        local_outcome: dict = {}
+        if outcome is None:
+            outcome = local_outcome
         msg = await send_with_retry(
             chat_id,
             "сообщение",
@@ -269,6 +282,21 @@ class Notifier:
             ),
             outcome,
         )
+        if msg is None and outcome.get("parse_error"):
+            log.warning("Разметка не разобрана (chat=%s), отправляю простым текстом", chat_id)
+            msg = await send_with_retry(
+                chat_id,
+                "сообщение",
+                lambda: self._bot.send_message(
+                    chat_id,
+                    text,
+                    reply_parameters=reply,
+                    reply_markup=reply_markup,
+                    message_thread_id=message_thread_id,
+                    parse_mode=None,
+                ),
+                outcome,
+            )
         return msg.message_id if msg is not None else None
 
     async def edit_text(

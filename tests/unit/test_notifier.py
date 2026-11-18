@@ -15,6 +15,7 @@ class FakeBot:
         self.fail_times = 0
         self.fail_exception: Exception = ConnectionError("proxy timed out: 60")
         self.send_message_calls = 0
+        self.parse_modes: list = []
 
     async def send_chat_action(self, chat_id, action, message_thread_id=None) -> None:
         self.typing_calls += 1
@@ -23,7 +24,8 @@ class FakeBot:
             raise self.fail_exception
 
     async def send_message(self, chat_id, text, reply_parameters=None, reply_markup=None,
-                            message_thread_id=None):
+                            message_thread_id=None, parse_mode="HTML"):
+        self.parse_modes.append(parse_mode)
         self.send_message_calls += 1
         if self.fail_times > 0:
             self.fail_times -= 1
@@ -98,13 +100,27 @@ async def test_send_direct_swallows_network_error_and_returns_none():
     assert bot.send_message_calls == MAX_RETRIES
 
 
-async def test_send_direct_does_not_retry_permanent_bad_request():
+async def test_send_direct_resends_plain_text_on_parse_error():
     bot = FakeBot()
     bot.fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
     bot.fail_times = 1
     notifier = Notifier(bot)
 
     message_id = await notifier.send_direct(1, "<b>кривой")
+
+    assert message_id == 1
+    assert bot.send_message_calls == 2
+    assert bot.parse_modes[0] == "HTML"
+    assert bot.parse_modes[1] is None
+
+
+async def test_send_direct_does_not_retry_other_bad_request():
+    bot = FakeBot()
+    bot.fail_exception = TelegramBadRequest(method=None, message="chat not found")
+    bot.fail_times = 1
+    notifier = Notifier(bot)
+
+    message_id = await notifier.send_direct(1, "текст")
 
     assert message_id is None
     assert bot.send_message_calls == 1
