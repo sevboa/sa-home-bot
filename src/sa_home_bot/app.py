@@ -37,6 +37,7 @@ from sa_home_bot.bot.monitor_events import build_event_handler
 from sa_home_bot.bot.node_events import build_node_event_handler
 from sa_home_bot.bot.notifier import Notifier
 from sa_home_bot.bot.pending_actions import PendingActions
+from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.bot.setup import build_bot, build_dispatcher
 from sa_home_bot.bot.telegram_retry import REQUEST_TIMEOUT_S, call_with_network_retry
@@ -165,6 +166,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
         except Exception:
             log.warning("Не удалось сообщить ноде о готовности бота", exc_info=True)
 
+    active_ai_chats = ActiveAiChats()
     node_link = ServiceLink(
         settings.node.socket,
         token=settings.swarm.token,
@@ -177,6 +179,7 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             tool_calls=tool_calls,
             config=settings,
             pending_actions=pending_actions,
+            on_llm_node_up=active_ai_chats.slot_free,
         ),
         on_connected=_report_bot_ready,
     )
@@ -226,8 +229,6 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
     pending_torrents = PendingTorrents()
     pending_vpn_secrets = PendingVpnSecrets()
 
-    active_ai_chats = ActiveAiChats()
-
     async def _send_night_mode(night: bool) -> None:
         link_to_node = _get_node_link()
         if link_to_node is None:
@@ -251,11 +252,14 @@ async def run(settings: Settings, *, instance: str = "") -> bool:
             tool_calls=tool_calls,
             pending_actions=pending_actions,
             interactives=interactives,
+            queue=ReplyQueue(store),
         ),
         book,
         notifier,
         night_sink=_send_night_mode,
+        retry=True,
     )
+    active_ai_chats.on_slot_free(away_runner.slot_free)
     away_task = asyncio.create_task(away_runner.run(), name="away")
     devlab_notify_task: asyncio.Task | None = None
     devlab_notifier: DevlabNotifier | None = None

@@ -49,6 +49,7 @@ class TurnServices:
     pending_actions: PendingActions | None = None
     interactives: Interactives | None = None
     opinion_note: str | None = None
+    quiet_block: bool = False
 
 
 def format_answer(raw: str) -> str:
@@ -123,6 +124,8 @@ def _request_extras(services: TurnServices, turn_plan: Any | None) -> dict[str, 
         extras["interactives"] = services.interactives
     if services.opinion_note is not None:
         extras["opinion_note"] = services.opinion_note
+    if services.quiet_block:
+        extras["quiet_block"] = True
     return extras
 
 
@@ -161,6 +164,7 @@ async def _run_turn(
             await _wait_for_tool_photo(message, services, streaming_session)
             if queue is not None:
                 await queue.finish(message.chat.id, message.message_id)
+            services.active_ai_chats.slot_free()
             return None
         if not raw.strip():
             await _report_empty_reply(message, services)
@@ -175,6 +179,7 @@ async def _run_turn(
         )
         if queue is not None:
             await queue.finish(message.chat.id, message.message_id)
+        services.active_ai_chats.slot_free()
         await _after_delivery(
             message, services, dialogue_id, history, speech_remark, dismissal, turn_plan, raw
         )

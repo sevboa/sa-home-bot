@@ -193,13 +193,18 @@ async def test_cmd_ai_with_text_calls_ai_flow_and_records_both_turns(store, monk
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_request)
     message = FakeMessage(1, text="/ai привет")
+    chats = ai_flow.ActiveAiChats()
+    signals = []
+    chats.on_slot_free(lambda: signals.append(1))
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=chats,
         tool_calls=ToolCalls(),
     )
 
+    assert signals == [1]
+    assert await ReplyQueue(store).entries() == {}
     assert seen_history == [[{"role": "user", "content": "привет"}]]
     assert message.sent == [ai_reply.format_answer("Добгый день, сэ")]
 
@@ -1830,13 +1835,17 @@ async def test_cmd_ai_blocked_reply_marks_queue_blocked_and_records_nothing(stor
 
     monkeypatch.setattr(ai_flow, "request_alfred", fake_blocked)
     message = FakeMessage(1, text="/ai привет")
+    chats = ai_flow.ActiveAiChats()
+    signals = []
+    chats.on_slot_free(lambda: signals.append(1))
 
     await ai_handler.cmd_ai(
         message, node_link=None, store=store, config=_plain_settings(),
-        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=ai_flow.ActiveAiChats(),
+        book=_admin_book(), notifier=FakeNotifier(), active_ai_chats=chats,
         tool_calls=ToolCalls(),
     )
 
+    assert signals == []
     entries = await ReplyQueue(store).entries()
     assert len(entries) == 1
     assert entries["1"]["blocked"] is True

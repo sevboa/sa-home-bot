@@ -5,6 +5,7 @@ import contextlib
 import logging
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from aiogram.types import Message
@@ -93,6 +94,7 @@ _URL_RE = re.compile(r"https?://\S+")
 class ActiveAiChats:
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
+        self._slot_listeners: list[Callable[[], None]] = []
 
     def register(self, chat_id: int | None, task: asyncio.Task | None) -> None:
         if chat_id is not None and task is not None:
@@ -104,6 +106,13 @@ class ActiveAiChats:
 
     def snapshot(self) -> dict[int, asyncio.Task]:
         return dict(self._tasks)
+
+    def on_slot_free(self, listener: Callable[[], None]) -> None:
+        self._slot_listeners.append(listener)
+
+    def slot_free(self) -> None:
+        for listener in self._slot_listeners:
+            listener()
 
 
 class SpeechRemarkBox:
@@ -254,6 +263,7 @@ class _AlfredTurn:
         interactive_turn: Any | None,
         interactives: Any | None,
         opinion_note: str | None = None,
+        quiet_block: bool = False,
     ) -> None:
         self.message = message
         self.node_link = node_link
@@ -271,6 +281,7 @@ class _AlfredTurn:
         self.interactive_turn = interactive_turn
         self.interactives = interactives
         self.opinion_note = opinion_note
+        self.quiet_block = quiet_block
 
         self.dst = LLM_ADDRESS
         self.timeout = settings.llm.request_timeout_s
@@ -323,6 +334,14 @@ class _AlfredTurn:
             failure_reasons.append(reason)
             if is_hard:
                 break
+
+        if self.quiet_block:
+            log.info(
+                "ai: повтор из очереди chat=%s не удался: %s",
+                self.log_chat_id,
+                "; ".join(failure_reasons),
+            )
+            return BLOCKED_REPLY
 
         await self._announce_albert(ALBERT_RAN_OFF, ALBERT_RAN_OFF_MD)
         await notify_admins(
@@ -855,6 +874,7 @@ async def request_alfred(
     interactive_turn: Any | None = None,
     interactives: Any | None = None,
     opinion_note: str | None = None,
+    quiet_block: bool = False,
 ) -> str | None:
     turn = _AlfredTurn(
         message,
@@ -873,5 +893,6 @@ async def request_alfred(
         interactive_turn,
         interactives,
         opinion_note,
+        quiet_block,
     )
     return await turn.run()

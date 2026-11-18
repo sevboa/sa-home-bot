@@ -31,6 +31,7 @@ from sa_home_bot.bot.away import (
     status_text,
 )
 from sa_home_bot.bot.notifier import Notifier, notify_admins
+from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.service_link import ServiceLink, ServiceUnavailableError
 from sa_home_bot.config import Settings
 from sa_home_bot.db.store import Store
@@ -42,6 +43,13 @@ log = logging.getLogger(__name__)
 
 TICK_S = 60.0
 NIGHT_REFRESH_S = 300.0
+STALE_S = 900.0
+RETRY_NOTE = (
+    "Ты отвлёкся и не успел ответить на последнее сообщение — "
+    "ответь на него сейчас, в образе, можно коротко извиниться за ожидание."
+)
+RETRY_DONE_TEXT = "✅ /ai (chat={chat_id}): вопрос из очереди отвечен"
+STALE_MAX_S = 86400.0
 
 NightSink = Callable[[bool], Awaitable[None]]
 
@@ -97,6 +105,7 @@ class AwayReturn:
         tool_calls: Any,
         pending_actions: Any | None = None,
         interactives: Any | None = None,
+        queue: ReplyQueue | None = None,
     ) -> None:
         self._service = service
         self._get_node_link = get_node_link
@@ -108,6 +117,7 @@ class AwayReturn:
         self._tool_calls = tool_calls
         self._pending_actions = pending_actions
         self._interactives = interactives
+        self._queue = queue
 
     async def run_pass(self) -> int:
         state = await self._service.load()
@@ -149,6 +159,78 @@ class AwayReturn:
                     failed.add(key)
             if not progressed:
                 return done
+
+    async def retry_pass(self) -> int:
+        if self._queue is None:
+            return 0
+        state = await self._service.load()
+        if state is not None:
+            return 0
+        node_link = self._get_node_link()
+        if node_link is None:
+            return 0
+
+        entries = await self._queue.entries()
+        now = self._service.now()
+        active_chats = self._active_ai_chats.snapshot()
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for key, entry in entries.items():
+            chat_id = int(key)
+            if chat_id in active_chats:
+                continue
+            blocked = entry.get("blocked", False)
+            since_str = entry.get("since")
+            if since_str is None:
+                continue
+            since = datetime.fromisoformat(since_str)
+            age = (now - since).total_seconds()
+            if not blocked and age > STALE_MAX_S:
+                await self._queue.finish(chat_id, int(entry["last_message_id"]))
+                log.info("away: удалена старая запись очереди chat=%s age=%.0f", chat_id, age)
+                continue
+            if blocked or age >= STALE_S:
+                candidates.append((key, entry))
+
+        if not candidates:
+            return 0
+
+        outcome = await wake_core.ensure_service_ready(
+            node_link,
+            self._store,
+            LLM_NODE,
+            LLM_SERVICE,
+            warmup_timeout_s=self._config.llm.warmup_timeout_s,
+        )
+        if outcome != wake_core.READY:
+            log.info("away: llm не готова (%s), очередь ждёт следующего сигнала слота", outcome)
+            return 0
+
+        candidates.sort(key=lambda x: x[1].get("since", ""))
+        done = 0
+        for key, entry in candidates:
+            chat_id = int(key)
+            try:
+                dialogue_id = int(entry["dialogue_id"])
+                history = await dialogue_context.load_history(
+                    self._store, self._config, chat_id, dialogue_id
+                )
+                if not history or history[-1].get("role") != "user":
+                    await self._queue.finish(chat_id, int(entry["last_message_id"]))
+                    continue
+                history.insert(len(history) - 1, wrap_context_note(RETRY_NOTE))
+                message = build_message(self._notifier.bot, chat_id, entry)
+                await self._ask(message, node_link, dialogue_id, history, quiet_block=True)
+            except Exception:
+                log.exception("away: повтор из очереди — чат %s не разобран", chat_id)
+                continue
+
+            entries_after = await self._queue.entries()
+            if str(chat_id) not in entries_after:
+                await notify_admins(
+                    self._book, self._notifier, RETRY_DONE_TEXT.format(chat_id=chat_id)
+                )
+                done += 1
+        return done
 
     async def _handle_chat(self, node_link: ServiceLink, chat_id: int) -> bool:
         state = await self._service.load()
@@ -193,6 +275,7 @@ class AwayReturn:
         node_link: ServiceLink,
         dialogue_id: int,
         history: list[dict[str, Any]],
+        quiet_block: bool = False,
     ) -> str | None:
         services = TurnServices(
             node_link=node_link,
@@ -204,6 +287,7 @@ class AwayReturn:
             tool_calls=self._tool_calls,
             pending_actions=self._pending_actions,
             interactives=self._interactives,
+            quiet_block=quiet_block,
         )
         return await ai_reply.ask_and_reply(
             message,
@@ -285,6 +369,7 @@ class AwayRunner:
         night_sink: NightSink | None = None,
         night_refresh_s: float = NIGHT_REFRESH_S,
         clock: Callable[[], float] = time.monotonic,
+        retry: bool = False,
     ) -> None:
         self._service = service
         self._returner = returner
@@ -297,8 +382,15 @@ class AwayRunner:
         self._clock = clock
         self._night_sent: bool | None = None
         self._night_sent_at = 0.0
+        self._retry = retry
+        self._retry_wanted = retry
+        self._was_away = False
 
     def kick(self) -> None:
+        self.slot_free()
+
+    def slot_free(self) -> None:
+        self._retry_wanted = self._retry
         self._kick.set()
 
     async def run(self) -> None:
@@ -318,8 +410,23 @@ class AwayRunner:
             await notify_admins(self._book, self._notifier, text)
         state = await self._service.load()
         await self._publish_night(state is not None and state.phase == PHASE_AWAY)
+        if state is not None:
+            self._was_away = True
+            await self._away_step(state)
+            state = await self._service.load()
         if state is None:
+            await self._retry_if_free()
+
+    async def _retry_if_free(self) -> None:
+        if self._was_away:
+            self._was_away = False
+            self._retry_wanted = self._retry
+        if not self._retry_wanted:
             return
+        self._retry_wanted = False
+        await self._returner.retry_pass()
+
+    async def _away_step(self, state: AwayState) -> None:
         now = self._service.now()
         if state.phase == PHASE_AWAY:
             if now >= state.ceiling:

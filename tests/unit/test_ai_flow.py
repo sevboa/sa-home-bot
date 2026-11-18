@@ -1337,3 +1337,25 @@ async def test_retry_bad_request_is_hard_failure(store, monkeypatch):
     admin_chat_id, admin_text = notifier.sent[0]
     assert admin_chat_id == 999
     assert "после попыток: 1" in admin_text
+
+
+async def test_quiet_retry_failure_stays_silent(store):
+    message, notifier = FakeMessage(), _notifier()
+    link = _awake_link(ProtoError(ERR_INTERNAL, "внутренняя ошибка"))
+
+    raw = await _ask(message, link, store, notifier=notifier, quiet_block=True)
+
+    assert raw == ai_flow.BLOCKED_REPLY
+    assert ai_lines.ALBERT_RAN_OFF not in message.answers
+    assert notifier.sent == []
+
+
+def test_active_ai_chats_slot_free_calls_every_listener():
+    chats = ai_flow.ActiveAiChats()
+    calls = []
+    chats.on_slot_free(lambda: calls.append("a"))
+    chats.on_slot_free(lambda: calls.append("b"))
+
+    chats.slot_free()
+
+    assert calls == ["a", "b"]

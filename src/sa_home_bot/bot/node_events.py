@@ -58,7 +58,7 @@ from sa_home_bot.node.events import (
     EVENT_SINGLETON_YIELDED,
     EVENT_UPDATE_FINISHED,
 )
-from sa_home_bot.proto.addresses import NODE_SERVICE, TASKS_ADDRESS
+from sa_home_bot.proto.addresses import LLM_NODE, NODE_SERVICE, TASKS_ADDRESS
 from sa_home_bot.proto.errors import SERVICE_CALL_ERRORS
 from sa_home_bot.proto.messages import Envelope
 from sa_home_bot.subscriptions.book import SubscriptionBook
@@ -70,6 +70,7 @@ log = logging.getLogger(__name__)
 
 
 _NODE_STATE_EVENTS = (EVENT_NODE_DOWN, EVENT_NODE_UP, EVENT_NODE_LEAVING, EVENT_NODE_RETURNED)
+_LLM_SLOT_EVENTS = (EVENT_NODE_UP, EVENT_NODE_RETURNED)
 _SINGLETON_EVENTS = (EVENT_SINGLETON_ACTIVATED, EVENT_SINGLETON_YIELDED)
 _VERSION_EVENTS = (EVENT_UPDATE_FINISHED, EVENT_RESTART_APPLIED)
 _VPN_CHECK_EVENTS = (
@@ -666,6 +667,7 @@ def build_node_event_handler(
     tool_calls: ToolCalls | None = None,
     config: Settings | None = None,
     pending_actions: PendingActions | None = None,
+    on_llm_node_up: Callable[[], None] | None = None,
 ):
     task_sessions = TaskRichSessions(notifier, config)
     recent_vpn_events: dict[str, float] = {}
@@ -738,6 +740,8 @@ def build_node_event_handler(
             text, node_id = rendered
             await store.record_event(name, node_id, text, utc_now())
             await broadcast_system(book, notifier, text)
+            if name in _LLM_SLOT_EVENTS and node_id == LLM_NODE and on_llm_node_up is not None:
+                on_llm_node_up()
             if name in _VERSION_EVENTS:
                 await _maybe_fire_event_waiter(get_node_link, node_id, name)
 

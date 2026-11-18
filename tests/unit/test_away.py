@@ -29,6 +29,7 @@ from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.handlers import away as away_handler
 from sa_home_bot.bot.handlers import draw as draw_handler
 from sa_home_bot.bot.handlers import interactives as interactives_handler
+from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.tool_debug import ToolCalls
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
@@ -827,6 +828,8 @@ class ReturnEnv:
         self.fail_for: set[int] = set()
         self.notifier = FakeNotifier()
         self.stt_error: Exception | None = None
+        self.queue = ReplyQueue(store, clock=service.now)
+        self.deliver = False
 
         async def fake_ask(message, services, dialogue_id, history, rich):
             self.asked.append(
@@ -837,10 +840,13 @@ class ReturnEnv:
                     "history": [dict(m) for m in history],
                     "user": message.from_user,
                     "thread": message.message_thread_id,
+                    "services": services,
                 }
             )
             if message.chat.id in self.fail_for:
                 return None
+            if self.deliver:
+                await self.queue.finish(message.chat.id, message.message_id)
             return self.reply
 
         async def fake_ready(*args, **kwargs):
@@ -864,6 +870,7 @@ class ReturnEnv:
             notifier=self.notifier,
             active_ai_chats=ai_flow.ActiveAiChats(),
             tool_calls=ToolCalls(),
+            queue=self.queue,
         )
 
     async def message(self, chat_id, text=None, *, user=None, thread=None, **kw):
@@ -1152,3 +1159,138 @@ async def test_cli_admin_change_has_no_notice(tmp_path):
         assert await AwayService(Store(db), settings).take_notices() == []
     finally:
         await db.close()
+
+
+class CountingReturn:
+    def __init__(self) -> None:
+        self.retries = 0
+
+    async def run_pass(self) -> int:
+        return 0
+
+    async def retry_pass(self) -> int:
+        self.retries += 1
+        return 0
+
+
+async def _queued(env, store, chat_id, *, blocked=True, answered=False):
+    msg = FakeMessage(chat_id, "вопрос")
+    await store.record_ai_turn(chat_id, msg.message_id, msg.message_id, "user", "вопрос", T0)
+    if answered:
+        await store.record_ai_turn(
+            chat_id, msg.message_id + 1, msg.message_id, "assistant", "ответ", T0
+        )
+    await env.queue.put(msg, msg.message_id)
+    if blocked:
+        await env.queue.block(chat_id)
+    return msg
+
+
+async def test_retry_pass_answers_blocked_question_quietly(env, store):
+    msg = await _queued(env, store, 1)
+    env.deliver = True
+
+    assert await env.returner.retry_pass() == 1
+
+    asked = env.asked[0]
+    assert asked["message_id"] == msg.message_id
+    assert asked["services"].quiet_block is True
+    contents = [m["content"] for m in asked["history"]]
+    assert contents[-1] == "вопрос" and away_return.RETRY_NOTE in contents[-2]
+    assert await env.queue.entries() == {}
+    assert [text for _, text, _ in env.notifier.sent] == [
+        away_return.RETRY_DONE_TEXT.format(chat_id=1)
+    ]
+
+
+async def test_retry_pass_failed_again_keeps_entry_without_notice(env, store):
+    await _queued(env, store, 1)
+    env.fail_for = {1}
+
+    assert await env.returner.retry_pass() == 0
+
+    assert len(env.asked) == 1
+    assert "1" in await env.queue.entries()
+    assert env.notifier.sent == []
+
+
+@pytest.mark.parametrize("ready", [wake_core.UNREACHABLE, wake_core.WARMUP_FAILED])
+async def test_retry_pass_waits_when_llm_not_ready(env, store, ready):
+    await _queued(env, store, 1)
+    env.ready = ready
+
+    assert await env.returner.retry_pass() == 0
+
+    assert env.asked == []
+    assert "1" in await env.queue.entries()
+
+
+async def test_retry_pass_skips_while_alfred_is_away(env, service, store):
+    await _queued(env, store, 1)
+    await _away(service)
+
+    assert await env.returner.retry_pass() == 0
+    assert env.asked == []
+
+
+async def test_retry_pass_drops_entry_already_answered(env, store):
+    await _queued(env, store, 1, answered=True)
+
+    assert await env.returner.retry_pass() == 0
+
+    assert env.asked == []
+    assert await env.queue.entries() == {}
+
+
+@pytest.mark.parametrize(
+    ("blocked", "age_s", "asked", "kept"),
+    [
+        (False, 60, False, True),
+        (False, away_return.STALE_S + 1, True, True),
+        (False, away_return.STALE_MAX_S + 1, False, False),
+        (True, 60, True, True),
+        (True, away_return.STALE_MAX_S + 1, True, True),
+    ],
+)
+async def test_retry_pass_picks_by_block_and_age(env, store, clock, blocked, age_s, asked, kept):
+    await _queued(env, store, 1, blocked=blocked)
+    clock.advance(seconds=age_s)
+
+    await env.returner.retry_pass()
+
+    assert bool(env.asked) is asked
+    assert ("1" in await env.queue.entries()) is kept
+
+
+async def test_runner_retries_on_start_and_on_slot_signals_only(service):
+    returner = CountingReturn()
+    runner = AwayRunner(service, returner, _owner_book(), FakeNotifier(), retry=True)
+
+    await runner.tick()
+    await runner.tick()
+    assert returner.retries == 1
+
+    runner.slot_free()
+    await runner.tick()
+    assert returner.retries == 2
+
+    await _away(service)
+    await runner.tick()
+    assert returner.retries == 2
+    await service.back()
+    await runner.tick()
+    assert returner.retries == 3
+
+    runner.kick()
+    await runner.tick()
+    assert returner.retries == 4
+
+
+async def test_runner_without_retry_never_reads_reply_queue(service):
+    returner = CountingReturn()
+    runner = AwayRunner(service, returner, _owner_book(), FakeNotifier())
+
+    runner.slot_free()
+    await runner.tick()
+
+    assert returner.retries == 0

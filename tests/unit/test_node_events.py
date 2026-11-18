@@ -1067,3 +1067,23 @@ async def test_vpn_link_event_goes_to_accepting_subs_and_repeats_are_dropped():
     await handler(event)
     assert len(notifier.sent) == 1
     assert len(store.recorded_events) == 1
+
+
+@pytest.mark.parametrize(
+    ("event", "node", "fired"),
+    [
+        ("node_up", "mycraft", 1),
+        ("node_returned", "mycraft", 1),
+        ("node_down", "mycraft", 0),
+        ("node_up", "jeeves", 0),
+    ],
+)
+async def test_llm_node_coming_up_frees_alfred_slot(event, node, fired):
+    signals = []
+    handler = build_node_event_handler(
+        _book(), FakeNotifier(), FakeStore(), on_llm_node_up=lambda: signals.append(1)
+    )
+
+    await handler(make_event(event, {"node": node}, src=Address(node="alfred", service="node")))
+
+    assert len(signals) == fired
