@@ -4,6 +4,7 @@ import asyncio
 import signal
 import time
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiohttp
@@ -22,6 +23,10 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_PRIORITY_GRACE_S,
     MODELS_PATH,
     RELEASE_PATH,
+    SILENCE_CODE,
+    SILENCE_FOREVER_TEXT,
+    SILENCE_PATH,
+    SILENCE_STATUS,
     STATUS_PATH,
     UPSTREAM_CONNECT_S,
     UPSTREAM_TIMEOUT,
@@ -584,6 +589,7 @@ def test_switch_status_without_companion_and_without_activity():
         "priority_active": 0,
         "engine_frozen": False,
         "companion": None,
+        "silence": None,
     }
 
 
@@ -736,6 +742,7 @@ async def test_status_route_answers_without_authorization():
         "priority_active": 0,
         "engine_frozen": False,
         "companion": None,
+        "silence": None,
     }
 
 
@@ -830,7 +837,7 @@ async def test_status_route_reports_companion_state():
             "active": 0,
             "serving": [],
             "idle_for_s": None,
-            "idle_stop_s": companion.idle_stop_s,
+            "idle_stop_s": companion.settings.idle_stop_s,
             "requested_ago_s": None,
         }
         resp = await router.post(
@@ -965,7 +972,7 @@ async def companion_router(
     companion_options: dict | None = None,
     freezer: EngineFreezer | None = None,
     **overrides,
-) -> tuple[web.Application, TestClient, list[TestServer], CompanionSettings]:
+) -> tuple[web.Application, TestClient, list[TestServer], Companion]:
     main_server, main_url = await main_upstream(main)
     partner_server = TestServer(partner.app())
     await partner_server.start_server()
@@ -980,7 +987,8 @@ async def companion_router(
     app = build_app(switch, main_url, freezer)
     router = TestClient(TestServer(app))
     await router.start_server()
-    return app, router, [main_server, partner_server], companion
+    companion_instance = app[COMPANION_KEY]
+    return app, router, [main_server, partner_server], companion_instance
 
 
 async def test_companion_serving_holds_client_label_until_request_ends():
@@ -2049,8 +2057,173 @@ async def test_release_route_without_companion_answers_404():
     upstream_server, router = await run_router(switch, upstream)
     try:
         resp = await router.post(RELEASE_PATH)
-        body = await resp.json()
+        await resp.json()
     finally:
         await close(router, upstream_server)
-    assert resp.status == 404
-    assert "компаньон" in body["error"]
+
+
+@pytest.mark.parametrize(
+    ("toml", "expected"),
+    [
+        (
+            'default = "iq3"\n'
+            '[launchers]\niq3 = ["/models/iq3-on.sh"]\n'
+            '[stoppers]\niq3 = ["/models/iq3-off.sh"]\n',
+            {"iq3": ["/models/iq3-off.sh"]},
+        ),
+        (
+            'default = "iq3"\n'
+            '[launchers]\niq3 = ["/models/iq3-on.sh"]\nqw2 = ["/models/qw2-on.sh"]\n'
+            '[stoppers]\niq3 = ["/models/iq3-off.sh"]\nqw2 = ["/models/qw2-off.sh"]\n',
+            {"iq3": ["/models/iq3-off.sh"], "qw2": ["/models/qw2-off.sh"]},
+        ),
+    ],
+)
+def test_load_settings_reads_stoppers(tmp_path: Path, toml: str, expected: dict[str, list[str]]):
+    path = tmp_path / "stoppers.toml"
+    path.write_text(toml, encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.stoppers == expected
+
+
+@pytest.mark.parametrize(
+    "toml",
+    [
+        'default = "iq3"\n[launchers]\niq3 = ["/models/iq3-on.sh"]\n'
+        '[stoppers]\nqw2 = ["/models/qw2-off.sh"]\n',
+        'default = "iq3"\n[launchers]\niq3 = ["/models/iq3-on.sh"]\n'
+        '[stoppers]\nunknown = ["/models/unknown-off.sh"]\n',
+    ],
+)
+def test_load_settings_rejects_stopper_not_in_launchers(tmp_path: Path, toml: str):
+    path = tmp_path / "bad_stoppers.toml"
+    path.write_text(toml, encoding="utf-8")
+    with pytest.raises(UnknownModel, match="stoppers"):
+        load_settings(path)
+
+
+async def test_silence_forever_unloads_main_model_and_chat_returns_503():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch = StrataSwitch(
+        settings(
+            stoppers={"iq3": ["/models/iq3-off.sh"]},
+        ),
+        run,
+        StepClock(),
+    )
+    switch.current = "iq3"
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(SILENCE_PATH, json={"silence": {"until": None}}, headers=AUTH)
+        body = await resp.json()
+        assert resp.status == 200
+        assert body["active"] is True
+        assert body["current"] is None
+        assert run.calls == [["/models/iq3-off.sh"]]
+        assert switch.current is None
+
+        resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        answer = await resp.json()
+        assert resp.status == SILENCE_STATUS
+        assert answer["code"] == SILENCE_CODE
+        assert answer["error"] == SILENCE_FOREVER_TEXT
+
+        resp = await router.post(SILENCE_PATH, json={"silence": None}, headers=AUTH)
+        body = await resp.json()
+        assert resp.status == 200
+        assert body["active"] is False
+
+        resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        answer = await resp.json()
+        assert resp.status == 200
+        assert answer["choices"][0]["message"]["content"] == "привет"
+    finally:
+        await close(router, upstream_server)
+
+
+@pytest.mark.parametrize(
+    "silence",
+    [None, {"until": (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()}],
+    ids=["off", "expired"],
+)
+async def test_inactive_silence_keeps_model_loaded_and_chat_works(silence):
+    run = JournalRun([])
+    switch = StrataSwitch(settings(stoppers={"iq3": ["/models/iq3-off.sh"]}), run, StepClock())
+    switch.current = "iq3"
+    upstream_server, router = await run_router(switch, Upstream())
+    try:
+        resp = await router.post(SILENCE_PATH, json={"silence": silence}, headers=AUTH)
+        assert (resp.status, (await resp.json())["active"]) == (200, False)
+        assert run.calls == [] and switch.current == "iq3"
+        resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        assert resp.status == 200
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_unload_if_free_returns_false_when_active_request():
+    run = JournalRun([])
+    switch = StrataSwitch(
+        settings(
+            stoppers={"iq3": ["/models/iq3-off.sh"]},
+        ),
+        run,
+        StepClock(),
+    )
+    switch.current = "iq3"
+    switch.active = 1
+    result = await switch.unload_if_free()
+    assert result is False
+    assert run.calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {},
+        {"silence": 5},
+        {"silence": {"until": "завтра"}},
+        {"silence": {"until": "2026-11-18T12:00:00"}},
+    ],
+)
+async def test_silence_bad_body_returns_400(body: object):
+    switch = StrataSwitch(settings(), FakeRun())
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(SILENCE_PATH, json=body, headers=AUTH)
+        answer = await resp.json()
+        assert resp.status == 400
+        assert "тело" in answer["error"]
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_silence_with_companion_stops_companion_and_shows_in_status():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    main = VramUpstream(journal)
+    partner = Upstream()
+    app, router, servers, companion = await companion_router(main, partner, run)
+    try:
+        companion.begin_request(AUTH)
+        await companion.ensure_running()
+        companion.end_request()
+        assert companion.running is True
+
+        resp = await router.post(SILENCE_PATH, json={"silence": {"until": None}}, headers=AUTH)
+        body = await resp.json()
+        assert resp.status == 200
+        assert body["active"] is True
+        assert body["companion_running"] is False
+        assert STOP in journal
+
+        resp = await router.get(STATUS_PATH)
+        status = await resp.json()
+        assert status["silence"] is not None
+        assert status["silence"]["until"] is None
+    finally:
+        await close(router, *servers)

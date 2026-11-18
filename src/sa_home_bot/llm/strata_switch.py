@@ -9,6 +9,7 @@ import time
 import tomllib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ import aiohttp
 from aiohttp import web
 
 from sa_home_bot.devlab.neighbor import NeighborGate, start_following, stop_following
+from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.lifespan import cancel_task
 
 log = logging.getLogger(__name__)
@@ -42,6 +44,15 @@ CHAT_PATH = "/v1/chat/completions"
 VRAM_PATH = "/v1/vram"
 STATUS_PATH = "/v1/switch/status"
 RELEASE_PATH = "/v1/switch/companion/release"
+SILENCE_PATH = "/v1/silence"
+SILENCE_FIELD = "silence"
+SILENCE_UNTIL_FIELD = "until"
+SILENCE_STATUS = 503
+SILENCE_CODE = "gpu_silence"
+SILENCE_FOREVER_TEXT = "тишина видеокарты до /silent off"
+SILENCE_UNTIL_TEXT = "тишина видеокарты до {until}"
+SILENCE_TIME_FORMAT = "%d.%m %H:%M"
+SILENCE_BAD_BODY = 'тело: {"silence": null | {"until": ISO | null}}'
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
 AUTH_HEADER = "Authorization"
@@ -120,6 +131,7 @@ class SwitchSettings:
     freeze_engine: bool = False
     freeze_max_s: float = DEFAULT_FREEZE_MAX_S
     llm_socket: str = ""
+    stoppers: dict[str, list[str]] = field(default_factory=dict)
 
 
 def resolve(settings: SwitchSettings, model: str) -> str:
@@ -297,7 +309,10 @@ class Companion:
         while True:
             await asyncio.sleep(self.poll_s)
             try:
-                await self.stop_if_idle()
+                if self.switch.silence_active():
+                    await self.release()
+                else:
+                    await self.stop_if_idle()
             except COMPANION_ERRORS as exc:
                 log.warning("компаньон: остановка по простою не удалась: %s", exc)
 
@@ -334,6 +349,7 @@ class StrataSwitch:
         settings: SwitchSettings,
         run: Callable[[list[str]], Awaitable[int]] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], datetime] = utc_now,
     ) -> None:
         self.settings = settings
         self.current: str | None = None
@@ -341,12 +357,52 @@ class StrataSwitch:
         self.last_request_end: float | None = None
         self.run = run or run_launcher
         self.clock = clock
+        self.wall = wall
         self.launching: str | None = None
         self.launch_started: float | None = None
         self.waiting: list[Waiter] = []
         self.serving: list[str] = []
         self.requested: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self.silence_until: datetime | None = None
+        self.silent = False
+
+    def silence_active(self) -> bool:
+        if not self.silent:
+            return False
+        if self.silence_until is None:
+            return True
+        if self.silence_until > self.wall():
+            return True
+        self.silent = False
+        self.silence_until = None
+        return False
+
+    def silence_text(self) -> str:
+        if self.silence_until is None:
+            return SILENCE_FOREVER_TEXT
+        return SILENCE_UNTIL_TEXT.format(
+            until=self.silence_until.astimezone().strftime(SILENCE_TIME_FORMAT)
+        )
+
+    def _free_stopper(self) -> list[str] | None:
+        if self.current is None or self.launching is not None or self.active > 0:
+            return None
+        return self.settings.stoppers.get(self.current)
+
+    def _remember_stop(self, code: int) -> None:
+        if code == 0:
+            self.current = None
+
+    async def unload_if_free(self) -> bool:
+        if self._free_stopper() is None:
+            return False
+        async with self._lock:
+            stopper = self._free_stopper()
+            if stopper is None:
+                return False
+            await guarded_launch(self.run, stopper, self._remember_stop)
+        return self.current is None
 
     async def acquire(self, model: str, immediate: bool = False, client: str = "") -> None:
         model = resolve(self.settings, model)
@@ -412,6 +468,41 @@ class StrataSwitch:
 
 def json_error(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
+
+
+def parse_silence(payload: object) -> tuple[bool, datetime | None]:
+    if not isinstance(payload, dict) or SILENCE_FIELD not in payload:
+        raise ValueError(SILENCE_BAD_BODY)
+    value = payload[SILENCE_FIELD]
+    if value is None:
+        return False, None
+    if not isinstance(value, dict):
+        raise ValueError(SILENCE_BAD_BODY)
+    until = value.get(SILENCE_UNTIL_FIELD)
+    if until is None:
+        return True, None
+    if not isinstance(until, str):
+        raise ValueError(SILENCE_BAD_BODY)
+    moment = datetime.fromisoformat(until)
+    if moment.tzinfo is None:
+        raise ValueError(SILENCE_BAD_BODY)
+    return True, moment
+
+
+async def unload_for_silence(switch: StrataSwitch, companion: Companion | None) -> None:
+    if companion is not None:
+        try:
+            await companion.release()
+        except COMPANION_ERRORS as exc:
+            log.warning("компаньон: остановка по тишине не удалась: %s", exc)
+    try:
+        await switch.unload_if_free()
+    except LaunchFailed as exc:
+        log.warning("основная модель: выгрузка по тишине не удалась: %s", exc)
+
+
+def silence_error(text: str) -> web.Response:
+    return web.json_response({"error": text, "code": SILENCE_CODE}, status=SILENCE_STATUS)
 
 
 @dataclass(eq=False)
@@ -834,6 +925,11 @@ def switch_status(
             "idle_stop_s": companion.settings.idle_stop_s,
             "requested_ago_s": elapsed_since(companion.requested_at, now),
         }
+    silence_status: dict[str, object] | None = None
+    if switch.silence_active():
+        silence_status = {
+            "until": switch.silence_until.isoformat() if switch.silence_until else None
+        }
     return {
         "current": switch.current,
         "launching": launching,
@@ -857,6 +953,7 @@ def switch_status(
         "priority_active": gate.priority_active,
         "engine_frozen": bool(gate.freezer is not None and gate.freezer.frozen),
         "companion": companion_status,
+        "silence": silence_status,
     }
 
 
@@ -878,6 +975,8 @@ def build_app(
         return web.json_response({"object": "list", "data": data})
 
     async def chat(request: web.Request) -> web.StreamResponse:
+        if switch.silence_active():
+            return silence_error(switch.silence_text())
         try:
             payload = await request.json()
         except (ValueError, UnicodeDecodeError):
@@ -911,11 +1010,30 @@ def build_app(
         result = await companion.release()
         return web.json_response({"result": result})
 
+    async def silence(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            silent, until = parse_silence(payload)
+        except (ValueError, UnicodeDecodeError):
+            return json_error(400, SILENCE_BAD_BODY)
+        switch.silent, switch.silence_until = silent, until
+        if switch.silence_active():
+            await unload_for_silence(switch, companion)
+        return web.json_response(
+            {
+                "silence": payload[SILENCE_FIELD],
+                "active": switch.silence_active(),
+                "current": switch.current,
+                "companion_running": companion.running if companion else False,
+            }
+        )
+
     app = web.Application()
     app.router.add_get(MODELS_PATH, models)
     app.router.add_get(STATUS_PATH, status)
     app.router.add_post(CHAT_PATH, chat)
     app.router.add_post(RELEASE_PATH, release)
+    app.router.add_post(SILENCE_PATH, silence)
     app[COMPANION_KEY] = companion
     if companion is not None:
 
@@ -994,6 +1112,11 @@ def load_settings(path: str | Path) -> SwitchSettings:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     raw_launchers = data.get("launchers") or {}
     launchers = {str(name): [str(item) for item in argv] for name, argv in raw_launchers.items()}
+    raw_stoppers = data.get("stoppers") or {}
+    stoppers = {str(name): [str(item) for item in argv] for name, argv in raw_stoppers.items()}
+    for name in stoppers:
+        if name not in launchers:
+            raise UnknownModel(f"stoppers: {name!r} нет в launchers")
     default = str(data.get("default") or "")
     if default not in launchers:
         raise UnknownModel(f"default {default!r} нет в launchers")
@@ -1025,6 +1148,7 @@ def load_settings(path: str | Path) -> SwitchSettings:
         freeze_engine=bool(data.get("freeze_engine", False)),
         freeze_max_s=float(data.get("freeze_max_s", DEFAULT_FREEZE_MAX_S)),
         llm_socket=str(data.get("llm_socket") or ""),
+        stoppers=stoppers,
     )
 
 
