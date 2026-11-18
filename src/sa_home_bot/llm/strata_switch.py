@@ -117,6 +117,7 @@ class CompanionSettings:
     idle_stop_s: float = DEFAULT_COMPANION_IDLE_STOP_S
     main_reserve_active_mib: int = 0
     main_reserve_idle_mib: int = 0
+    launcher_shared: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +231,7 @@ class Companion:
         self.poll_s = poll_s
         self.max_wait_s = max_wait_s
         self.running = False
+        self.shared: bool | None = None
         self.active = 0
         self.serving: list[str] = []
         self.last_request: float | None = None
@@ -257,6 +259,9 @@ class Companion:
             return False
         return self.clock() - self.last_request >= self.settings.idle_stop_s
 
+    def wants_shared(self) -> bool:
+        return self.settings.launcher_shared is not None and self.switch.main_demand
+
     async def _reserve_main(self, reserve_mib: int) -> None:
         try:
             await apply_vram_reserve(
@@ -270,18 +275,32 @@ class Companion:
         except MainUnreachable as exc:
             log.info("компаньон: основная модель не запущена, резерв пропущен: %s", exc)
 
-    def _remember_launch(self, code: int) -> None:
+    def _remember_launch(self, shared: bool, code: int) -> None:
         self.running = code == 0
+        self.shared = shared if code == 0 else None
 
     def _remember_stop(self, code: int) -> None:
         self.running = code != 0
+        if code == 0:
+            self.shared = None
 
     async def ensure_running(self) -> None:
         async with self._lock:
             if self.running:
                 return
-            await self._reserve_main(self.settings.main_reserve_active_mib)
-            await guarded_launch(self.run, self.settings.launcher, self._remember_launch)
+            await self._launch_locked()
+
+    async def _launch_locked(self) -> None:
+        shared = self.wants_shared()
+        if shared:
+            argv = self.settings.launcher_shared
+        elif self.settings.launcher_shared is not None:
+            await self.switch.unload_if_free()
+            argv = self.settings.launcher
+        else:
+            argv = self.settings.launcher
+        await self._reserve_main(self.settings.main_reserve_active_mib)
+        await guarded_launch(self.run, argv, partial(self._remember_launch, shared))
 
     async def _stop_locked(self) -> None:
         await guarded_launch(self.run, self.settings.stopper, self._remember_stop)
@@ -308,6 +327,17 @@ class Companion:
             await self._stop_locked()
             return "stopped"
 
+    async def follow_demand(self) -> None:
+        if not self.running or self.active != 0 or self.settings.launcher_shared is None:
+            return
+        if self.shared == self.wants_shared():
+            return
+        async with self._lock:
+            if not self.running or self.active != 0 or self.shared == self.wants_shared():
+                return
+            await self._stop_locked()
+            await self._launch_locked()
+
     async def idle_guard(self) -> None:
         while True:
             await asyncio.sleep(self.poll_s)
@@ -316,6 +346,7 @@ class Companion:
                     await self.release()
                 else:
                     await self.stop_if_idle()
+                    await self.follow_demand()
             except COMPANION_ERRORS as exc:
                 log.warning("компаньон: остановка по простою не удалась: %s", exc)
 
@@ -964,6 +995,7 @@ def switch_status(
             "idle_for_s": elapsed_since(companion.last_request, now),
             "idle_stop_s": companion.settings.idle_stop_s,
             "requested_ago_s": elapsed_since(companion.requested_at, now),
+            "shared": companion.shared,
         }
     silence_status: dict[str, object] | None = None
     if switch.silence_active():
@@ -1152,6 +1184,11 @@ def load_companion(data: dict[str, object]) -> CompanionSettings | None:
         idle_stop_s=float(table.get("idle_stop_s", DEFAULT_COMPANION_IDLE_STOP_S)),
         main_reserve_active_mib=int(table.get("main_reserve_active_mib", 0)),
         main_reserve_idle_mib=int(table.get("main_reserve_idle_mib", 0)),
+        launcher_shared=(
+            _argv(table["launcher_shared"], "launcher_shared", name)
+            if "launcher_shared" in table
+            else None
+        ),
     )
 
 

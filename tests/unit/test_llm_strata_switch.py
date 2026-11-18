@@ -650,6 +650,7 @@ def test_switch_status_shows_companion_fields():
         "idle_for_s": 3.0,
         "idle_stop_s": COMPANION.idle_stop_s,
         "requested_ago_s": 0.0,
+        "shared": None,
     }
 
 
@@ -842,6 +843,7 @@ async def test_status_route_reports_companion_state():
             "idle_for_s": None,
             "idle_stop_s": companion.settings.idle_stop_s,
             "requested_ago_s": None,
+            "shared": None,
         }
         resp = await router.post(
             CHAT_PATH,
@@ -965,6 +967,9 @@ ACTIVE_RESERVE = f"vram:{COMPANION.main_reserve_active_mib}"
 IDLE_RESERVE = f"vram:{COMPANION.main_reserve_idle_mib}"
 LAUNCH = "launch:" + COMPANION.launcher[0]
 STOP = "launch:" + COMPANION.stopper[0]
+SHARED_LAUNCHER = ["/models/sa-home/poly/gemma-on-shared.sh"]
+SHARED_COMPANION = replace(COMPANION, launcher_shared=SHARED_LAUNCHER)
+LAUNCH_SHARED = "launch:" + SHARED_LAUNCHER[0]
 
 
 async def companion_router(
@@ -1297,6 +1302,147 @@ def clock_after_request(companion: Companion, seconds: float) -> None:
     companion.last_request = companion.clock() - seconds
 
 
+async def test_companion_demand_up_switches_idle_gemma_to_shared_mode():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, companion_settings = companion_switch(run, StepClock(), companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
+        assert companion.shared is False
+        switch.main_demand = True
+        clock_after_request(companion, companion_settings.idle_stop_s)
+        await companion.follow_demand()
+        assert journal == [
+            ACTIVE_RESERVE,
+            LAUNCH,
+            STOP,
+            IDLE_RESERVE,
+            ACTIVE_RESERVE,
+            LAUNCH_SHARED,
+        ]
+        assert companion.shared is True
+        assert companion.running is True
+    finally:
+        await close(main_server)
+
+
+async def test_companion_demand_up_starts_shared_directly():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock(), companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        switch.main_demand = True
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED]
+        assert companion.shared is True
+        await companion.follow_demand()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED]
+    finally:
+        await close(main_server)
+
+
+async def test_companion_demand_down_reloads_idle_gemma_normally():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, companion_settings = companion_switch(run, StepClock(), companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        switch.main_demand = True
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED]
+        switch.main_demand = False
+        clock_after_request(companion, companion_settings.idle_stop_s)
+        await companion.follow_demand()
+        assert journal == [
+            ACTIVE_RESERVE,
+            LAUNCH_SHARED,
+            STOP,
+            IDLE_RESERVE,
+            ACTIVE_RESERVE,
+            LAUNCH,
+        ]
+        assert companion.shared is False
+    finally:
+        await close(main_server)
+
+
+async def test_companion_demand_down_unloads_main_before_normal_launch():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock(), companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
+        assert switch.current == "iq3"
+        assert companion.shared is False
+    finally:
+        await close(main_server)
+
+
+async def test_companion_follow_demand_skips_when_active_or_stopped():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, companion_settings = companion_switch(run, StepClock(), companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        switch.main_demand = True
+        companion.begin_request(AUTH)
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED]
+        await companion.follow_demand()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED]
+        companion.end_request()
+        clock_after_request(companion, companion_settings.idle_stop_s)
+        await companion.stop_if_idle()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED, STOP, IDLE_RESERVE]
+        assert companion.shared is None
+        await companion.follow_demand()
+        assert journal == [ACTIVE_RESERVE, LAUNCH_SHARED, STOP, IDLE_RESERVE]
+    finally:
+        await close(main_server)
+
+
+async def test_companion_idle_guard_follows_demand():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch, _ = companion_switch(run, StepClock(), poll_s=0.01, companion=SHARED_COMPANION)
+    main = VramUpstream(journal)
+    main_server, main_url = await main_upstream(main)
+    companion = loaded_companion(switch, main_url)
+    try:
+        await companion.ensure_running()
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
+        switch.main_demand = True
+        companion.start_idle_guard()
+        await wait_until(lambda: len(journal) >= 6)
+        assert journal == [
+            ACTIVE_RESERVE,
+            LAUNCH,
+            STOP,
+            IDLE_RESERVE,
+            ACTIVE_RESERVE,
+            LAUNCH_SHARED,
+        ]
+        assert companion.shared is True
+    finally:
+        await companion.stop_idle_guard()
+        await close(main_server)
+
+
 async def test_companion_not_stopped_while_request_is_active():
     journal: list[str] = []
     run = JournalRun(journal)
@@ -1617,6 +1763,7 @@ COMPANION_TOML = (
     "idle_stop_s = 900.0\n"
     "main_reserve_active_mib = 3072\n"
     'main_reserve_idle_mib = 0\n'
+    'launcher_shared = ["/models/sa-home/poly/gemma-on-shared.sh"]\n'
     "[launchers]\n"
     'iq3 = ["/models/iq3-on.sh"]\n'
 )
@@ -1634,6 +1781,7 @@ def test_load_settings_reads_companion(tmp_path: Path):
         idle_stop_s=900.0,
         main_reserve_active_mib=3072,
         main_reserve_idle_mib=0,
+        launcher_shared=["/models/sa-home/poly/gemma-on-shared.sh"],
     )
 
 
@@ -1654,6 +1802,7 @@ def test_load_settings_companion_defaults(tmp_path: Path):
     assert companion is not None
     assert (companion.idle_stop_s, companion.main_reserve_active_mib) == (1800.0, 0)
     assert companion.main_reserve_idle_mib == 0
+    assert companion.launcher_shared is None
     assert DEFAULT_COMPANION_IDLE_STOP_S == 1800.0
 
 
