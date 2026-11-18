@@ -20,6 +20,7 @@ from sa_home_bot.devlab.executor.routing import (
     ModelCatalog,
     price_reply,
 )
+from sa_home_bot.llm.strata_switch import SILENCE_CODE
 from sa_home_bot.utils.files import load_model
 from tests.unit import test_devlab_executor as executor_tests
 from tests.unit.support.fakes import ScriptedChatModel, StaticCatalog, local_entry
@@ -235,60 +236,39 @@ async def test_failover_without_live_gateways():
         await failover([], None).complete(MESSAGES, [])  # type: ignore[arg-type]
 
 
-async def test_failover_silence_waits_and_succeeds():
+async def test_failover_silence_waits_without_spending_rounds():
     sleeps: list[float] = []
+    calls = 0
 
     async def record_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
-    silence_body = {"error": "тишина видеокарты до /silent off", "code": "gpu_silence"}
-    sick_bodies: list = []
-    alive_bodies: list = []
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            return web.json_response({"error": "тишина", "code": SILENCE_CODE}, status=503)
+        return web.json_response(reply_body("ок"))
 
-    async def sick_handler(request):
-        sick_bodies.append(await request.json())
-        return web.json_response(silence_body, status=503)
-
-    async def alive_handler(request):
-        alive_bodies.append(await request.json())
-        return web.json_response(
-            reply_body("ок", usage={"prompt_tokens": 5, "completion_tokens": 2})
-        )
-
-    sick_app = web.Application()
-    sick_app.router.add_post(protocol.HTTP_CHAT_PATH, sick_handler)
-    sick_server = TestServer(sick_app)
-    await sick_server.start_server()
-
-    alive_app = web.Application()
-    alive_app.router.add_post(protocol.HTTP_CHAT_PATH, alive_handler)
-    alive_server = TestServer(alive_app)
-    await alive_server.start_server()
-
+    app = web.Application()
+    app.router.add_post(protocol.HTTP_CHAT_PATH, handler)
+    server = TestServer(app)
+    await server.start_server()
     session = aiohttp.ClientSession()
     try:
         chat = FailoverChat(
-            StaticCatalog(
-                entry_at(sick_server, "a"),
-                entry_at(alive_server, "b"),
-            ),
+            StaticCatalog(entry_at(server, "a")),
             lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
             "m",
             rounds=2,
-            retry_s=0.0,
             silence_wait_s=60.0,
             sleep=record_sleep,
         )
         reply = await chat.complete(MESSAGES, [])
     finally:
         await session.close()
-        await sick_server.close()
-        await alive_server.close()
-
-    assert reply.content == "ок"
-    assert len(sick_bodies) == 3
-    assert len(alive_bodies) == 1
-    assert sleeps == [60.0, 60.0, 60.0]
+        await server.close()
+    assert (reply.content, calls, sleeps) == ("ок", 4, [60.0, 60.0, 60.0])
 
 
 def test_price_reply_rules():

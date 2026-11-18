@@ -158,10 +158,8 @@ class FailoverChat:
                 last = ModelError(f"модели {self._model!r} нет на живых шлюзах", transient=True)
                 attempt += 1
                 continue
-            i = 0
-            silence_count = 0
-            while i < len(entries):
-                entry = entries[i]
+            silent = False
+            for entry in entries:
                 try:
                     reply = await self._make_chat(entry).complete(messages, tools)
                 except ModelError as exc:
@@ -169,19 +167,16 @@ class FailoverChat:
                         raise
                     if exc.silence:
                         log.info("Тишина видеокарты, модель %s ждёт: %s", self._model, exc)
-                        await self._sleep(self._silence_wait_s)
-                        silence_count += 1
-                        if silence_count >= 3:
-                            silence_count = 0
-                            i += 1
+                        silent = True
                         continue
                     log.warning("Шлюз %s модели %s: %s", entry.gateway, self._model, exc)
                     last = exc
-                    silence_count = 0
-                    i += 1
                     continue
                 self._preferred = entry.gateway
                 return price_reply(entry, reply)
+            if silent:
+                await self._sleep(self._silence_wait_s)
+                continue
             attempt += 1
         assert last is not None
         raise ModelError(f"все шлюзы модели {self._model!r} отказали: {last}")

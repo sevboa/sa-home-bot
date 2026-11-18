@@ -112,15 +112,10 @@ class GatewayChat:
             ) as resp:
                 text = await resp.text()
                 if resp.status != 200:
-                    if is_silence(resp.status, text):
-                        raise ModelError(
-                            f"шлюз ответил HTTP {resp.status}: {error_text(text)}",
-                            transient=True,
-                            silence=True,
-                        )
                     raise ModelError(
                         f"шлюз ответил HTTP {resp.status}: {error_text(text)}",
                         transient=resp.status >= 500 or resp.status == 429,
+                        silence=is_silence(resp.status, text),
                     )
                 data = await resp.json(content_type=None)
         except TimeoutError as exc:
