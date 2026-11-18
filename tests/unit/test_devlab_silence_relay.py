@@ -6,7 +6,7 @@ from aiohttp.test_utils import TestServer
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.executor.silence_relay import SilenceRelay
-from sa_home_bot.llm.strata_switch import SILENCE_FIELD, SILENCE_PATH
+from sa_home_bot.llm.strata_switch import MAIN_DEMAND_FIELD, SILENCE_FIELD, SILENCE_PATH
 
 
 async def start_switch(bodies: list, status: int = 200) -> TestServer:
@@ -21,17 +21,35 @@ async def start_switch(bodies: list, status: int = 200) -> TestServer:
     return server
 
 
-@pytest.mark.parametrize("value", [{protocol.FIELD_SILENCE_UNTIL: None}, None])
-async def test_push_sends_silence_body(value):
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (
+            {protocol.FIELD_SILENCE: {protocol.FIELD_SILENCE_UNTIL: None}},
+            {SILENCE_FIELD: {protocol.FIELD_SILENCE_UNTIL: None}},
+        ),
+        ({protocol.FIELD_SILENCE: None}, {SILENCE_FIELD: None}),
+        (
+            {protocol.FIELD_SILENCE: None, protocol.FIELD_LOCAL_DEMAND: True},
+            {SILENCE_FIELD: None, MAIN_DEMAND_FIELD: True},
+        ),
+        (
+            {protocol.FIELD_SILENCE: None, protocol.FIELD_LOCAL_DEMAND: False},
+            {SILENCE_FIELD: None, MAIN_DEMAND_FIELD: False},
+        ),
+    ],
+    ids=["тишина", "тишина null", "спрос True", "спрос False"],
+)
+async def test_push_sends_silence_body(reply, expected):
     bodies: list = []
     server = await start_switch(bodies)
     relay = SilenceRelay(str(server.make_url("")))
     try:
-        await relay.push({protocol.FIELD_SILENCE: value})
+        await relay.push(reply)
     finally:
         await relay.close()
         await server.close()
-    assert bodies == [{SILENCE_FIELD: value}]
+    assert bodies == [expected]
 
 
 async def test_push_skips_reply_without_silence():
@@ -44,6 +62,28 @@ async def test_push_skips_reply_without_silence():
         await relay.close()
         await server.close()
     assert bodies == []
+
+
+async def test_push_logs_demand_change(caplog):
+    caplog.set_level("INFO")
+    bodies: list = []
+    server = await start_switch(bodies)
+    relay = SilenceRelay(str(server.make_url("")))
+    try:
+        await relay.push({protocol.FIELD_SILENCE: None})
+        await relay.push({protocol.FIELD_SILENCE: None, protocol.FIELD_LOCAL_DEMAND: True})
+        await relay.push({protocol.FIELD_SILENCE: None, protocol.FIELD_LOCAL_DEMAND: True})
+    finally:
+        await relay.close()
+        await server.close()
+    infos = [
+        record.message
+        for record in caplog.records
+        if record.levelname == "INFO" and record.name == "sa_home_bot.devlab.executor.silence_relay"
+    ]
+    assert len(infos) == 2
+    assert infos[0] == "Тишина видеокарты передана strata-switch: None, спрос None"
+    assert infos[1] == "Тишина видеокарты передана strata-switch: None, спрос True"
 
 
 async def test_push_swallows_bad_status(caplog):

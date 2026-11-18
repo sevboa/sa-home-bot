@@ -331,3 +331,7 @@
 `gateways.close()` при останове. Сбой (HTTP не 200, `aiohttp.ClientError`, таймаут) не поднимается,
 предупреждение в лог только при первой неудаче подряд; при успехе и изменении значения —
 `info`. Ответ без `silence` (старый хаб) не пересылается. `switch_url` пустой — пересылки нет.
+Спрос на локальную модель (2026-11-18): хаб в том же ответе heartbeat отдаёт `local_demand`
+(`protocol.FIELD_LOCAL_DEMAND`, `False` при активной тишине) — есть ли задание в `STATUS_QUEUED` или
+`STATUS_RUNNING` на модель каталога без `MODEL_REMOTE`; `SilenceRelay.push` пересылает его тем же
+запросом в `main_demand` (`strata_switch.MAIN_DEMAND_FIELD`), лог при смене пары (тишина, спрос).

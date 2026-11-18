@@ -21,6 +21,7 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_MAX_WAIT_S,
     DEFAULT_POLL_S,
     DEFAULT_PRIORITY_GRACE_S,
+    MAIN_DEMAND_FIELD,
     MODELS_PATH,
     RELEASE_PATH,
     SILENCE_CODE,
@@ -590,6 +591,7 @@ def test_switch_status_without_companion_and_without_activity():
         "engine_frozen": False,
         "companion": None,
         "silence": None,
+        "main_demand": False,
     }
 
 
@@ -743,6 +745,7 @@ async def test_status_route_answers_without_authorization():
         "engine_frozen": False,
         "companion": None,
         "silence": None,
+        "main_demand": False,
     }
 
 
@@ -2258,6 +2261,44 @@ async def test_silence_bad_body_returns_400(body: object):
         assert "тело" in answer["error"]
     finally:
         await close(router, upstream_server)
+
+
+@pytest.mark.parametrize(
+    ("demand", "status", "expected"),
+    [(True, 200, True), (False, 200, False), ("да", 400, False)],
+    ids=["есть True", "есть False", "плохое значение"],
+)
+async def test_silence_handler_records_main_demand(demand, status, expected):
+    switch = StrataSwitch(settings(), FakeRun())
+    upstream = Upstream()
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        resp = await router.post(
+            SILENCE_PATH, json={"silence": None, MAIN_DEMAND_FIELD: demand}, headers=AUTH
+        )
+        assert resp.status == status
+        assert switch.main_demand is expected
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_silence_without_demand_field_keeps_main_demand():
+    switch = StrataSwitch(settings(), FakeRun())
+    switch.main_demand = True
+    upstream_server, router = await run_router(switch, Upstream())
+    try:
+        resp = await router.post(SILENCE_PATH, json={"silence": None}, headers=AUTH)
+        assert resp.status == 200
+        assert switch.main_demand is True
+    finally:
+        await close(router, upstream_server)
+
+
+def test_switch_status_shows_main_demand():
+    switch = StrataSwitch(settings(), FakeRun())
+    switch.main_demand = True
+    gate = PriorityGate(switch.clock, switch.settings.poll_s, switch.settings.priority_grace_s)
+    assert switch_status(switch, gate, None)["main_demand"] is True
 
 
 async def test_silence_with_companion_stops_companion_and_shows_in_status():

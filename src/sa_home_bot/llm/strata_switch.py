@@ -47,6 +47,7 @@ STATUS_PATH = "/v1/switch/status"
 RELEASE_PATH = "/v1/switch/companion/release"
 SILENCE_PATH = "/v1/silence"
 SILENCE_FIELD = "silence"
+MAIN_DEMAND_FIELD = "main_demand"
 SILENCE_UNTIL_FIELD = "until"
 SILENCE_STATUS = 503
 SILENCE_CODE = "gpu_silence"
@@ -369,6 +370,7 @@ class StrataSwitch:
         self._lock = asyncio.Lock()
         self.silence_until: datetime | None = None
         self.silent = False
+        self.main_demand: bool = False
 
     def silence_active(self) -> bool:
         if not self.silent:
@@ -503,23 +505,28 @@ def json_error(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
-def parse_silence(payload: object) -> tuple[bool, datetime | None]:
+def parse_silence(payload: object) -> tuple[bool, datetime | None, bool | None]:
     if not isinstance(payload, dict) or SILENCE_FIELD not in payload:
         raise ValueError(SILENCE_BAD_BODY)
+    demand: bool | None = None
+    if MAIN_DEMAND_FIELD in payload:
+        demand = payload[MAIN_DEMAND_FIELD]
+        if not isinstance(demand, bool):
+            raise ValueError(SILENCE_BAD_BODY)
     value = payload[SILENCE_FIELD]
     if value is None:
-        return False, None
+        return False, None, demand
     if not isinstance(value, dict):
         raise ValueError(SILENCE_BAD_BODY)
     until = value.get(SILENCE_UNTIL_FIELD)
     if until is None:
-        return True, None
+        return True, None, demand
     if not isinstance(until, str):
         raise ValueError(SILENCE_BAD_BODY)
     moment = datetime.fromisoformat(until)
     if moment.tzinfo is None:
         raise ValueError(SILENCE_BAD_BODY)
-    return True, moment
+    return True, moment, demand
 
 
 async def unload_for_silence(switch: StrataSwitch, companion: Companion | None) -> None:
@@ -987,6 +994,7 @@ def switch_status(
         "engine_frozen": bool(gate.freezer is not None and gate.freezer.frozen),
         "companion": companion_status,
         "silence": silence_status,
+        "main_demand": switch.main_demand,
     }
 
 
@@ -1046,15 +1054,18 @@ def build_app(
     async def silence(request: web.Request) -> web.Response:
         try:
             payload = await request.json()
-            silent, until = parse_silence(payload)
+            silent, until, demand = parse_silence(payload)
         except (ValueError, UnicodeDecodeError):
             return json_error(400, SILENCE_BAD_BODY)
         switch.silent, switch.silence_until = silent, until
+        if demand is not None:
+            switch.main_demand = demand
         if switch.silence_active():
             await unload_for_silence(switch, companion)
         return web.json_response(
             {
                 "silence": payload[SILENCE_FIELD],
+                "main_demand": switch.main_demand,
                 "active": switch.silence_active(),
                 "current": switch.current,
                 "companion_running": companion.running if companion else False,

@@ -479,6 +479,30 @@ async def test_executor_heartbeat_reports_silence(client, executor, silence, sil
     assert body[protocol.FIELD_SILENCE] == expected
 
 
+@pytest.mark.parametrize(
+    ("model", "silent", "expected"),
+    [
+        (None, False, False),
+        (MODEL, False, True),
+        ("free", False, False),
+        (MODEL, True, False),
+    ],
+    ids=["нет задания", "локальная", "удалённая", "локальная в тишине"],
+)
+async def test_executor_heartbeat_reports_local_demand(
+    client, store, executor, gateway, silence, model, silent, expected
+):
+    if model is not None:
+        await store.queue.submit("me", PROJECT, model, "task")
+    if silent:
+        await silence.start(None)
+    await call(client, protocol.HTTP_HEARTBEAT_PATH, gateway, gateway_beat(MODEL, remote=False))
+    _, body = await call(
+        client, protocol.HTTP_HEARTBEAT_PATH, executor, {protocol.FIELD_BUSY: False}
+    )
+    assert body[protocol.FIELD_LOCAL_DEMAND] is expected
+
+
 async def test_claim_in_silence_skips_local_models_and_takes_fallback(
     client, store, executor, gateway, silence
 ):

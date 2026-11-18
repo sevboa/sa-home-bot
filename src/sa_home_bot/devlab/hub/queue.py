@@ -673,6 +673,16 @@ class HubQueue:
         row = await cur.fetchone()
         return row["n"] if row else 0
 
+    async def local_demand(self, models: set[str]) -> bool:
+        if not models:
+            return False
+        cur = await self._db.conn.execute(
+            "SELECT 1 FROM jobs WHERE status IN (?, ?) AND model IN ("
+            f"{_in(models)}) LIMIT 1",
+            (protocol.STATUS_QUEUED, protocol.STATUS_RUNNING, *models),
+        )
+        return await cur.fetchone() is not None
+
     def _bench_filter(self, now: datetime | None) -> tuple[str, list[Any]]:
         if in_windows(self._bench_windows, (now or datetime.now()).time()):
             return "", []
