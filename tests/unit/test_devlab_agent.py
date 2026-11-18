@@ -403,20 +403,28 @@ async def test_gateway_chat_request_and_parse():
     assert seen["body"]["model"] == "flint" and seen["body"]["tools"] == [{"type": "function"}]
     assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{FLOW_REMINDER}"}]
     assert seen["body"]["user"] == "devlab job-1"
+    assert "temperature" not in seen["body"]
     assert reply.content == "мысль"
     assert reply.tool_calls[0].name == "grep"
     assert (reply.tokens_in, reply.tokens_out) == (7, 3)
     assert reply.as_message()["tool_calls"][0]["function"]["name"] == "grep"
 
 
-async def test_gateway_chat_reasoning_rides_in_history():
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {REASONING_FIELD: "план"},
+        {"reasoning": "план", "reasoning_details": [{"type": "reasoning.text", "text": "план"}]},
+    ],
+)
+async def test_gateway_chat_reasoning_rides_in_history(extra):
     bodies = []
 
     async def handler(request):
         bodies.append(await request.json())
         call = {"id": f"k{len(bodies)}", "type": "function", "function": {"name": "grep"}}
         body = reply_body("", [call])
-        body["choices"][0]["message"][REASONING_FIELD] = f"план {len(bodies)}"
+        body["choices"][0]["message"].update(extra)
         return web.json_response(body)
 
     server, chat = await run_gateway(handler)
@@ -428,10 +436,10 @@ async def test_gateway_chat_reasoning_rides_in_history():
     finally:
         await chat.close()
         await server.close()
-    assert first.reasoning == "план 1"
-    assert first.as_message()[REASONING_FIELD] == "план 1"
+    assert first.reasoning == extra
     assert REASONING_FIELD not in ModelReply("ответ").as_message()
-    assert bodies[1]["messages"][1][REASONING_FIELD] == "план 1"
+    sent = bodies[1]["messages"][1]
+    assert {key: sent[key] for key in extra} == extra
 
 
 def flow_step(key: str, output: str) -> list[dict]:

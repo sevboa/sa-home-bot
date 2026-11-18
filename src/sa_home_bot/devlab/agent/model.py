@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import aiohttp
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.agent.context import REASONING_FIELD
+from sa_home_bot.devlab.agent.context import REASONING_FIELDS
 from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
 from sa_home_bot.devlab.usage import usage_cost
 from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
@@ -48,7 +48,7 @@ class ModelReply:
     tokens_out: int = 0
     cost_usd: float | None = None
     paid_free: bool = False
-    reasoning: str = ""
+    reasoning: dict[str, Any] = field(default_factory=dict)
 
     def as_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
@@ -61,8 +61,7 @@ class ModelReply:
                 }
                 for call in self.tool_calls
             ]
-            if self.reasoning:
-                message[REASONING_FIELD] = self.reasoning
+            message.update(self.reasoning)
         return message
 
 
@@ -80,7 +79,7 @@ class GatewayChat:
         model: str,
         job_id: str,
         timeout_s: float = MODEL_TIMEOUT_S,
-        temperature: float = 0.0,
+        temperature: float | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._url = base_url.rstrip("/") + protocol.HTTP_CHAT_PATH
@@ -103,9 +102,10 @@ class GatewayChat:
             "model": self._model,
             "messages": with_flow_reminder(messages, reminder_for(self._model)),
             "tools": tools,
-            "temperature": self._temperature,
             "user": f"devlab {self._job_id}",
         }
+        if self._temperature is not None:
+            body["temperature"] = self._temperature
         try:
             async with self._session.post(
                 self._url, json=body, headers=self._headers, timeout=self._timeout
@@ -205,7 +205,7 @@ def parse_reply(data: Any, step: int = 0) -> ModelReply:
                 tokens_in=int(usage.get("prompt_tokens") or 0),
                 tokens_out=int(usage.get("completion_tokens") or 0),
                 cost_usd=usage_cost(usage),
-                reasoning=str(message.get(REASONING_FIELD) or ""),
+                reasoning={key: message[key] for key in REASONING_FIELDS if message.get(key)},
             )
         except ModelError as exc:
             failure = exc

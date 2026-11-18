@@ -8,6 +8,7 @@ from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
 
 CHARS_PER_TOKEN = 3
 REASONING_FIELD = "reasoning_content"
+REASONING_FIELDS = (REASONING_FIELD, "reasoning", "reasoning_details")
 FOLDED_OUTPUT_PREFIX = "[вывод свёрнут"
 FOLDED_OUTPUT = FOLDED_OUTPUT_PREFIX + ": {size} симв.]"
 ARGUMENT_KEEP_CHARS = 200
@@ -67,9 +68,14 @@ def _old_boundary(messages: list[dict[str, Any]], keep_recent: int) -> int:
     return tool_indexes[-keep_recent] if keep_recent else len(messages)
 
 
+def _drop_reasoning(message: dict[str, Any]) -> bool:
+    dropped = [message.pop(field, None) for field in REASONING_FIELDS]
+    return any(value is not None for value in dropped)
+
+
 def _fold_reasoning(window: _Window, boundary: int) -> bool:
     for index in range(PINNED_MESSAGES, boundary):
-        if window.messages[index].pop(REASONING_FIELD, None) is not None:
+        if _drop_reasoning(window.messages[index]):
             window.touch(index)
             if window.fits():
                 return True
@@ -226,7 +232,7 @@ def _trim_last_unit(window: _Window) -> bool:
     start, end = units[-1]
     for index in range(start, end):
         message = window.messages[index]
-        if message.pop(REASONING_FIELD, None) is not None:
+        if _drop_reasoning(message):
             window.touch(index)
             if window.fits():
                 return True
