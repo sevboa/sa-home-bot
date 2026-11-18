@@ -22,6 +22,7 @@ from sa_home_bot.devlab.executor.worker import (
     TestWorker,
     WorkerSettings,
     refused_as_final,
+    send_heartbeat,
 )
 from sa_home_bot.devlab.hub import repos
 from sa_home_bot.devlab.hub.app import build_hub_app
@@ -588,6 +589,12 @@ async def test_heartbeat_takes_hub_queue_into_busy(env):
     await env.store.queue.submit(CLIENT, PROJECT, "model", "task")
     await worker.beat()
     assert worker._busy.busy()
+
+
+async def test_send_heartbeat_returns_hub_reply(env):
+    worker = env.worker(FakeTestRunner())
+    reply = await send_heartbeat(worker._hub, worker._busy, [], None)
+    assert protocol.FIELD_SILENCE in reply and reply[protocol.FIELD_SILENCE] is None
 
 
 async def test_undelivered_failed_blocks_next_claim_until_delivered(env, monkeypatch):
