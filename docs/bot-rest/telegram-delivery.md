@@ -14,6 +14,7 @@
 Живые находки:
 - 2026-08-29: сетевые сбои `aiohttp_socks.ProxyError` / `ProxyTimeoutError` — обычные `Exception`, не подклассы `TelegramAPIError`, и раньше улетали наверх. Всё, что не «перманентное», считается транзиентным.
 - 2026-08-30: первый же не-429 сбой давал `return None` — на `rich_stream.finalize()` терялся готовый ответ модели. На путях «терять нельзя» лучше зря сделать пару попыток.
+- 2026-11-18: битая разметка (`can't parse entities`) — повтор тем же текстом без разметки (`parse_mode=None`). Оповещение админу с `<urlopen error>` терялось: Telegram отвечал `Bad Request: can't parse entities: Unsupported start tag "urlopen"`, и `Notifier` бросал сообщение как перманентный сбой. Теперь `_send_chunk` при `is_parse_error` делает вторую попытку с `parse_mode=None`.
 
 Рефакторинг (этап «bot-rest»): `send_document`, `send_photo`, `send_voice` раньше повторяли цикл вручную; теперь это тонкие обёртки над `send_with_retry`. Политика 429 / permanent / transient не менялась, закреплена тестами `test_media_send_*` в `tests/unit/test_notifier.py`.
 

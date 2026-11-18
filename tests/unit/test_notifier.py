@@ -15,6 +15,7 @@ class FakeBot:
         self.fail_times = 0
         self.fail_exception: Exception = ConnectionError("proxy timed out: 60")
         self.send_message_calls = 0
+        self.parse_modes: list = []
 
     async def send_chat_action(self, chat_id, action, message_thread_id=None) -> None:
         self.typing_calls += 1
@@ -23,8 +24,10 @@ class FakeBot:
             raise self.fail_exception
 
     async def send_message(self, chat_id, text, reply_parameters=None, reply_markup=None,
-                            message_thread_id=None):
+                            message_thread_id=None, parse_mode="HTML"):
+        self.parse_modes.append(parse_mode)
         self.send_message_calls += 1
+        self.sent.append({"chat_id": chat_id, "text": text})
         if self.fail_times > 0:
             self.fail_times -= 1
             raise self.fail_exception
@@ -32,7 +35,6 @@ class FakeBot:
         class _Msg:
             message_id = 1
 
-        self.sent.append({"chat_id": chat_id, "text": text})
         return _Msg()
 
     async def delete_message(self, chat_id, message_id) -> None:
@@ -70,7 +72,8 @@ async def test_send_direct_retries_on_429_then_succeeds():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id == 1
-    assert bot.sent == [{"chat_id": 1, "text": "привет"}]
+    assert bot.sent[-1] == {"chat_id": 1, "text": "привет"}
+    assert bot.parse_modes[-1] == "HTML"
 
 
 async def test_send_direct_retries_transient_network_error_then_succeeds():
@@ -82,7 +85,8 @@ async def test_send_direct_retries_transient_network_error_then_succeeds():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id == 1
-    assert bot.sent == [{"chat_id": 1, "text": "привет"}]
+    assert bot.sent[-1] == {"chat_id": 1, "text": "привет"}
+    assert bot.parse_modes[-1] == "HTML"
     assert bot.send_message_calls == 3
 
 
@@ -94,17 +98,32 @@ async def test_send_direct_swallows_network_error_and_returns_none():
     message_id = await notifier.send_direct(1, "привет")
 
     assert message_id is None
-    assert bot.sent == []
+    assert len(bot.sent) == MAX_RETRIES
+    assert all(pm == "HTML" for pm in bot.parse_modes)
     assert bot.send_message_calls == MAX_RETRIES
 
 
-async def test_send_direct_does_not_retry_permanent_bad_request():
+async def test_send_direct_resends_plain_text_on_parse_error():
     bot = FakeBot()
     bot.fail_exception = TelegramBadRequest(method=None, message="can't parse entities")
     bot.fail_times = 1
     notifier = Notifier(bot)
 
     message_id = await notifier.send_direct(1, "<b>кривой")
+
+    assert message_id == 1
+    assert bot.send_message_calls == 2
+    assert bot.parse_modes[0] == "HTML"
+    assert bot.parse_modes[1] is None
+
+
+async def test_send_direct_does_not_retry_other_bad_request():
+    bot = FakeBot()
+    bot.fail_exception = TelegramBadRequest(method=None, message="chat not found")
+    bot.fail_times = 1
+    notifier = Notifier(bot)
+
+    message_id = await notifier.send_direct(1, "текст")
 
     assert message_id is None
     assert bot.send_message_calls == 1
