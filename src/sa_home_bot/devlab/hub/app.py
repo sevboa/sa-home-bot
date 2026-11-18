@@ -21,6 +21,7 @@ from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
 from sa_home_bot.devlab.hub.waker import WAKE_STEP_INTERVAL_S, ExecutorWaker
 from sa_home_bot.proto.server import ProtoServer
+from sa_home_bot.silence import SilenceService
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.utils.process import run
 
@@ -86,9 +87,12 @@ async def tailscale_address() -> str:
 
 
 def build_hub_app(
-    store: HubStore, nodes: NodeDirectory, swarm_token: str = ""
+    store: HubStore,
+    nodes: NodeDirectory,
+    swarm_token: str = "",
+    silence: SilenceService | None = None,
 ) -> web.Application:
-    app = build_app(store, nodes, swarm_token)
+    app = build_app(store, nodes, swarm_token, silence)
     connect_http.add_routes(app)
     git_http.add_routes(app)
     executor_api.add_routes(app)
@@ -104,17 +108,20 @@ async def run_hub(settings: Settings) -> None:
     wake_db = Database(cfg.data_dir / WAKE_DB_NAME)
     await wake_db.open()
     await apply_migrations(wake_db)
+    bot_db = Database(settings.database.path)
+    await bot_db.open()
+    silence = SilenceService(Store(bot_db))
     node_link = ServiceLink(
         settings.node.socket, token=settings.swarm.token, display_name="нода (devlab_hub)"
     )
     await node_link.start()
-    waker = ExecutorWaker(store, node_link, Store(wake_db), cfg.executor_node)
+    waker = ExecutorWaker(store, node_link, Store(wake_db), cfg.executor_node, silence=silence)
     nodes = SwarmNodes(node_link.get_state, settings.node.id or socket.gethostname(), host)
     server = ProtoServer(cfg.socket, HubService(store, nodes), token=settings.swarm.token)
     lifespan = Lifespan()
     lifespan.install_signal_handlers()
     await server.start()
-    runner = web.AppRunner(build_hub_app(store, nodes, settings.swarm.token))
+    runner = web.AppRunner(build_hub_app(store, nodes, settings.swarm.token, silence))
     await runner.setup()
     await web.TCPSite(runner, host, cfg.port).start()
     log.info("Служба devlab_hub запущена: http://%s:%d, данные %s", host, cfg.port, cfg.data_dir)
@@ -133,6 +140,7 @@ async def run_hub(settings: Settings) -> None:
                 await task
         await node_link.stop()
         await wake_db.close()
+        await bot_db.close()
         log.info("Останов службы devlab_hub...")
         await runner.cleanup()
         await server.stop()

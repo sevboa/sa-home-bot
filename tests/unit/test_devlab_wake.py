@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from sa_home_bot import wake_core
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import store as store_module
 from sa_home_bot.devlab.hub import waker as waker_module
 from sa_home_bot.devlab.hub.store import HubStore, Principal
 from sa_home_bot.devlab.hub.waker import WAKE_BACKOFF_S, ExecutorWaker
+from sa_home_bot.silence import SilenceService
 from sa_home_bot.utils.clock import utc_now
 from tests.unit.support.fakes import Clock
 
@@ -20,6 +24,12 @@ MODEL = "qwen-local"
 PROJECT = "demo"
 S = protocol
 
+NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+def silence_clock() -> datetime:
+    return NOW
+
 
 @pytest.fixture
 async def store(tmp_path):
@@ -28,6 +38,20 @@ async def store(tmp_path):
     await hub_store.queue.add_project(PROJECT)
     yield hub_store
     await hub_store.close()
+
+
+@pytest.fixture
+async def silence_store(tmp_path):
+    db = Database(tmp_path / "silence.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield Store(db)
+    await db.close()
+
+
+@pytest.fixture
+async def silence(silence_store):
+    return SilenceService(silence_store, silence_clock)
 
 
 async def submit(store):
@@ -139,6 +163,11 @@ def waker(store, clock):
     return ExecutorWaker(store, object(), object(), EXECUTOR, clock)
 
 
+@pytest.fixture
+def waker_with_silence(store, clock, silence):
+    return ExecutorWaker(store, object(), object(), EXECUTOR, clock, silence=silence)
+
+
 async def beat(store, name=EXECUTOR):
     await store.heartbeat(Principal(name, S.ROLE_EXECUTOR), {S.FIELD_BUSY: False})
 
@@ -221,3 +250,20 @@ async def test_pending_work_with_test_jobs(store):
     assert await store.queue.pending_work() is True
     await store.queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
     assert await store.queue.pending_work() is False
+
+
+@pytest.mark.parametrize("silence_active", [False, True])
+async def test_silence_prevents_wake(
+    store, waker_with_silence, ensure, silence, silence_active, clock
+):
+    if silence_active:
+        await silence.start(30, set_by="test")
+    else:
+        await silence.off()
+    await submit(store)
+    if silence_active:
+        assert await waker_with_silence.step() is None
+        assert ensure.calls == []
+    else:
+        assert await waker_with_silence.step() == wake_core.READY
+        assert ensure.calls == [(EXECUTOR, S.EXECUTOR_SERVICE)]

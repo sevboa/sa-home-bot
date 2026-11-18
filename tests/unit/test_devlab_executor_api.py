@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from sa_home_bot.db.connection import Database
+from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.db.store import Store
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import app as hub_app
 from sa_home_bot.devlab.hub import executor_api, http
 from sa_home_bot.devlab.hub import store as store_module
 from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.silence import SilenceService
 from sa_home_bot.utils.clock import utc_now
 from tests.unit.support.fakes import LOOPBACK, FakeNodes
 
@@ -24,6 +28,12 @@ API_PATHS = [
     protocol.HTTP_HEARTBEAT_PATH,
 ]
 
+NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+def clock() -> datetime:
+    return NOW
+
 
 @pytest.fixture
 async def store(tmp_path):
@@ -35,8 +45,30 @@ async def store(tmp_path):
 
 
 @pytest.fixture
+async def silence_store(tmp_path):
+    db = Database(tmp_path / "silence.sqlite")
+    await db.open()
+    await apply_migrations(db)
+    yield Store(db)
+    await db.close()
+
+
+@pytest.fixture
+async def silence(silence_store):
+    return SilenceService(silence_store, clock)
+
+
+@pytest.fixture
 async def client(store):
     app = http.build_app(store, FakeNodes())
+    executor_api.add_routes(app)
+    async with TestClient(TestServer(app)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+async def client_with_silence(store, silence):
+    app = http.build_app(store, FakeNodes(), silence=silence)
     executor_api.add_routes(app)
     async with TestClient(TestServer(app)) as test_client:
         yield test_client
@@ -166,7 +198,10 @@ async def test_poll_ignores_other_executors_jobs(client, store, executor):
 
 def gateway_beat(*names):
     return {
-        protocol.FIELD_MODELS: [{protocol.MODEL_NAME: name, "free": True} for name in names],
+        protocol.FIELD_MODELS: [
+            {protocol.MODEL_NAME: name, "free": True, protocol.MODEL_REMOTE: False}
+            for name in names
+        ],
         protocol.FIELD_LIMITS: {"day_left": 5},
     }
 
@@ -463,3 +498,25 @@ async def test_agent_steps_journal_is_limited_and_test_job_refuses_it(
     assert await upload(client, executor, job.id, b"12345", protocol.LOG_FILE_STEPS) == 413
     test_job = await running_test(client, store, executor)
     assert await upload(client, executor, test_job.id, b"x", protocol.LOG_FILE_STEPS) == 400
+
+
+@pytest.mark.parametrize("silence_active", [False, True])
+async def test_executor_heartbeat_silence(
+    client, client_with_silence, store, executor, silence, silence_active
+):
+    if silence_active:
+        await silence.start(30, set_by="test")
+    else:
+        await silence.off()
+    status, body = await call(
+        client_with_silence if silence_active else client,
+        protocol.HTTP_HEARTBEAT_PATH,
+        executor,
+        {protocol.FIELD_BUSY: False},
+    )
+    assert status == 200
+    if silence_active:
+        assert body[protocol.FIELD_SILENCE] is not None
+        assert body[protocol.FIELD_SILENCE][protocol.FIELD_SILENCE_UNTIL] is not None
+    else:
+        assert body[protocol.FIELD_SILENCE] is None

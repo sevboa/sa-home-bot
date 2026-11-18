@@ -9,6 +9,7 @@ from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.nodes import NodeDirectory
 from sa_home_bot.devlab.hub.queue import TransitionRefused
 from sa_home_bot.devlab.hub.store import HubStore, Principal
+from sa_home_bot.silence import SilenceService, SilenceState
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -19,6 +20,13 @@ PRINCIPAL_KEY = web.RequestKey("principal", Principal)
 STORE_KEY = web.AppKey("store", HubStore)
 NODES_KEY = web.AppKey("nodes", NodeDirectory)
 SWARM_TOKEN_KEY = web.AppKey("swarm_token", str)
+SILENCE_KEY = web.AppKey("silence", SilenceService)
+
+
+async def silence_state(app: web.Application) -> SilenceState | None:
+    if SILENCE_KEY not in app:
+        return None
+    return await app[SILENCE_KEY].load()
 
 
 def public(handler: Handler) -> Handler:
@@ -75,10 +83,17 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": protocol.SERVICE_NAME})
 
 
-def build_app(store: HubStore, nodes: NodeDirectory, swarm_token: str = "") -> web.Application:
+def build_app(
+    store: HubStore,
+    nodes: NodeDirectory,
+    swarm_token: str = "",
+    silence: SilenceService | None = None,
+) -> web.Application:
     app = web.Application(middlewares=[error_middleware, auth_middleware])
     app[STORE_KEY] = store
     app[NODES_KEY] = nodes
     app[SWARM_TOKEN_KEY] = swarm_token
+    if silence is not None:
+        app[SILENCE_KEY] = silence
     app.router.add_get(protocol.HTTP_HEALTH_PATH, health)
     return app
