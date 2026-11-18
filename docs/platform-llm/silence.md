@@ -28,3 +28,21 @@
   `WakeOutcome(False, "🔇 Тишина видеокарты: «<node_id>» не будим.")`. `ensure_service_ready`
   возвращает `unreachable`, `send_wol` не проходит в `link.commands`.
 - `force=True` шлёт WoL и в тишине (для ручного обхода владельцем).
+
+## Хаб devlab в тишине (2026-11-18)
+
+Хаб devlab живёт в отдельном процессе со своей БД (`wake.sqlite`), поэтому тишину он читает из БД
+бота (`settings.database.path`). При старте `run_hub` открывает БД бота, создаёт `SilenceService`
+и передаёт его в `build_hub_app` и `ExecutorWaker`.
+
+Пока тишина действует:
+- `ExecutorWaker.step()` не будит исполнителя: после проверки `pending_work` и `executor_alive`
+  смотрит `await silence.load()`; если состояние не `None` — возвращает `None` без вызова
+  `wake_core.ensure_service_ready`.
+- `claim` (HTTP API исполнителя) не выдаёт задания на локальных моделях. Каталог моделей
+  (`store.models()`) фильтруется: модели с `remote=false` исключаются из списка `models`
+  исполнителя и из `live_models`. Задания на локальных моделях с `fallback` на удалённую
+  уходят на удалённую модель (если она есть в каталоге и исполнитель её запросил).
+- `heartbeat` исполнителя возвращает поле `silence`: `null` без тишины, иначе
+  `{"until": "2026-11-18T12:30:00+00:00"}` (ISO-строка) или `{"until": null}` для бессрочной.
+  Исполнитель передаст это `strata-switch` следующей задачей; хаб не решает, как поступить.

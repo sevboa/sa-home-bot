@@ -3,10 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-import pytest_asyncio
 
-from sa_home_bot.db.connection import Database
-from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.db.store import Store
 from sa_home_bot.silence import GPU_SILENCE_KEY, SilenceService, SilenceState
 
@@ -16,15 +13,6 @@ INFINITE = "infinite"
 
 def clock() -> datetime:
     return NOW
-
-
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    db = Database(tmp_path / "test.sqlite")
-    await db.open()
-    await apply_migrations(db)
-    yield Store(db)
-    await db.close()
 
 
 async def seed_silence(store: Store, state: SilenceState) -> None:

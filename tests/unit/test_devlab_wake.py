@@ -135,8 +135,8 @@ def clock():
 
 
 @pytest.fixture
-def waker(store, clock):
-    return ExecutorWaker(store, object(), object(), EXECUTOR, clock)
+def waker(store, clock, silence):
+    return ExecutorWaker(store, object(), object(), EXECUTOR, clock, silence=silence)
 
 
 async def beat(store, name=EXECUTOR):
@@ -221,3 +221,10 @@ async def test_pending_work_with_test_jobs(store):
     assert await store.queue.pending_work() is True
     await store.queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
     assert await store.queue.pending_work() is False
+
+
+async def test_silence_prevents_wake(store, waker, ensure, silence):
+    await silence.start(30)
+    await submit(store)
+    assert await waker.step() is None
+    assert ensure.calls == []
