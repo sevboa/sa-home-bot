@@ -296,6 +296,42 @@ async def test_submit_rejects_bad_purpose(queue):
         await queue.submit(CLIENT, PROJECT, MODEL, TASK, purpose="other")
 
 
+@pytest.mark.parametrize(
+    "num_deps, base_branch, expect_error, check_base",
+    [
+        (0, None, False, lambda b: b.startswith("base/")),
+        (0, "base/custom", False, lambda b: b == "base/custom"),
+        (0, "agent/abc123", False, lambda b: b == "agent/abc123"),
+        (1, None, False, lambda b: b.startswith("agent/") and len(b) > len("agent/")),
+        (1, "base/x", False, lambda b: b == "base/x"),
+        (2, None, True, None),
+        (0, "agent/", True, None),
+        (0, "agent/a..b", True, None),
+        (0, "other/x", True, None),
+    ],
+)
+async def test_submit_base_branch_from_dependency(
+    queue, num_deps, base_branch, expect_error, check_base
+):
+    dep_jobs = []
+    for _ in range(num_deps):
+        dep_jobs.append(await submit(queue))
+    dep_ids = [j.id for j in dep_jobs]
+
+    kwargs = {}
+    if base_branch is not None:
+        kwargs["base_branch"] = base_branch
+    if dep_ids:
+        kwargs["depends_on"] = dep_ids
+
+    if expect_error:
+        with pytest.raises(HubError):
+            await queue.submit(CLIENT, PROJECT, MODEL, TASK, **kwargs)
+    else:
+        job = await queue.submit(CLIENT, PROJECT, MODEL, TASK, **kwargs)
+        assert check_base(job.base_branch)
+
+
 async def test_claim_filters_by_models(queue):
     remote = await submit(queue, model=OTHER_MODEL, priority=9)
     local = await submit(queue)

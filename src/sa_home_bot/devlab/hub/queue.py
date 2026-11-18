@@ -147,13 +147,13 @@ def _spend(payload: dict[str, Any]) -> tuple[int, float]:
 
 
 def _valid_base_branch(name: str) -> bool:
-    tail = name[len(protocol.BASE_BRANCH_PREFIX) :]
-    return (
-        name.startswith(protocol.BASE_BRANCH_PREFIX)
-        and bool(tail)
-        and BRANCH_TAIL_RE.match(tail) is not None
-        and ".." not in name
-    )
+    if name.startswith(protocol.BASE_BRANCH_PREFIX):
+        tail = name[len(protocol.BASE_BRANCH_PREFIX) :]
+    elif name.startswith(protocol.AGENT_BRANCH_PREFIX):
+        tail = name[len(protocol.AGENT_BRANCH_PREFIX) :]
+    else:
+        return False
+    return bool(tail) and BRANCH_TAIL_RE.match(tail) is not None and ".." not in name
 
 
 def _test_result(payload: dict[str, Any]) -> None:
@@ -236,13 +236,21 @@ class HubQueue:
         if isinstance(priority, bool) or not isinstance(priority, int):
             raise HubError("приоритет — целое число")
         if base_branch is not None and not _valid_base_branch(base_branch):
-            raise HubError(f"базовая ветка: {protocol.BASE_BRANCH_PREFIX}<имя>, без пробелов и ..")
+            raise HubError(
+                f"базовая ветка: {protocol.BASE_BRANCH_PREFIX}<имя> или "
+                f"{protocol.AGENT_BRANCH_PREFIX}<id>, без пробелов и .."
+            )
         profile = profile.strip()
         if not PROJECT_NAME_RE.match(profile):
             raise HubError("профиль: латиница, цифры, дефис, подчёркивание")
         if purpose not in protocol.PURPOSES:
             raise HubError(f"назначение: {', '.join(protocol.PURPOSES)}")
         deps = list(dict.fromkeys(depends_on))
+        if base_branch is None:
+            if len(deps) == 1:
+                base_branch = protocol.AGENT_BRANCH_PREFIX + deps[0]
+            elif len(deps) > 1:
+                raise HubError("несколько зависимостей: укажи base_branch")
         async with self._tx() as conn:
             cur = await conn.execute("SELECT 1 FROM projects WHERE name = ?", (project,))
             if not await cur.fetchone():
