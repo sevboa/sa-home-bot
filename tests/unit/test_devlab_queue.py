@@ -80,6 +80,8 @@ def test_in_windows_bad():
 async def test_bench_claim_outside_window(bench_queue):
     bench = await submit(bench_queue, purpose=S.PURPOSE_BENCH)
     assert await bench_queue.claim(EXECUTOR, [MODEL], now=datetime(2026, 11, 18, 12, 0)) is None
+    assert await bench_queue.pending_work(now=datetime(2026, 11, 18, 12, 0)) is False
+    assert await bench_queue.pending_work(now=datetime(2026, 11, 18, 3, 0)) is True
     found = await bench_queue.claim(EXECUTOR, [MODEL], now=datetime(2026, 11, 18, 3, 0))
     assert found.id == bench.id
 

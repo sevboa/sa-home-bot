@@ -423,11 +423,7 @@ class HubQueue:
         if not fits:
             return None
         args.append(protocol.STATUS_DONE)
-        bench = ""
-        bench_args: list[Any] = []
-        if not in_windows(self._bench_windows, (now or datetime.now()).time()):
-            bench = " AND COALESCE(json_extract(params, '$.purpose'), '') != ?"
-            bench_args.append(protocol.PURPOSE_BENCH)
+        bench, bench_args = self._bench_filter(now)
         async with self._tx() as conn:
             cur = await conn.execute(
                 f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
@@ -659,10 +655,19 @@ class HubQueue:
         row = await cur.fetchone()
         return row["n"] if row else 0
 
-    async def pending_work(self) -> bool:
+    def _bench_filter(self, now: datetime | None) -> tuple[str, list[Any]]:
+        if in_windows(self._bench_windows, (now or datetime.now()).time()):
+            return "", []
+        return (
+            " AND COALESCE(json_extract(params, '$.purpose'), '') != ?",
+            [protocol.PURPOSE_BENCH],
+        )
+
+    async def pending_work(self, now: datetime | None = None) -> bool:
+        bench, bench_args = self._bench_filter(now)
         cur = await self._db.conn.execute(
             f"SELECT 1 FROM jobs WHERE status = ? AND "
-            f"kind IN ({_in(protocol.JOB_KINDS)}) AND {READY_SQL}"
+            f"kind IN ({_in(protocol.JOB_KINDS)}) AND {READY_SQL}{bench}"
             " UNION ALL"
             " SELECT 1 FROM messages m JOIN jobs j ON j.id = m.job_id"
             " WHERE m.direction = ? AND m.read_at IS NULL AND m.kind != ?"
@@ -672,6 +677,7 @@ class HubQueue:
                 protocol.STATUS_QUEUED,
                 *protocol.JOB_KINDS,
                 protocol.STATUS_DONE,
+                *bench_args,
                 protocol.DIRECTION_TO_EXECUTOR,
                 protocol.MSG_RELEASE,
             ),
