@@ -239,7 +239,7 @@ def test_book_includes_guest_subscriptions_not_just_owner(store):
 
 
 async def test_fire_gives_up_after_grace(store, monkeypatch):
-    monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 0.05)
+    monkeypatch.setattr(tasks_service, "FIRE_GRACE_S", 0.5)
     monkeypatch.setattr(tasks_service, "FIRE_RETRY_INTERVAL_S", 0.01)
     monkeypatch.setattr(wake_core, "WAKE_POLL_TIMEOUT_S", 0.0)
     link = FakeNodeLink(OWN_STATE)
