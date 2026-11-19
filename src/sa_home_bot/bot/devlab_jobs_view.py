@@ -6,6 +6,7 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage
 
+from sa_home_bot.bot import ai_lines
 from sa_home_bot.bot.pagination import clamp_offset, nav_row
 from sa_home_bot.bot.ui.callback_data import pack
 from sa_home_bot.bot.ui.keyboards import button, markup, refresh_row
@@ -17,6 +18,10 @@ CB_JOBS = "dj"
 CODE_PAGE = "p"
 CODE_CARD = "c"
 CODE_TASK = "t"
+CODE_ACT_STOP = "s"
+CODE_ACT_STOP_OK = "S"
+CODE_ACT_RELEASE = "r"
+CODE_ACT_RESUME = "u"
 PAGE_SIZE = 20
 SMALL_PAGE_SIZE = 10
 TEXT_LIMIT = 4096
@@ -49,6 +54,10 @@ def card_cb(job_id: str, offset: int) -> str:
 
 def task_cb(job_id: str) -> str:
     return pack(CB_JOBS, CODE_TASK, job_id)
+
+
+def act_cb(code: str, job_id: str, offset: int) -> str:
+    return pack(CB_JOBS, code, job_id, offset)
 
 
 def link(text: str, data: str) -> str:
@@ -233,6 +242,26 @@ def _format_dt(value: str | None) -> str:
         return str(value)
 
 
+def _card_action_row(
+    job_id: str, offset: int, status: str, confirm_stop: bool
+) -> list[InlineKeyboardButton]:
+    if confirm_stop:
+        return [
+            button(ai_lines.DEVLAB_BTN_STOP_CONFIRM, act_cb(CODE_ACT_STOP_OK, job_id, offset)),
+            button(ai_lines.DEVLAB_BTN_CANCEL, card_cb(job_id, offset)),
+        ]
+    if status == protocol.STATUS_RUNNING:
+        return [button(ai_lines.DEVLAB_BTN_STOP, act_cb(CODE_ACT_STOP, job_id, offset))]
+    if status == protocol.STATUS_WAITING_OWNER:
+        return [
+            button(ai_lines.DEVLAB_BTN_RELEASE, act_cb(CODE_ACT_RELEASE, job_id, offset)),
+            button(ai_lines.DEVLAB_BTN_STOP, act_cb(CODE_ACT_STOP, job_id, offset)),
+        ]
+    if status in (protocol.STATUS_STOPPED, protocol.STATUS_FAILED):
+        return [button(ai_lines.DEVLAB_BTN_RESUME, act_cb(CODE_ACT_RESUME, job_id, offset))]
+    return []
+
+
 def _deps_text(job: dict[str, Any]) -> str | None:
     deps = job.get(protocol.FIELD_DEPS)
     if not deps:
@@ -247,7 +276,10 @@ def _deps_text(job: dict[str, Any]) -> str | None:
 
 
 def render_card(
-    job: dict[str, Any], offset: int, now: datetime | None = None
+    job: dict[str, Any],
+    offset: int,
+    now: datetime | None = None,
+    confirm_stop: bool = False,
 ) -> tuple[InputRichMessage, InlineKeyboardMarkup]:
     if now is None:
         now = datetime.now(UTC)
@@ -314,6 +346,9 @@ def render_card(
 
     keyboard_rows: list[list[InlineKeyboardButton]] = []
     keyboard_rows.append([button("📄 Задача", task_cb(job_id))])
+    action_row = _card_action_row(job_id, offset, status, confirm_stop)
+    if action_row:
+        keyboard_rows.append(action_row)
     keyboard_rows.append([button("⬅️ К списку", page_cb(offset))])
     if offset > 0:
         keyboard_rows.append([button("⏮ В начало", page_cb(0))])

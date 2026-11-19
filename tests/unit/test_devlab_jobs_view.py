@@ -5,13 +5,22 @@ from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
+import pytest
+
+from sa_home_bot.bot import ai_lines
 from sa_home_bot.bot.devlab_jobs_view import (
     CB_JOBS,
+    CODE_ACT_RELEASE,
+    CODE_ACT_RESUME,
+    CODE_ACT_STOP,
+    CODE_ACT_STOP_OK,
     CODE_CARD,
     CODE_PAGE,
+    CODE_TASK,
     PAGE_SIZE,
     QUESTION_CHARS,
     TEXT_LIMIT,
+    act_cb,
     card_cb,
     job_line,
     job_type,
@@ -387,3 +396,79 @@ def test_callback_data_length_limit() -> None:
             assert len(btn.callback_data.encode()) <= 64
     for match in re.finditer(r'data="([^"]+)"', msg.html):
         assert len(match.group(1).encode()) <= 64
+
+
+def test_act_cb_format() -> None:
+    assert act_cb(CODE_ACT_STOP, "job-1", 20) == f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:20"
+    assert act_cb(CODE_ACT_STOP_OK, "job-1", 0) == f"{CB_JOBS}:{CODE_ACT_STOP_OK}:job-1:0"
+    assert act_cb(CODE_ACT_RELEASE, "job-1", 0) == f"{CB_JOBS}:{CODE_ACT_RELEASE}:job-1:0"
+    assert act_cb(CODE_ACT_RESUME, "job-1", 0) == f"{CB_JOBS}:{CODE_ACT_RESUME}:job-1:0"
+
+
+def _action_buttons(job, offset=0, confirm_stop=False):
+    _, markup_kb = render_card(job, offset, NOW, confirm_stop=confirm_stop)
+    return [btn for row in markup_kb.inline_keyboard for btn in row]
+
+
+def test_card_action_row_running_has_stop() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    buttons = _action_buttons(job)
+    texts = [btn.text for btn in buttons]
+    datas = [btn.callback_data for btn in buttons]
+    assert ai_lines.DEVLAB_BTN_STOP in texts
+    assert f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:0" in datas
+    assert f"{CB_JOBS}:{CODE_ACT_RELEASE}:job-1:0" not in datas
+    assert f"{CB_JOBS}:{CODE_ACT_RESUME}:job-1:0" not in datas
+
+
+def test_card_action_row_waiting_owner_has_release_and_stop() -> None:
+    job = _base_job(1, status=protocol.STATUS_WAITING_OWNER)
+    buttons = _action_buttons(job)
+    texts = [btn.text for btn in buttons]
+    datas = [btn.callback_data for btn in buttons]
+    assert ai_lines.DEVLAB_BTN_RELEASE in texts
+    assert ai_lines.DEVLAB_BTN_STOP in texts
+    assert f"{CB_JOBS}:{CODE_ACT_RELEASE}:job-1:0" in datas
+    assert f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:0" in datas
+
+
+@pytest.mark.parametrize(
+    "status", [protocol.STATUS_STOPPED, protocol.STATUS_FAILED]
+)
+def test_card_action_row_stopped_failed_has_resume(status) -> None:
+    job = _base_job(1, status=status)
+    buttons = _action_buttons(job)
+    texts = [btn.text for btn in buttons]
+    datas = [btn.callback_data for btn in buttons]
+    assert ai_lines.DEVLAB_BTN_RESUME in texts
+    assert f"{CB_JOBS}:{CODE_ACT_RESUME}:job-1:0" in datas
+    assert f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:0" not in datas
+
+
+def test_card_action_row_queued_none() -> None:
+    job = _base_job(1, status=protocol.STATUS_QUEUED)
+    buttons = _action_buttons(job)
+    for btn in buttons:
+        for code in (CODE_ACT_STOP, CODE_ACT_STOP_OK, CODE_ACT_RELEASE, CODE_ACT_RESUME):
+            assert not btn.callback_data.startswith(f"{CB_JOBS}:{code}:")
+
+
+def test_card_confirm_stop_replaces_action_row() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    buttons = _action_buttons(job, confirm_stop=True)
+    texts = [btn.text for btn in buttons]
+    datas = [btn.callback_data for btn in buttons]
+    assert ai_lines.DEVLAB_BTN_STOP_CONFIRM in texts
+    assert ai_lines.DEVLAB_BTN_CANCEL in texts
+    assert f"{CB_JOBS}:{CODE_ACT_STOP_OK}:job-1:0" in datas
+    assert f"{CB_JOBS}:{CODE_CARD}:job-1:0" in datas
+    assert f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:0" not in datas
+
+
+def test_card_action_row_position_before_navigation() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    _, markup_kb = render_card(job, 20, NOW)
+    rows = markup_kb.inline_keyboard
+    assert rows[0][0].callback_data == f"{CB_JOBS}:{CODE_TASK}:job-1"
+    assert rows[1][0].callback_data == f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:20"
+    assert rows[2][0].callback_data == f"{CB_JOBS}:{CODE_PAGE}:20"

@@ -13,6 +13,10 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sa_home_bot.bot import ai_lines, commands
 from sa_home_bot.bot.devlab_jobs_view import (
     CB_JOBS,
+    CODE_ACT_RELEASE,
+    CODE_ACT_RESUME,
+    CODE_ACT_STOP,
+    CODE_ACT_STOP_OK,
     CODE_CARD,
     CODE_PAGE,
     CODE_TASK,
@@ -54,6 +58,12 @@ POST_KINDS = {
     CB_RELEASE: protocol.MSG_RELEASE,
     CB_STOP_CONFIRM: protocol.MSG_STOP,
     CB_RESUME: protocol.MSG_RESUME,
+}
+
+JOBS_POST_KINDS = {
+    CODE_ACT_STOP_OK: POST_KINDS[CB_STOP_CONFIRM],
+    CODE_ACT_RELEASE: POST_KINDS[CB_RELEASE],
+    CODE_ACT_RESUME: POST_KINDS[CB_RESUME],
 }
 
 
@@ -207,6 +217,7 @@ async def on_jobs_callback(
     config: Settings,
     node_link: ServiceLink | None = None,
     subscription: Subscription | None = None,
+    devlab_notifier: DevlabNotifier | None = None,
 ) -> None:
     if not _is_owner(subscription, callback.from_user):
         await callback.answer(DENIED_ALERT_TEXT, show_alert=True)
@@ -261,6 +272,57 @@ async def on_jobs_callback(
             await callback.answer(result.error, show_alert=True)
             return
         job = result.reply.get(protocol.FIELD_JOB)
+        if job is None:
+            await callback.answer("Задание не найдено", show_alert=True)
+            return
+        rich_msg, keyboard = render_card(job, offset, now=datetime.now(UTC))
+        await redraw_rich(callback, rich_msg, keyboard)
+    elif code == CODE_ACT_STOP:
+        if len(parts) < 4:
+            await callback.answer()
+            return
+        job_id = parts[2]
+        offset = int_or(parts[3], 0)
+        result = await _hub(
+            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
+        )
+        if result.reply is None:
+            await callback.answer(result.error, show_alert=True)
+            return
+        job = result.reply.get(protocol.FIELD_JOB)
+        if job is None:
+            await callback.answer("Задание не найдено", show_alert=True)
+            return
+        rich_msg, keyboard = render_card(
+            job, offset, now=datetime.now(UTC), confirm_stop=True
+        )
+        await redraw_rich(callback, rich_msg, keyboard)
+    elif code in JOBS_POST_KINDS:
+        if len(parts) < 4:
+            await callback.answer()
+            return
+        job_id = parts[2]
+        offset = int_or(parts[3], 0)
+        kind = JOBS_POST_KINDS[code]
+        result = await _hub(
+            node_link, config, protocol.ACTION_OWNER_POST, _post_args(job_id, kind)
+        )
+        if result.reply is None:
+            await callback.answer(result.error, show_alert=True)
+            return
+        await callback.answer(
+            ai_lines.DEVLAB_POSTED_TOAST.format(
+                status=result.reply.get(protocol.FIELD_STATUS, "")
+            )
+        )
+        _kick(devlab_notifier)
+        job_result = await _hub(
+            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
+        )
+        if job_result.reply is None:
+            await callback.answer(job_result.error, show_alert=True)
+            return
+        job = job_result.reply.get(protocol.FIELD_JOB)
         if job is None:
             await callback.answer("Задание не найдено", show_alert=True)
             return

@@ -265,9 +265,13 @@ async def test_cmd_jobs_hub_down():
     assert ai_lines.DEVLAB_HUB_DOWN_TEXT in msg.answers[0]
 
 
-async def press_jobs(cb, link, subscription=None):
+async def press_jobs(cb, link, subscription=None, notifier=None):
     await handlers.on_jobs_callback(
-        cb, config=Settings(), node_link=link, subscription=subscription or owner_sub()
+        cb,
+        config=Settings(),
+        node_link=link,
+        subscription=subscription or owner_sub(),
+        devlab_notifier=notifier,
     )
 
 
@@ -573,3 +577,125 @@ async def test_jobs_callback_task_long_title_caption_clipped():
     assert cb.message.document_answers
     _, caption = cb.message.document_answers[0]
     assert caption == "x" * 1000
+
+
+def _card_markup_data(cb):
+    markup = cb.message.edit_calls[-1][1].get("reply_markup")
+    return [btn.callback_data for row in markup.inline_keyboard for btn in row]
+
+
+async def test_jobs_callback_card_stop_confirm_redraws_with_confirm_keyboard():
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    cb = callback("dj:s:job-1:0")
+    await press_jobs(cb, link)
+    assert link.commands[0][0] == protocol.ACTION_OWNER_JOB
+    assert link.commands[0][1] == {protocol.FIELD_ID: "job-1"}
+    assert cb.message.edit_calls
+    data_values = _card_markup_data(cb)
+    assert "dj:S:job-1:0" in data_values
+    assert "dj:c:job-1:0" in data_values
+    assert "dj:s:job-1:0" not in data_values
+    assert not any(cmd[0] == protocol.ACTION_OWNER_POST for cmd in link.commands)
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [
+        ("S", protocol.MSG_STOP),
+        ("r", protocol.MSG_RELEASE),
+        ("u", protocol.MSG_RESUME),
+    ],
+)
+async def test_jobs_callback_action_posts_and_redraws_card(code, kind):
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    notifier = FakeKicker()
+    cb = callback(f"dj:{code}:job-1:0")
+    await press_jobs(cb, link, notifier=notifier)
+    assert link.commands[0] == (
+        protocol.ACTION_OWNER_POST,
+        {protocol.FIELD_ID: "job-1", protocol.FIELD_KIND: kind},
+    )
+    assert link.commands[1][0] == protocol.ACTION_OWNER_JOB
+    assert link.commands[1][1] == {protocol.FIELD_ID: "job-1"}
+    assert ai_lines.DEVLAB_POSTED_TOAST.format(status="running") in cb.answered[0][0]
+    assert notifier.kicked == 1
+    assert cb.message.edit_calls
+    rich_msg = cb.message.edit_calls[0][0][0]
+    assert "job-1" in rich_msg.html
+    assert "Test Job" in rich_msg.html
+    data_values = _card_markup_data(cb)
+    assert "dj:c:job-1:0" in data_values
+    assert f"dj:{code}:job-1:0" not in data_values
+
+
+async def test_jobs_callback_cancel_returns_normal_card():
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    cb_confirm = callback("dj:s:job-1:0")
+    await press_jobs(cb_confirm, link)
+    assert "dj:S:job-1:0" in _card_markup_data(cb_confirm)
+
+    cb = callback("dj:c:job-1:0")
+    await press_jobs(cb, link)
+    data_values = _card_markup_data(cb)
+    assert "dj:S:job-1:0" not in data_values
+    assert "dj:s:job-1:0" in data_values
+    assert "dj:c:job-1:0" in data_values
+
+
+@pytest.mark.parametrize("code", ["s", "S", "r", "u"])
+async def test_jobs_callback_action_guest_denied(code):
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    cb = callback(f"dj:{code}:job-1:0", GUEST)
+    await press_jobs(cb, link, guest_sub())
+    assert cb.answered[0][0] == (DENIED_ALERT_TEXT,)
+    assert cb.answered[0][1].get("show_alert") is True
+    assert link.calls == []
+    assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_action_hub_error_no_redraw():
+    link = FakeNodeLink(
+        error=ProtoError(ERR_BAD_REQUEST, "not found"),
+        results={protocol.ACTION_OWNER_JOB: {}},
+    )
+    cb = callback("dj:S:job-1:0")
+    await press_jobs(cb, link)
+    assert "not found" in cb.answered[0][0][0]
+    assert cb.answered[0][1].get("show_alert") is True
+    assert cb.message.edit_calls == []
