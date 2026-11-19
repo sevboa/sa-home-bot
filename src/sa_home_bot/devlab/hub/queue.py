@@ -310,26 +310,56 @@ class HubQueue:
     ) -> None:
         fix_model = job.params.get(protocol.PARAM_FIX_MODEL, "")
         round_no = job.params.get(protocol.PARAM_FIX_ROUND, 0)
-        if (
-            payload.get(protocol.PAYLOAD_EXIT_CODE) != 0
-            and fix_model
-            and round_no < protocol.FIX_MAX_ROUNDS
-        ):
+        if payload.get(protocol.PAYLOAD_EXIT_CODE) != 0 and fix_model:
             ref = job.params[protocol.FIELD_REF]
-            await HubQueue._insert_agent_job(
+            if round_no >= protocol.FIX_MAX_ROUNDS:
+                await HubQueue._post(
+                    conn,
+                    job.id,
+                    protocol.DIRECTION_TO_CLIENT,
+                    protocol.MSG_FIX_EXHAUSTED,
+                    {
+                        protocol.PAYLOAD_TEXT: (
+                            f"fix не справился за {protocol.FIX_MAX_ROUNDS} круга, "
+                            f"нужен владелец: {ref}"
+                        )
+                    },
+                )
+            else:
+                await HubQueue._insert_agent_job(
+                    conn,
+                    job.client,
+                    job.project,
+                    fix_model,
+                    fix_task_text(ref, payload),
+                    ref,
+                    0,
+                    protocol.FIX_PROFILE,
+                    protocol.PURPOSE_FIX,
+                    extra_params={
+                        protocol.PARAM_FIX_OF: job.id,
+                        protocol.PARAM_FIX_ROUND: round_no + 1,
+                        protocol.PARAM_FIX_MODEL: fix_model,
+                    },
+                )
+
+    @staticmethod
+    async def _maybe_retest(conn: aiosqlite.Connection, job: Job) -> None:
+        if (
+            job.kind == protocol.JOB_KIND_AGENT
+            and job.params.get(protocol.PARAM_PURPOSE) == protocol.PURPOSE_FIX
+            and job.params.get(protocol.PARAM_FIX_MODEL, "")
+        ):
+            await HubQueue._insert_test_job(
                 conn,
                 job.client,
                 job.project,
-                fix_model,
-                fix_task_text(ref, payload),
-                ref,
-                0,
-                protocol.FIX_PROFILE,
-                protocol.PURPOSE_FIX,
-                extra_params={
-                    protocol.PARAM_FIX_OF: job.id,
-                    protocol.PARAM_FIX_ROUND: round_no + 1,
-                    protocol.PARAM_FIX_MODEL: fix_model,
+                {
+                    protocol.FIELD_REF: protocol.AGENT_BRANCH_PREFIX + job.id,
+                    protocol.FIELD_CMD: "",
+                    protocol.FIELD_ARGS: [],
+                    protocol.PARAM_FIX_MODEL: job.params[protocol.PARAM_FIX_MODEL],
+                    protocol.PARAM_FIX_ROUND: job.params[protocol.PARAM_FIX_ROUND],
                 },
             )
 
@@ -426,21 +456,27 @@ class HubQueue:
             await self._check_deps(conn, client, deps)
             if deps:
                 params[protocol.PARAM_DEPENDS_ON] = deps
-            job_id = await self._free_id(conn)
-            await conn.execute(
-                "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
-                " status, created, params) VALUES (?, ?, ?, ?, '', '', '', 0, ?, ?, ?)",
-                (
-                    job_id,
-                    protocol.JOB_KIND_TEST,
-                    project,
-                    client,
-                    protocol.STATUS_QUEUED,
-                    utc_now().isoformat(),
-                    json.dumps(params, ensure_ascii=False),
-                ),
-            )
-            return await self._load(conn, job_id)
+            return await HubQueue._insert_test_job(conn, client, project, params)
+
+    @staticmethod
+    async def _insert_test_job(
+        conn: aiosqlite.Connection, client: str, project: str, params: dict[str, Any]
+    ) -> Job:
+        job_id = await HubQueue._free_id(conn)
+        await conn.execute(
+            "INSERT INTO jobs (id, kind, project, client, model, task, base_branch, priority,"
+            " status, created, params) VALUES (?, ?, ?, ?, '', '', '', 0, ?, ?, ?)",
+            (
+                job_id,
+                protocol.JOB_KIND_TEST,
+                project,
+                client,
+                protocol.STATUS_QUEUED,
+                utc_now().isoformat(),
+                json.dumps(params, ensure_ascii=False),
+            ),
+        )
+        return await HubQueue._load(conn, job_id)
 
     async def wait_terminal(self, job_id: str, timeout: float) -> Job:
         loop = asyncio.get_running_loop()
@@ -610,6 +646,8 @@ class HubQueue:
                         await HubQueue._notify_dependents(conn, job, target)
             if kind == protocol.MSG_TEST_DONE:
                 await HubQueue._maybe_fix_job(conn, job, payload)
+            if kind == protocol.MSG_DONE:
+                await HubQueue._maybe_retest(conn, job)
             await conn.execute(
                 "UPDATE jobs SET tokens = tokens + ?, cost_usd = cost_usd + ? WHERE id = ?",
                 (tokens, cost, job_id),
