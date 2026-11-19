@@ -63,7 +63,7 @@ description: Отдать задачу агенту-разработчику н�
    - `fallback=<модель>` — запасная удалённая модель: берётся, если основная занята или недоступна,
      фактическая модель видна в `devlab_status` (`model`, `params.original_model`).
 5. Сразу после постановки подпишись на ящик событиями: инструмент Monitor с командой
-   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed,test_done`
+   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed,test_done,fix_exhausted`
    из каталога репозитория и `timeout_ms` 1800000. Каждая строка — JSON
    `{"seq","job_id","kind","payload"}` — приходит уведомлением сразу, без опроса; в ящике и чужие
    задания, свои отличай по `job_id`. Монитор истёк или упал (хаб недоступен, например при рестарте
