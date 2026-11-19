@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -92,6 +93,14 @@ async def _hub(
 
 def _post_args(job_id: str, kind: str) -> dict[str, Any]:
     return {protocol.FIELD_ID: job_id, protocol.FIELD_KIND: kind}
+
+
+def _counts_by_status(jobs: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for job in jobs:
+        status = job.get(protocol.FIELD_STATUS, "")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 async def _clear_markup(callback: CallbackQuery, markup=None) -> None:
@@ -187,7 +196,8 @@ async def cmd_jobs(
         return
     jobs = result.reply.get(protocol.FIELD_JOBS, [])
     total = result.reply.get(protocol.FIELD_TOTAL, 0)
-    rich_msg, keyboard, _ = render_page(jobs, 0, total)
+    counts = _counts_by_status(jobs)
+    rich_msg, keyboard, _ = render_page(jobs, 0, total, now=datetime.now(UTC), counts=counts)
     await message.answer_rich(rich_message=rich_msg, reply_markup=keyboard)
 
 
@@ -232,7 +242,10 @@ async def on_jobs_callback(
                     break
                 offset = clamped
                 continue
-            rich_msg, keyboard, _ = render_page(jobs, offset, total)
+            counts = _counts_by_status(jobs)
+            rich_msg, keyboard, _ = render_page(
+                jobs, offset, total, now=datetime.now(UTC), counts=counts
+            )
             await redraw_rich(callback, rich_msg, keyboard)
             break
     elif code == CODE_CARD:
@@ -251,7 +264,7 @@ async def on_jobs_callback(
         if job is None:
             await callback.answer("Задание не найдено", show_alert=True)
             return
-        rich_msg, keyboard = render_card(job, offset)
+        rich_msg, keyboard = render_card(job, offset, now=datetime.now(UTC))
         await redraw_rich(callback, rich_msg, keyboard)
     elif code == CODE_TASK:
         if len(parts) < 3:

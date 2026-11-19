@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
@@ -21,6 +22,8 @@ from sa_home_bot.bot.devlab_jobs_view import (
     render_page,
 )
 from sa_home_bot.devlab import protocol
+
+NOW = datetime(2026, 11, 1, 12, 5, 0, tzinfo=UTC)
 
 
 def _base_job(
@@ -100,17 +103,18 @@ def test_card_cb_format() -> None:
 
 def test_job_line_agent() -> None:
     job = _base_job(1, purpose=protocol.PURPOSE_FIX, model="gpt-4o")
-    line = job_line(1, job, 0)
+    line = job_line(1, job, 0, NOW)
     assert "1." in line
     assert "🟢" in line
     assert "fix" in line
     assert "gpt-4o" in line
     assert f'data="{CB_JOBS}:{CODE_CARD}:job-1:0"' in line
+    assert "4м" in line
 
 
 def test_job_line_test_uses_ref() -> None:
     job = _base_job(1, kind=protocol.JOB_KIND_TEST, ref="refs/heads/test-1")
-    line = job_line(1, job, 0)
+    line = job_line(1, job, 0, NOW)
     assert "тест" in line
     assert "refs/heads/test-1" in line
 
@@ -122,18 +126,71 @@ def test_job_line_status_icons() -> None:
         (protocol.STATUS_QUEUED, "⏳"),
     ]:
         job = _base_job(1, status=status)
-        line = job_line(1, job, 0)
+        line = job_line(1, job, 0, NOW)
         assert icon in line
 
 
+def test_job_line_queued_age_from_created() -> None:
+    job = _base_job(1, status=protocol.STATUS_QUEUED)
+    line = job_line(1, job, 0, NOW)
+    assert "5м" in line
+
+
+def test_job_line_running_shows_step() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_STEPS] = 3
+    line = job_line(1, job, 0, NOW)
+    assert "шаг 3" in line
+
+
+def test_job_line_waiting_owner_no_step() -> None:
+    job = _base_job(1, status=protocol.STATUS_WAITING_OWNER)
+    job[protocol.FIELD_STEPS] = 2
+    line = job_line(1, job, 0, NOW)
+    assert "шаг" not in line
+
+
+def test_job_line_dependency_waiting() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_DEPS] = [
+        {"id": "job-5", "status": protocol.STATUS_DONE},
+        {"id": "job-6", "status": protocol.STATUS_RUNNING},
+    ]
+    line = job_line(1, job, 0, NOW)
+    assert "⛓ job-6" in line
+
+
+def test_job_line_dependency_all_done() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_DEPS] = [
+        {"id": "job-5", "status": protocol.STATUS_DONE},
+    ]
+    line = job_line(1, job, 0, NOW)
+    assert "⛓" not in line
+
+
+def test_job_line_role_executor_hidden() -> None:
+    job = _base_job(1)
+    job[protocol.FIELD_PAYLOAD][protocol.PARAM_PROFILE] = protocol.DEFAULT_PROFILE
+    line = job_line(1, job, 0, NOW)
+    assert "executor" not in line
+
+
+def test_job_line_role_docs_visible() -> None:
+    job = _base_job(1)
+    job[protocol.FIELD_PAYLOAD][protocol.PARAM_PROFILE] = "docs"
+    line = job_line(1, job, 0, NOW)
+    assert "docs" in line
+
+
 def test_page_html_empty() -> None:
-    html = page_html([], 0, 0, PAGE_SIZE)
+    html = page_html([], 0, 0, PAGE_SIZE, NOW)
     assert "Активных заданий нет" in html
 
 
 def test_page_html_header_and_lines() -> None:
     jobs = [_base_job(i) for i in range(5)]
-    html = page_html(jobs, 0, 5, PAGE_SIZE)
+    html = page_html(jobs, 0, 5, PAGE_SIZE, NOW)
     assert "Задания devlab" in html
     assert "5 активных" in html
     assert "стр. 1 из 1" in html
@@ -141,10 +198,45 @@ def test_page_html_header_and_lines() -> None:
         assert f"{i + 1}." in html
 
 
+def test_page_html_sections_order_and_counters() -> None:
+    jobs = [
+        _base_job(1, status=protocol.STATUS_QUEUED),
+        _base_job(2, status=protocol.STATUS_RUNNING),
+        _base_job(3, status=protocol.STATUS_WAITING_OWNER),
+        _base_job(4, status=protocol.STATUS_QUEUED),
+    ]
+    counts = {
+        protocol.STATUS_RUNNING: 5,
+        protocol.STATUS_WAITING_OWNER: 2,
+        protocol.STATUS_QUEUED: 3,
+    }
+    html = page_html(jobs, 0, 4, PAGE_SIZE, NOW, counts)
+
+    assert "🟢 Идут" in html
+    assert "❓ Ждут ответа" in html
+    assert "⏳ Очередь" in html
+
+    running_pos = html.index("🟢 Идут")
+    waiting_pos = html.index("❓ Ждут ответа")
+    queued_pos = html.index("⏳ Очередь")
+    assert running_pos < waiting_pos < queued_pos
+
+    assert "🟢5" in html
+    assert "❓2" in html
+    assert "⏳3" in html
+
+
+def test_page_html_section_empty_not_shown() -> None:
+    jobs = [_base_job(1, status=protocol.STATUS_RUNNING)]
+    html = page_html(jobs, 0, 1, PAGE_SIZE, NOW)
+    assert "❓ Ждут ответа" not in html
+    assert "⏳ Очередь" not in html
+
+
 def test_page_html_offset_pagination() -> None:
     jobs = [_base_job(i) for i in range(25)]
     page_jobs = jobs[20:20 + PAGE_SIZE]
-    html = page_html(page_jobs, 20, 25, PAGE_SIZE)
+    html = page_html(page_jobs, 20, 25, PAGE_SIZE, NOW)
     assert "стр. 2 из 2" in html
     assert "21." in html
     assert f'data="{CB_JOBS}:{CODE_CARD}:job-20:20"' in html
@@ -153,14 +245,14 @@ def test_page_html_offset_pagination() -> None:
 def test_page_html_long_titles_fallback_to_small_page() -> None:
     long_title = "x" * 300
     jobs = [_base_job(i, title=long_title) for i in range(50)]
-    msg, markup_kb, size = render_page(jobs, 0, len(jobs))
+    msg, markup_kb, size = render_page(jobs, 0, len(jobs), NOW)
     assert size == PAGE_SIZE
     assert len(msg.html) <= TEXT_LIMIT
 
 
 def test_render_page_size_20_with_nav() -> None:
     jobs = [_base_job(i) for i in range(25)]
-    msg, markup_kb, size = render_page(jobs, 0, 25)
+    msg, markup_kb, size = render_page(jobs, 0, 25, NOW)
     assert size == PAGE_SIZE
     assert isinstance(msg, type(msg))
     assert msg.html is not None
@@ -179,7 +271,7 @@ def test_render_page_size_20_with_nav() -> None:
 
 def test_render_page_offset_20_links_carry_offset() -> None:
     jobs = [_base_job(i) for i in range(25)]
-    msg, markup_kb, _ = render_page(jobs, 20, 25)
+    msg, markup_kb, _ = render_page(jobs, 20, 25, NOW)
     link_datas = [m.group(1) for m in re.finditer(r'data="([^"]+)"', msg.html)]
     assert all(d.endswith(":20") for d in link_datas)
 
@@ -187,7 +279,7 @@ def test_render_page_offset_20_links_carry_offset() -> None:
 def test_render_page_long_titles_no_fallback() -> None:
     long_title = "x" * 500
     jobs = [_base_job(i, title=long_title) for i in range(PAGE_SIZE + 5)]
-    msg, markup_kb, size = render_page(jobs, 0, len(jobs))
+    msg, markup_kb, size = render_page(jobs, 0, len(jobs), NOW)
     assert size == PAGE_SIZE
     assert len(msg.html) <= TEXT_LIMIT
     data_values = [btn.callback_data for row in markup_kb.inline_keyboard for btn in row]
@@ -196,13 +288,13 @@ def test_render_page_long_titles_no_fallback() -> None:
 
 def test_render_page_clamp_offset() -> None:
     jobs = [_base_job(i) for i in range(5)]
-    msg, markup_kb, _ = render_page(jobs, 100, 5)
+    msg, markup_kb, _ = render_page(jobs, 100, 5, NOW)
     assert "стр. 1 из 1" in msg.html
 
 
 def test_render_card_buttons_with_offset_20() -> None:
     job = _base_job(1)
-    msg, markup_kb = render_card(job, 20)
+    msg, markup_kb = render_card(job, 20, NOW)
     data_values = [btn.callback_data for row in markup_kb.inline_keyboard for btn in row]
     assert f"{CB_JOBS}:{CODE_PAGE}:20" in data_values
     assert f"{CB_JOBS}:{CODE_PAGE}:0" in data_values
@@ -211,9 +303,8 @@ def test_render_card_buttons_with_offset_20() -> None:
 
 def test_render_card_buttons_with_offset_0_no_home() -> None:
     job = _base_job(1)
-    msg, markup_kb = render_card(job, 0)
+    msg, markup_kb = render_card(job, 0, NOW)
     data_values = [btn.callback_data for row in markup_kb.inline_keyboard for btn in row]
-    assert f"{CB_JOBS}:{CODE_PAGE}:0" in data_values
     assert f"{CB_JOBS}:{CODE_PAGE}:0" in data_values
     home_buttons = [
         btn
@@ -227,31 +318,61 @@ def test_render_card_buttons_with_offset_0_no_home() -> None:
 def test_render_card_includes_all_fields() -> None:
     job = _base_job(1, purpose=protocol.PURPOSE_FIX, model="gpt-4o")
     job[protocol.FIELD_QUESTION] = "Please confirm?"
-    msg, _ = render_card(job, 0)
+    job[protocol.FIELD_STEPS] = 2
+    job[protocol.FIELD_LAST_STEP] = "Step 2 done"
+    job[protocol.FIELD_DEPS] = [{"id": "job-5", "status": protocol.STATUS_RUNNING}]
+    job[protocol.FIELD_PAYLOAD][protocol.PARAM_FALLBACK] = "gpt-4o-mini"
+    job[protocol.FIELD_PAYLOAD][protocol.PARAM_ORIGINAL_MODEL] = "gpt-5"
+    job[protocol.FIELD_PAYLOAD][protocol.PARAM_DEPENDS_ON] = "base/main"
+    msg, _ = render_card(job, 0, NOW)
+
     assert "job-1" in msg.html
     assert "fix" in msg.html
     assert "running" in msg.html
     assert "proj" in msg.html
     assert "Title" in msg.html
     assert "gpt-4o" in msg.html
-    assert "exec-1" in msg.html
-    assert "2026-11-01T12:00:00" in msg.html
+    assert "base/main" in msg.html
+    assert "agent/job-1" in msg.html
+    assert "Зависимости: job-5 (running)" in msg.html
+    assert "Идёт 4м" in msg.html
+    assert "Запасная модель: gpt-4o-mini" in msg.html
+    assert "Взята вместо: gpt-5" in msg.html
+    assert "Создано / начато: 2026-11-01 12:00:00 / 2026-11-01 12:01:00" in msg.html
     assert "1000" in msg.html
+    assert "Последний шаг (2): Step 2 done" in msg.html
     assert "Please confirm?" in msg.html
+
+
+def test_render_card_minimal_fields() -> None:
+    job = _base_job(1, status=protocol.STATUS_QUEUED)
+    msg, _ = render_card(job, 0, NOW)
+
+    assert "job-1" in msg.html
+    assert "dev" in msg.html
+    assert "queued" in msg.html
+    assert "В очереди" in msg.html
+    assert "Идёт" not in msg.html
+    assert "Роль" not in msg.html
+    assert "Зависимости" not in msg.html
+    assert "Запасная модель" not in msg.html
+    assert "Взята вместо" not in msg.html
+    assert "Последний шаг" not in msg.html
+    assert "Вопрос" not in msg.html
 
 
 def test_render_card_question_clipped() -> None:
     long_question = "x" * (QUESTION_CHARS + 100)
     job = _base_job(1)
     job[protocol.FIELD_QUESTION] = long_question
-    msg, _ = render_card(job, 0)
+    msg, _ = render_card(job, 0, NOW)
     assert len(msg.html) <= TEXT_LIMIT
     assert msg.html.count("x") <= QUESTION_CHARS + 100
 
 
 def test_html_escape_in_title() -> None:
     job = _base_job(1, title="<b>bold</b> & <i>italic</i>")
-    msg, _, _ = render_page([job], 0, 1)
+    msg, _, _ = render_page([job], 0, 1, NOW)
     assert "<b>bold</b>" not in msg.html
     assert escape("<b>bold</b>") in msg.html
     assert "&" in msg.html
@@ -260,7 +381,7 @@ def test_html_escape_in_title() -> None:
 
 def test_callback_data_length_limit() -> None:
     job = _base_job(1)
-    msg, markup_kb = render_card(job, 0)
+    msg, markup_kb = render_card(job, 0, NOW)
     for row in markup_kb.inline_keyboard:
         for btn in row:
             assert len(btn.callback_data.encode()) <= 64
