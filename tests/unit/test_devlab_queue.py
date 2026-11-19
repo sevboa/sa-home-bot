@@ -1222,3 +1222,22 @@ async def test_resume_resets_requeue_attempts(queue):
     await queue.post_from_executor(job.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "x"})
     await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME, {})
     assert S.PARAM_ATTEMPTS not in (await queue.get_job(job.id)).params
+
+
+async def test_active_jobs_order_and_paging(queue):
+    running = await running_job(queue)
+    waiting = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(waiting.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
+    done = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(done.id, S.MSG_DONE)
+    fix = await submit(queue, purpose=S.PURPOSE_FIX)
+    dev = await submit(queue, priority=5)
+    bench = await submit(queue, purpose=S.PURPOSE_BENCH)
+    jobs, total = await queue.active_jobs(0, 10)
+    assert total == 5
+    assert [j.id for j in jobs] == [running.id, waiting.id, fix.id, dev.id, bench.id]
+    page, total = await queue.active_jobs(2, 2)
+    assert [j.id for j in page] == [fix.id, dev.id]
+    assert total == 5

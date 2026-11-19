@@ -136,6 +136,7 @@ OWNER_ACTION_IDS = (
     protocol.ACTION_OWNER_INBOX,
     protocol.ACTION_OWNER_JOB,
     protocol.ACTION_OWNER_POST,
+    protocol.ACTION_OWNER_JOBS,
 )
 CLIENT_A = "claude-a"
 CLIENT_B = "claude-b"
@@ -290,3 +291,16 @@ async def test_owner_inbox_limit_is_capped(owner, monkeypatch):
         await queue.post_from_executor(jobs[CLIENT_A].id, protocol.MSG_STEP_DONE)
     result = await service.run_command(protocol.ACTION_OWNER_INBOX, {"since": 0, "limit": 1000})
     assert len(result["messages"]) == 2
+
+
+async def test_owner_jobs_lists_active_with_offset_and_total(owner):
+    service, queue, jobs = owner
+    result = await service.run_command(protocol.ACTION_OWNER_JOBS, {})
+    assert [j["client"] for j in result["jobs"]] == [CLIENT_A, CLIENT_B]
+    assert result["total"] == 2
+    assert result["offset"] == 0
+    page = await service.run_command(protocol.ACTION_OWNER_JOBS, {"offset": 1, "limit": 1})
+    assert [j["client"] for j in page["jobs"]] == [CLIENT_B]
+    assert page["total"] == 2
+    with pytest.raises(ProtoError):
+        await service.run_command(protocol.ACTION_OWNER_JOBS, {"limit": 0})

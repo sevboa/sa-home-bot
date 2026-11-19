@@ -25,6 +25,14 @@ READY_SQL = (
     "JOIN jobs dep ON dep.id = d.value WHERE dep.status != ?)"
 )
 
+QUEUE_ORDER_SQL = (
+    "(kind = ?) DESC, "
+    "CASE json_extract(params, '$.purpose') "
+    "WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END ASC, "
+    "priority DESC, seq"
+)
+QUEUE_ORDER_ARGS = (protocol.JOB_KIND_TEST, protocol.PURPOSE_FIX, protocol.PURPOSE_BENCH)
+
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 BRANCH_TAIL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 JOB_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -527,6 +535,33 @@ class HubQueue:
         )
         return [_job(row) for row in await cur.fetchall()]
 
+    async def active_jobs(self, offset: int, limit: int) -> tuple[list[Job], int]:
+        where = f"WHERE status IN ({_in(protocol.ACTIVE_STATUSES)}, ?)"
+        order = (
+            f" ORDER BY CASE status WHEN ? THEN 0 WHEN ? THEN 0 ELSE 1 END,"
+            f" CASE WHEN status IN ({_in(protocol.ACTIVE_STATUSES)}) THEN started END,"
+            f" {QUEUE_ORDER_SQL}"
+        )
+        cur = await self._db.conn.execute(
+            f"SELECT {JOB_COLUMNS} FROM jobs {where}{order} LIMIT ? OFFSET ?",
+            (
+                *protocol.ACTIVE_STATUSES,
+                protocol.STATUS_QUEUED,
+                *protocol.ACTIVE_STATUSES,
+                *protocol.ACTIVE_STATUSES,
+                *QUEUE_ORDER_ARGS,
+                limit,
+                offset,
+            ),
+        )
+        jobs = [_job(row) for row in await cur.fetchall()]
+        cur = await self._db.conn.execute(
+            f"SELECT COUNT(*) FROM jobs {where}",
+            (*protocol.ACTIVE_STATUSES, protocol.STATUS_QUEUED),
+        )
+        row = await cur.fetchone()
+        return jobs, row[0]
+
     async def claim(
         self,
         executor: str,
@@ -568,16 +603,11 @@ class HubQueue:
             cur = await conn.execute(
                 f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
                 f"({' OR '.join(fits)}) AND {READY_SQL}{bench}"
-                " ORDER BY (kind = ?) DESC, "
-                "CASE json_extract(params, '$.purpose') "
-                "WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END ASC, "
-                "priority DESC, seq LIMIT 1",
+                f" ORDER BY {QUEUE_ORDER_SQL} LIMIT 1",
                 (
                     *args,
                     *bench_args,
-                    protocol.JOB_KIND_TEST,
-                    protocol.PURPOSE_FIX,
-                    protocol.PURPOSE_BENCH,
+                    *QUEUE_ORDER_ARGS,
                 ),
             )
             row = await cur.fetchone()

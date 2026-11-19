@@ -75,3 +75,13 @@ inner-middleware, поэтому `subscription` в фильтре всегда �
 только `F.data`, а `subscription` получает уже хендлер. Страж для такого класса ошибок —
 `tests/unit/test_devlab_dispatch.py`: апдейты идут через настоящий `build_dispatcher` +
 `feed_update` с workflow-данными как в `app.py`.
+
+## Список заданий (2026-11-19)
+Действие хаба `owner_jobs` (proto, `ACTION_OWNER_JOBS`, параметры `offset`/`limit`, оба
+необязательные) показывает владельцу активные задания страницами. Порядок: задания `running` и
+`waiting_owner` первыми (по `started`, затем `seq`), за ними `queued` в порядке, в котором их
+возьмёт исполнитель (`QUEUE_ORDER_SQL` хаба: тесты раньше агентов, fix → dev → bench, дальше
+priority и seq). Ответ: `jobs` (виды как в `owner_job`, с заголовком), `total` — общее число
+активных, `offset`. Пределы: `offset` не меньше 0, `limit` по умолчанию 20, от 1 до 50
+(`OWNER_JOBS_MAX_LIMIT = 50`); вне пределов — `bad_request`. Метод хаба —
+`queue.active_jobs(offset, limit)`.

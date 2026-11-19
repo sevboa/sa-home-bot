@@ -24,6 +24,8 @@ from sa_home_bot.utils.text import clip
 
 TITLE_MAX_CHARS = 120
 OWNER_INBOX_MAX_LIMIT = 200
+OWNER_JOBS_MAX_LIMIT = 50
+OWNER_JOBS_DEFAULT_LIMIT = 20
 
 NAME_PARAM = ActionParam(name="name", title="Имя токена")
 TOKEN_ACTIONS = (
@@ -63,6 +65,14 @@ OWNER_ACTIONS = (
             ActionParam(name=protocol.FIELD_KIND, title="Вид", choices=protocol.CLIENT_MESSAGES),
             ActionParam(name=protocol.PAYLOAD_TEXT, title="Текст", required=False),
             ActionParam(name=protocol.PAYLOAD_MODEL, title="Модель", required=False),
+        ),
+    ),
+    ActionSpec(
+        id=protocol.ACTION_OWNER_JOBS,
+        title="Активные задания (владелец)",
+        params=(
+            ActionParam(name=protocol.FIELD_OFFSET, title="Смещение", required=False),
+            ActionParam(name=protocol.FIELD_LIMIT, title="Сколько заданий", required=False),
         ),
     ),
 )
@@ -157,6 +167,21 @@ class HubService:
         after = await queue.get_job(job.id)
         return {protocol.FIELD_SEQ: message.seq, protocol.FIELD_STATUS: after.status}
 
+    async def _owner_jobs(self, args: dict[str, Any]) -> dict[str, Any]:
+        queue = self._store.queue
+        offset = _int_arg(args, protocol.FIELD_OFFSET, 0)
+        limit = _int_arg(args, protocol.FIELD_LIMIT, OWNER_JOBS_DEFAULT_LIMIT)
+        if offset < 0:
+            raise HubError("offset не меньше 0")
+        if limit < 1:
+            raise HubError("limit не меньше 1")
+        jobs, total = await queue.active_jobs(offset, min(limit, OWNER_JOBS_MAX_LIMIT))
+        return {
+            protocol.FIELD_JOBS: [owner_job_view(job) for job in jobs],
+            protocol.FIELD_TOTAL: total,
+            protocol.FIELD_OFFSET: offset,
+        }
+
     async def _dispatch(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == protocol.ACTION_OWNER_INBOX:
             return await self._owner_inbox(args)
@@ -164,6 +189,8 @@ class HubService:
             return await self._owner_job(args)
         if action == protocol.ACTION_OWNER_POST:
             return await self._owner_post(args)
+        if action == protocol.ACTION_OWNER_JOBS:
+            return await self._owner_jobs(args)
         name = str(args.get("name", ""))
         if action == protocol.ACTION_ISSUE_TOKEN:
             role = str(args.get("role", ""))
