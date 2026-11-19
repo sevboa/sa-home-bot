@@ -200,7 +200,9 @@ async def test_tool_errors_do_not_stop_loop(tmp_path):
 
 
 async def test_unexpected_tool_exception_is_reported(tmp_path, monkeypatch):
-    model = ScriptedChatModel(tool_reply(TOOL_RUN_TESTS), tool_reply(TOOL_FINISH, summary="x"))
+    model = ScriptedChatModel(
+        tool_reply(TOOL_RUN_TESTS, paths="tests/unit/a.py"), tool_reply(TOOL_FINISH, summary="x")
+    )
     loop, sandbox = make_loop(tmp_path, model, limits=AgentLimits(max_steps=2))
 
     async def broken(argv, timeout_s):
@@ -658,7 +660,6 @@ async def test_edit_file_appends_final_newline(tmp_path):
 
 async def test_run_tests_paths_narrow_the_run(tmp_path):
     box = toolbox(tmp_path, test_argv=ECHO_ARGV)
-    assert "ARGS []" in (await box.call(TOOL_RUN_TESTS, {})).text
     narrow = await box.call(TOOL_RUN_TESTS, {"paths": "tests/unit/a.py  tests/b.py"})
     assert "ARGS ['tests/unit/a.py', 'tests/b.py']" in narrow.text
     assert narrow.green is True
@@ -686,15 +687,30 @@ async def test_run_tests_narrow_strips_xdist(tmp_path, xdist):
     assert "pytest -q -x tests/unit/a.py" in narrow.text
 
 
-async def test_run_tests_full_uses_test_timeout_and_keeps_argv(tmp_path):
-    box = toolbox(
-        tmp_path,
-        test_argv=("echo", "pytest", "-q", "-n", "auto"),
-        test_timeout_s=3600.0,
-        narrow_test_timeout_s=120.0,
+class ExecSpySandbox(LocalSandbox):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.exec_calls = 0
+
+    async def exec(self, argv, timeout_s):
+        self.exec_calls += 1
+        return await super().exec(argv, timeout_s)
+
+
+@pytest.mark.parametrize("args", [{}, {"paths": "  "}])
+async def test_run_tests_without_paths_rejected(tmp_path, args):
+    sandbox = ExecSpySandbox(tmp_path)
+    box = ToolBox(
+        sandbox,
+        AgentSpec(
+            test_argv=ECHO_ARGV,
+            test_timeout_s=3600.0,
+            narrow_test_timeout_s=120.0,
+        ),
     )
-    full = await box.call(TOOL_RUN_TESTS, {})
-    assert "pytest -q -n auto" in full.text
+    with pytest.raises(ToolError, match="paths обязателен"):
+        await box.call(TOOL_RUN_TESTS, args)
+    assert sandbox.exec_calls == 0
 
 
 async def test_run_tests_paths_outside_root_rejected(tmp_path):

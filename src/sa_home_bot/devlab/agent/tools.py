@@ -121,9 +121,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
     _schema(
         TOOL_RUN_TESTS,
-        "Запускает тесты проекта. С paths гоняет только указанные тесты (узкий прогон); "
-        "без paths полный набор.",
-        paths=_text("Пути тестов через пробел", optional=True),
+        "Запускает указанные тесты проекта (узкий прогон). paths обязателен: весь набор "
+        "проверит finish.",
+        paths=_text("Пути тестов через пробел; paths обязателен"),
     ),
     _schema(
         TOOL_STEP_DONE,
@@ -309,15 +309,15 @@ class ToolBox:
         if not self._spec.test_argv:
             raise ToolError("команда тестов не задана")
         tokens = _argument(args, "paths", str, "").split()
+        if not tokens:
+            raise ToolError(
+                "paths обязателен: укажи свои тесты, весь набор проверит finish"
+            )
         if any(t.startswith("-") for t in tokens):
             raise ToolError("paths — только пути тестов, без флагов pytest")
         paths = [safe_relative(t) for t in tokens]
-        argv = [*self._spec.test_argv, *paths]
-        if paths:
-            argv = without_xdist(argv)
-            timeout_s = self._spec.narrow_test_timeout_s
-        else:
-            timeout_s = self._spec.test_timeout_s
+        argv = without_xdist([*self._spec.test_argv, *paths])
+        timeout_s = self._spec.narrow_test_timeout_s
         result = await self._sandbox.exec(argv, timeout_s)
         text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)
