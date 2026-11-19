@@ -6,9 +6,18 @@ from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
 
-from sa_home_bot.bot import ai_lines
+from sa_home_bot.bot import ai_lines, commands
+from sa_home_bot.bot.devlab_jobs_view import (
+    CB_JOBS,
+    CODE_CARD,
+    CODE_PAGE,
+    PAGE_SIZE,
+    render_card,
+    render_page,
+)
 from sa_home_bot.bot.devlab_notify import (
     CB_CANCEL,
     CB_CANCEL_STALLED,
@@ -24,10 +33,11 @@ from sa_home_bot.bot.devlab_notify import (
     stalled_keyboard,
     stop_confirm_keyboard,
 )
-from sa_home_bot.bot.middlewares import DENIED_ALERT_TEXT
+from sa_home_bot.bot.middlewares import DENIED_ALERT_TEXT, DENIED_TEXT
 from sa_home_bot.bot.service_errors import UNREACHABLE_ERRORS
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.bot.ui.callback_data import unpack
+from sa_home_bot.bot.ui.callback_data import int_or, unpack
+from sa_home_bot.bot.ui.redraw import redraw_rich
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
@@ -151,3 +161,95 @@ async def _post_button(
     )
     await _clear_markup(callback)
     _kick(devlab_notifier)
+
+
+@router.message(Command(commands.JOBS.name))
+async def cmd_jobs(
+    message: Message,
+    config: Settings,
+    node_link: ServiceLink | None = None,
+    subscription: Subscription | None = None,
+) -> None:
+    if not _is_owner(subscription, message.from_user):
+        await message.answer(DENIED_TEXT)
+        return
+    if node_link is None:
+        return
+    result = await _hub(
+        node_link,
+        config,
+        protocol.ACTION_OWNER_JOBS,
+        {protocol.FIELD_OFFSET: 0, protocol.FIELD_LIMIT: PAGE_SIZE},
+    )
+    if result.reply is None:
+        await message.answer(result.error)
+        return
+    jobs = result.reply.get(protocol.FIELD_JOBS, [])
+    total = result.reply.get(protocol.FIELD_TOTAL, 0)
+    rich_msg, keyboard, _ = render_page(jobs, 0, total)
+    await message.answer_rich(rich_message=rich_msg, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith(f"{CB_JOBS}:"))
+async def on_jobs_callback(
+    callback: CallbackQuery,
+    config: Settings,
+    node_link: ServiceLink | None = None,
+    subscription: Subscription | None = None,
+) -> None:
+    if not _is_owner(subscription, callback.from_user):
+        await callback.answer(DENIED_ALERT_TEXT, show_alert=True)
+        return
+    if node_link is None or callback.message is None:
+        await callback.answer()
+        return
+    data = callback.data or ""
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != CB_JOBS:
+        await callback.answer()
+        return
+    code = parts[1]
+    if code == CODE_PAGE:
+        offset = int_or(parts[2] if len(parts) > 2 else None, 0)
+        while True:
+            result = await _hub(
+                node_link,
+                config,
+                protocol.ACTION_OWNER_JOBS,
+                {protocol.FIELD_OFFSET: offset, protocol.FIELD_LIMIT: PAGE_SIZE},
+            )
+            if result.reply is None:
+                await callback.answer(result.error, show_alert=True)
+                return
+            jobs = result.reply.get(protocol.FIELD_JOBS, [])
+            total = result.reply.get(protocol.FIELD_TOTAL, 0)
+            if not jobs and total > 0:
+                from sa_home_bot.bot.pagination import clamp_offset
+
+                clamped = clamp_offset(offset, PAGE_SIZE, total)
+                if clamped == offset:
+                    break
+                offset = clamped
+                continue
+            rich_msg, keyboard, _ = render_page(jobs, offset, total)
+            await redraw_rich(callback, rich_msg, keyboard)
+            break
+    elif code == CODE_CARD:
+        if len(parts) < 4:
+            await callback.answer()
+            return
+        job_id = parts[2]
+        offset = int_or(parts[3], 0)
+        result = await _hub(
+            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
+        )
+        if result.reply is None:
+            await callback.answer(result.error, show_alert=True)
+            return
+        job = result.reply.get(protocol.FIELD_JOB)
+        if job is None:
+            await callback.answer("Задание не найдено", show_alert=True)
+            return
+        rich_msg, keyboard = render_card(job, offset)
+        await redraw_rich(callback, rich_msg, keyboard)
+    await callback.answer()
