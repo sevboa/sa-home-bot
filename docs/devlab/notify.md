@@ -86,6 +86,14 @@ priority и seq). Ответ: `jobs` (виды как в `owner_job`, с заг�
 (`OWNER_JOBS_MAX_LIMIT = 50`); вне пределов — `bad_request`. Метод хаба —
 `queue.active_jobs(offset, limit)`.
 
+### Поля задания (2026-11-19)
+Каждый объект в `jobs` и ответ `owner_job` теперь содержат дополнительные поля:
+- `steps` (int) — количество сообщений `step_done` у задания, 0 если шагов нет.
+- `last_step` (string) — текст последнего шага (`payload.text` от `step_done`), обрезанный до
+  200 символов; пустая строка, если шагов нет.
+- `deps` (array) — список зависимостей из `params.depends_on`; каждый элемент — объект
+  `{"id": "<job_id>", "status": "<status>"}`. Пустой массив, если зависимостей нет.
+
 ## Экран /jobs (2026-11-19)
 Экран команды `/jobs` строится в `bot/devlab_jobs_view.py`. Используется rich-сообщение
 (Bot API 10.3+, aiogram 3.32, `InputRichMessage(html=...)`).

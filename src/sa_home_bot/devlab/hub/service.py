@@ -154,7 +154,21 @@ class HubService:
         job = await queue.get_job(str(args.get(protocol.FIELD_ID, "")))
         question = await queue.last_message(job.id, protocol.MSG_QUESTION)
         text = question.payload.get(protocol.PAYLOAD_TEXT, "") if question else ""
-        return {**owner_job_view(job), protocol.FIELD_QUESTION: text}
+        view = owner_job_view(job)
+        step_stats = await queue.step_stats([job.id])
+        cnt, last = step_stats.get(job.id, (0, ""))
+        view[protocol.FIELD_STEPS] = cnt
+        view[protocol.FIELD_LAST_STEP] = last[:200] if last else ""
+        dep_ids = job.params.get(protocol.PARAM_DEPENDS_ON, [])
+        if dep_ids:
+            dep_statuses = await queue.job_statuses(dep_ids)
+            view[protocol.FIELD_DEPS] = [
+                {protocol.FIELD_ID: dep_id, protocol.FIELD_STATUS: dep_statuses.get(dep_id, "")}
+                for dep_id in dep_ids
+            ]
+        else:
+            view[protocol.FIELD_DEPS] = []
+        return {**view, protocol.FIELD_QUESTION: text}
 
     async def _owner_task(self, args: dict[str, Any]) -> dict[str, Any]:
         queue = self._store.queue
@@ -190,8 +204,26 @@ class HubService:
         if limit < 1:
             raise HubError("limit не меньше 1")
         jobs, total = await queue.active_jobs(offset, min(limit, OWNER_JOBS_MAX_LIMIT))
+        job_ids = [job.id for job in jobs]
+        step_stats = await queue.step_stats(job_ids) if job_ids else {}
+        dep_ids_all: list[str] = []
+        for job in jobs:
+            dep_ids_all.extend(job.params.get(protocol.PARAM_DEPENDS_ON, []))
+        dep_statuses = await queue.job_statuses(dep_ids_all) if dep_ids_all else {}
+        enriched = []
+        for job in jobs:
+            view = owner_job_view(job)
+            cnt, last = step_stats.get(job.id, (0, ""))
+            view[protocol.FIELD_STEPS] = cnt
+            view[protocol.FIELD_LAST_STEP] = last[:200] if last else ""
+            dep_ids = job.params.get(protocol.PARAM_DEPENDS_ON, [])
+            view[protocol.FIELD_DEPS] = [
+                {protocol.FIELD_ID: dep_id, protocol.FIELD_STATUS: dep_statuses.get(dep_id, "")}
+                for dep_id in dep_ids
+            ]
+            enriched.append(view)
         return {
-            protocol.FIELD_JOBS: [owner_job_view(job) for job in jobs],
+            protocol.FIELD_JOBS: enriched,
             protocol.FIELD_TOTAL: total,
             protocol.FIELD_OFFSET: offset,
         }

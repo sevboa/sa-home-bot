@@ -512,6 +512,50 @@ class HubQueue:
         row = await cur.fetchone()
         return _message(row) if row else None
 
+    async def step_stats(self, job_ids: Collection[str]) -> dict[str, tuple[int, str]]:
+        if not job_ids:
+            return {}
+        placeholders = _in(job_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT job_id, COUNT(*) as cnt, MAX(seq) as max_seq "
+            f"FROM messages WHERE job_id IN ({placeholders}) AND direction = ? AND kind = ? "
+            f"GROUP BY job_id",
+            (*job_ids, protocol.DIRECTION_TO_CLIENT, protocol.MSG_STEP_DONE),
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            return {}
+        job_ids_with_steps = [row["job_id"] for row in rows]
+        placeholders2 = _in(job_ids_with_steps)
+        cur = await self._db.conn.execute(
+            f"SELECT job_id, payload FROM messages "
+            f"WHERE job_id IN ({placeholders2}) AND direction = ? AND kind = ? "
+            f"AND seq IN (SELECT MAX(seq) FROM messages WHERE job_id IN ({placeholders2}) "
+            f"AND direction = ? AND kind = ? GROUP BY job_id)",
+            (
+                *job_ids_with_steps,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_STEP_DONE,
+                *job_ids_with_steps,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_STEP_DONE,
+            ),
+        )
+        last_steps = {
+            row["job_id"]: json.loads(row["payload"]).get(protocol.PAYLOAD_TEXT, "")
+            for row in await cur.fetchall()
+        }
+        return {row["job_id"]: (row["cnt"], last_steps.get(row["job_id"], "")) for row in rows}
+
+    async def job_statuses(self, job_ids: Collection[str]) -> dict[str, str]:
+        if not job_ids:
+            return {}
+        placeholders = _in(job_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT id, status FROM jobs WHERE id IN ({placeholders})", tuple(job_ids)
+        )
+        return {row["id"]: row["status"] for row in await cur.fetchall()}
+
     async def get_job(self, job_id: str, client: str | None = None) -> Job:
         job = await self._load(self._db.conn, job_id)
         if client is not None and job.client != client:
