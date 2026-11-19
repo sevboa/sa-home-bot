@@ -7,13 +7,14 @@ from typing import Any
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from sa_home_bot.bot import ai_lines, commands
 from sa_home_bot.bot.devlab_jobs_view import (
     CB_JOBS,
     CODE_CARD,
     CODE_PAGE,
+    CODE_TASK,
     PAGE_SIZE,
     render_card,
     render_page,
@@ -252,4 +253,24 @@ async def on_jobs_callback(
             return
         rich_msg, keyboard = render_card(job, offset)
         await redraw_rich(callback, rich_msg, keyboard)
+    elif code == CODE_TASK:
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        job_id = parts[2]
+        result = await _hub(
+            node_link, config, protocol.ACTION_OWNER_TASK, {protocol.FIELD_ID: job_id}
+        )
+        if result.reply is None:
+            await callback.answer(result.error, show_alert=True)
+            return
+        task_text = result.reply.get(protocol.FIELD_TASK, "")
+        if not task_text:
+            await callback.answer("Текста задачи нет", show_alert=True)
+            return
+        title = result.reply.get(protocol.FIELD_TITLE, "")
+        caption = title[:1000] if title else ""
+        document = BufferedInputFile(task_text.encode("utf-8"), filename=f"task-{job_id}.md")
+        await callback.message.answer_document(document, caption=caption)
+        await callback.answer()
     await callback.answer()

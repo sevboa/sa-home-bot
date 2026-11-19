@@ -241,6 +241,7 @@ class FakeMessage:
     edit_keyboards: list[object] = field(default_factory=list)
     reply_markup_edits: list[object] = field(default_factory=list)
     edit_calls: list[tuple[tuple, dict]] = field(default_factory=list)
+    document_answers: list[tuple] = field(default_factory=list)
 
     @property
     def chat(self) -> FakeChat:
@@ -275,6 +276,11 @@ class FakeMessage:
 
     async def edit_reply_markup(self, reply_markup=None):
         self.reply_markup_edits.append(reply_markup)
+
+    async def answer_document(self, document, caption=None, **_options):
+        self.document_answers.append((document, caption))
+        msg_id = len(self.document_answers) + len(self.answers) + len(self.rich_answers)
+        return FakeSentMessage(message_id=msg_id)
 
 
 class FakeCallback:

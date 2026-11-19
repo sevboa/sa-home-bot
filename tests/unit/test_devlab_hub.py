@@ -135,6 +135,7 @@ def test_token_actions_are_callable_by_nodectl(tmp_path):
 OWNER_ACTION_IDS = (
     protocol.ACTION_OWNER_INBOX,
     protocol.ACTION_OWNER_JOB,
+    protocol.ACTION_OWNER_TASK,
     protocol.ACTION_OWNER_POST,
     protocol.ACTION_OWNER_JOBS,
 )
@@ -228,6 +229,20 @@ async def test_owner_job_has_title_and_last_question(owner):
     assert "task" not in view
     with pytest.raises(ProtoError):
         await service.run_command(protocol.ACTION_OWNER_JOB, {"id": "nope"})
+
+
+async def test_owner_task_returns_full_text(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(
+        job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: "?"}
+    )
+    result = await service.run_command(protocol.ACTION_OWNER_TASK, {"id": job.id})
+    assert result[protocol.FIELD_ID] == job.id
+    assert result[protocol.FIELD_TITLE] == "Заголовок"
+    assert result[protocol.FIELD_TASK] == "# Заголовок\nтело"
+    with pytest.raises(ProtoError):
+        await service.run_command(protocol.ACTION_OWNER_TASK, {"id": "nope"})
 
 
 async def test_owner_post_answers_for_the_job_client(owner):

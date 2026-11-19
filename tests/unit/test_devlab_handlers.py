@@ -65,6 +65,11 @@ def jobs_link(jobs, total, offset=0):
                     protocol.PAYLOAD_TOKENS: 1000,
                 }
             },
+            protocol.ACTION_OWNER_TASK: {
+                protocol.FIELD_ID: "job-1",
+                protocol.FIELD_TITLE: "Test Job",
+                protocol.FIELD_TASK: "# Test Job\nTask body content",
+            },
             protocol.ACTION_OWNER_POST: {protocol.FIELD_STATUS: protocol.STATUS_RUNNING},
         }
     )
@@ -476,3 +481,95 @@ async def test_jobs_callback_hub_down():
     assert cb.answered[0][0] == (ai_lines.DEVLAB_HUB_DOWN_TEXT,)
     assert cb.answered[0][1].get("show_alert") is True
     assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_task_sends_document():
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    cb = callback("dj:t:job-1")
+    await press_jobs(cb, link)
+    assert link.commands[0][0] == protocol.ACTION_OWNER_TASK
+    assert link.commands[0][1] == {protocol.FIELD_ID: "job-1"}
+    assert cb.message.document_answers
+    doc, caption = cb.message.document_answers[0]
+    assert doc.filename == "task-job-1.md"
+    assert doc.data == b"# Test Job\nTask body content"
+    assert caption == "Test Job"
+    assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_task_empty_text_alert():
+    link = FakeNodeLink(
+        results={
+            protocol.ACTION_OWNER_TASK: {
+                protocol.FIELD_ID: "job-1",
+                protocol.FIELD_TITLE: "Test Job",
+                protocol.FIELD_TASK: "",
+            }
+        }
+    )
+    cb = callback("dj:t:job-1")
+    await press_jobs(cb, link)
+    assert cb.answered[0][0] == ("Текста задачи нет",)
+    assert cb.answered[0][1].get("show_alert") is True
+    assert cb.message.document_answers == []
+    assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_task_hub_error_alert():
+    link = FakeNodeLink(
+        error=ProtoError(ERR_BAD_REQUEST, "not found"),
+        results={protocol.ACTION_OWNER_TASK: {}},
+    )
+    cb = callback("dj:t:job-1")
+    await press_jobs(cb, link)
+    assert "not found" in cb.answered[0][0][0]
+    assert cb.answered[0][1].get("show_alert") is True
+    assert cb.message.document_answers == []
+    assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_task_guest_denied():
+    jobs = [
+        {
+            protocol.FIELD_ID: "job-1",
+            protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+            protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+            protocol.FIELD_TITLE: "Test Job",
+            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+        }
+    ]
+    link = jobs_link(jobs, 1)
+    cb = callback("dj:t:job-1", GUEST)
+    await press_jobs(cb, link, guest_sub())
+    assert cb.answered[0][0] == (DENIED_ALERT_TEXT,)
+    assert cb.answered[0][1].get("show_alert") is True
+    assert link.calls == []
+    assert cb.message.document_answers == []
+    assert cb.message.edit_calls == []
+
+
+async def test_jobs_callback_task_long_title_caption_clipped():
+    long_title = "x" * 1500
+    link = FakeNodeLink(
+        results={
+            protocol.ACTION_OWNER_TASK: {
+                protocol.FIELD_ID: "job-1",
+                protocol.FIELD_TITLE: long_title,
+                protocol.FIELD_TASK: "# Task\nBody",
+            }
+        }
+    )
+    cb = callback("dj:t:job-1")
+    await press_jobs(cb, link)
+    assert cb.message.document_answers
+    _, caption = cb.message.document_answers[0]
+    assert caption == "x" * 1000

@@ -14,6 +14,7 @@ from sa_home_bot.utils.text import clip
 CB_JOBS = "dj"
 CODE_PAGE = "p"
 CODE_CARD = "c"
+CODE_TASK = "t"
 PAGE_SIZE = 20
 SMALL_PAGE_SIZE = 10
 TEXT_LIMIT = 4096
@@ -32,6 +33,10 @@ def page_cb(offset: int) -> str:
 
 def card_cb(job_id: str, offset: int) -> str:
     return pack(CB_JOBS, CODE_CARD, job_id, offset)
+
+
+def task_cb(job_id: str) -> str:
+    return pack(CB_JOBS, CODE_TASK, job_id)
 
 
 def link(text: str, data: str) -> str:
@@ -138,6 +143,7 @@ def render_card(
     html = "\n".join(lines)
 
     keyboard_rows: list[list[InlineKeyboardButton]] = []
+    keyboard_rows.append([button("📄 Задача", task_cb(job_id))])
     keyboard_rows.append([button("⬅️ К списку", page_cb(offset))])
     if offset > 0:
         keyboard_rows.append([button("⏮ В начало", page_cb(0))])

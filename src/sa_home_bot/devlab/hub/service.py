@@ -58,6 +58,11 @@ OWNER_ACTIONS = (
         params=(ActionParam(name=protocol.FIELD_ID, title="Номер задания"),),
     ),
     ActionSpec(
+        id=protocol.ACTION_OWNER_TASK,
+        title="Текст задачи (владелец)",
+        params=(ActionParam(name=protocol.FIELD_ID, title="Номер задания"),),
+    ),
+    ActionSpec(
         id=protocol.ACTION_OWNER_POST,
         title="Сообщение за клиента задания (владелец)",
         params=(
@@ -151,6 +156,15 @@ class HubService:
         text = question.payload.get(protocol.PAYLOAD_TEXT, "") if question else ""
         return {**owner_job_view(job), protocol.FIELD_QUESTION: text}
 
+    async def _owner_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        queue = self._store.queue
+        job = await queue.get_job(str(args.get(protocol.FIELD_ID, "")))
+        return {
+            protocol.FIELD_ID: job.id,
+            protocol.FIELD_TITLE: task_title(job.task),
+            protocol.FIELD_TASK: job.task,
+        }
+
     async def _owner_post(self, args: dict[str, Any]) -> dict[str, Any]:
         queue = self._store.queue
         job = await queue.get_job(str(args.get(protocol.FIELD_ID, "")))
@@ -187,6 +201,8 @@ class HubService:
             return await self._owner_inbox(args)
         if action == protocol.ACTION_OWNER_JOB:
             return await self._owner_job(args)
+        if action == protocol.ACTION_OWNER_TASK:
+            return await self._owner_task(args)
         if action == protocol.ACTION_OWNER_POST:
             return await self._owner_post(args)
         if action == protocol.ACTION_OWNER_JOBS:
