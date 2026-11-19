@@ -25,7 +25,7 @@ from sa_home_bot.devlab.agent.repo import PUSH_INTERVAL_S, AgentRepo, agent_auth
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, ManagedSandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.spend import JobSpend, MeteredChat, SpendState
-from sa_home_bot.devlab.agent.tools import ToolBox
+from sa_home_bot.devlab.agent.tools import ToolBox, read_max_lines
 from sa_home_bot.devlab.agent.trace import StepTrace
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, SandboxRequest
 from sa_home_bot.devlab.executor.busy import BusyTracker
@@ -491,11 +491,12 @@ class AgentWorker(WorkerLoops):
         spend.switch_model(job.model)
         entries = await self._catalog.entries(job.model)
         rules = await self._rules(run, project, repo.base, external)
+        window = window_tokens(entries, self._settings.limits.context_tokens)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id), spend),
-            ToolBox(sandbox, spec),
+            ToolBox(sandbox, spec, read_max_lines(window)),
             FinishGuard(sandbox, spec, self._settings.slots.heavy),
-            self._limits_for(spend, entries, profile),
+            self._limits_for(spend, entries, profile, window),
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
@@ -553,6 +554,7 @@ class AgentWorker(WorkerLoops):
         spend: JobSpend,
         entries: list[CatalogEntry],
         profile: DevlabProfileConfig | None = None,
+        window: int | None = None,
     ) -> AgentLimits:
         limits = self._settings.limits
         factor = 1 + spend.extensions
@@ -562,7 +564,9 @@ class AgentWorker(WorkerLoops):
             limits = replace(limits, max_wall_s=profile.max_wall_s)
         return replace(
             limits,
-            context_tokens=window_tokens(entries, limits.context_tokens),
+            context_tokens=(
+                window if window is not None else window_tokens(entries, limits.context_tokens)
+            ),
             max_cost_usd=limits.max_cost_usd * factor,
             max_tokens=token_ceiling(entries, limits.max_tokens) * factor,
         )

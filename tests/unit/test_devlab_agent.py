@@ -44,6 +44,7 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_WRITE_FILE,
     ToolBox,
     ToolError,
+    read_max_lines,
 )
 from tests.unit.support.fakes import ScriptedChatModel, tool_reply
 
@@ -366,6 +367,21 @@ async def test_read_and_grep(tmp_path):
     assert "10\tline10" in out
     found = (await box.call(TOOL_GREP, {"pattern": r"line49\d"})).text
     assert found.splitlines()[0] == "m.py:490:line490"
+
+
+@pytest.mark.parametrize(
+    ("window", "expected"),
+    [(0, 200), (30000, 500), (10**6, 2000)],
+)
+def test_read_max_lines(window, expected):
+    assert read_max_lines(window) == expected
+
+
+async def test_read_file_by_window(tmp_path):
+    (tmp_path / "m.py").write_text("\n".join(f"line{i}" for i in range(1, 451)))
+    box = ToolBox(LocalSandbox(tmp_path), AgentSpec(), read_lines=500)
+    out = (await box.call(TOOL_READ_FILE, {"path": "m.py"})).text
+    assert out.splitlines()[0] == "m.py, строки 1-450 из 450"
 
 
 def reply_body(content="", calls=None, usage=None):

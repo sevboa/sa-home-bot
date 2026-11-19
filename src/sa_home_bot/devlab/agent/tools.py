@@ -25,11 +25,17 @@ READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP})
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
 
 LIST_MAX_ENTRIES = 200
-READ_MAX_LINES = 200
+READ_MIN_LINES = 200
+READ_MAX_LINES_CAP = 2000
+READ_TOKENS_PER_LINE = 60
 GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
 NEWLINE_ADDED = "; в конец файла дописан перевод строки"
+
+
+def read_max_lines(window_tokens: int) -> int:
+    return max(READ_MIN_LINES, min(READ_MAX_LINES_CAP, window_tokens // READ_TOKENS_PER_LINE))
 
 
 def _with_final_newline(data: bytes) -> bytes | None:
@@ -90,7 +96,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
     _schema(
         TOOL_READ_FILE,
-        f"Читает файл по строкам, не больше {READ_MAX_LINES} строк за вызов.",
+        "Читает файл по строкам; за вызов отдаёт сколько поместится, в ответе видно, сколько "
+        "строк всего.",
         path=_text("Путь файла"),
         start_line=_integer("Первая строка, с 1"),
         end_line=_integer("Последняя строка включительно"),
@@ -171,9 +178,10 @@ def without_xdist(argv: list[str]) -> list[str]:
 
 
 class ToolBox:
-    def __init__(self, sandbox: Sandbox, spec: AgentSpec) -> None:
+    def __init__(self, sandbox: Sandbox, spec: AgentSpec, read_lines: int = READ_MIN_LINES) -> None:
         self._sandbox = sandbox
         self._spec = spec
+        self._read_lines = read_lines
         self._handlers = {
             TOOL_LIST_FILES: self._list_files,
             TOOL_READ_FILE: self._read_file,
@@ -236,8 +244,8 @@ class ToolBox:
         path = _argument(args, "path", str)
         lines = (await self._read_text(path)).splitlines()
         start = max(1, _argument(args, "start_line", int, 1))
-        end = min(len(lines), _argument(args, "end_line", int, start + READ_MAX_LINES - 1))
-        end = min(end, start + READ_MAX_LINES - 1)
+        end = min(len(lines), _argument(args, "end_line", int, start + self._read_lines - 1))
+        end = min(end, start + self._read_lines - 1)
         if start > len(lines):
             raise ToolError(f"в файле {path} только {len(lines)} строк")
         body = "\n".join(f"{n}\t{lines[n - 1]}" for n in range(start, end + 1))
