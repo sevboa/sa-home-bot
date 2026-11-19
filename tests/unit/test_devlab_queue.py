@@ -813,6 +813,63 @@ async def test_red_test_run_at_fix_round_limit_creates_no_fix_job(queue):
     assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
 
 
+async def test_fix_done_creates_retest_job(queue):
+    dep = await submit(queue)
+    ref = S.AGENT_BRANCH_PREFIX + dep.id
+    test_job = await queue.submit_test(CLIENT, PROJECT, ref, fix_model=MODEL)
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(test_job.id, S.MSG_TEST_DONE, done_payload())
+    fix_jobs = [
+        j
+        for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])
+        if j.params.get(S.PARAM_PURPOSE) == S.PURPOSE_FIX
+    ]
+    assert len(fix_jobs) == 1
+    fix = fix_jobs[0]
+    await queue.claim(EXECUTOR, [MODEL], kinds=(S.JOB_KIND_AGENT,))
+    await queue.post_from_executor(fix.id, S.MSG_DONE)
+    test_jobs = [
+        j for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED]) if j.kind == S.JOB_KIND_TEST
+    ]
+    assert len(test_jobs) == 1
+    retest = test_jobs[0]
+    assert retest.client == CLIENT
+    assert retest.project == PROJECT
+    assert retest.params[S.FIELD_REF] == S.AGENT_BRANCH_PREFIX + fix.id
+    assert retest.params[S.FIELD_CMD] == ""
+    assert retest.params[S.FIELD_ARGS] == []
+    assert retest.params[S.PARAM_FIX_MODEL] == fix.params[S.PARAM_FIX_MODEL]
+    assert retest.params[S.PARAM_FIX_ROUND] == fix.params[S.PARAM_FIX_ROUND]
+
+
+async def test_dev_done_creates_no_retest_job(queue):
+    job = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(job.id, S.MSG_DONE)
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
+
+
+async def test_fix_failed_creates_no_retest_job(queue):
+    fix = await submit(queue, purpose=S.PURPOSE_FIX)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(fix.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "сломалось"})
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
+
+
+async def test_red_test_run_at_fix_round_limit_sends_fix_exhausted(queue):
+    test_job = await queue.submit_test(
+        CLIENT, PROJECT, "base/x", fix_model=MODEL, fix_round=S.FIX_MAX_ROUNDS
+    )
+    await queue.claim(EXECUTOR, [], [S.JOB_KIND_TEST])
+    await queue.post_from_executor(test_job.id, S.MSG_TEST_DONE, done_payload())
+    assert [j.kind for j in await queue.list_jobs(statuses=[S.STATUS_QUEUED])] == []
+    inbox = await queue.inbox(CLIENT)
+    assert [m.kind for m in inbox] == [S.MSG_FIX_EXHAUSTED, S.MSG_TEST_DONE]
+    assert inbox[0].payload[S.PAYLOAD_TEXT] == (
+        f"fix не справился за {S.FIX_MAX_ROUNDS} круга, нужен владелец: base/x"
+    )
+
+
 async def test_test_job_transitions(queue):
     stopped = await submit_test(queue)
     await queue.post_from_client(CLIENT, stopped.id, S.MSG_STOP, {})

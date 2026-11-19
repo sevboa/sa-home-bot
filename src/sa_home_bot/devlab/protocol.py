@@ -66,6 +66,7 @@ MSG_STALLED = "stalled"
 MSG_EXECUTOR_OFFLINE = "executor_offline"
 MSG_WAITING_MODEL = "waiting_model"
 MSG_DEPENDENCY_FAILED = "dependency_failed"
+MSG_FIX_EXHAUSTED = "fix_exhausted"
 EXECUTOR_MESSAGES = (
     MSG_STARTED,
     MSG_STEP_DONE,
