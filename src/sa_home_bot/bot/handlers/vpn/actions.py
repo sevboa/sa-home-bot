@@ -383,6 +383,7 @@ async def _proxy_link(ctx: Ctx, value: str | None, node_id: str | None) -> None:
         await _proxy_qr(ctx, node_id)
         return
     results = await vpn_nodes.fanout(ctx.node_link, vpn_protocol.ACTION_PROXY_LINK, {})
+    results = vpn_proxy_screen.sort_results(results)
     if not results:
         await ctx.alert("⚠️ Прокси Telegram сейчас не настроен ни на одном сервере.")
         return

@@ -135,6 +135,14 @@ async def test_proxy_link_seeds_and_reuses_secret(env):
     assert second["secret"] == first["secret"]
 
 
+async def test_proxy_link_exposes_configured_priority(env):
+    svc, _proxy, _events = env
+    result = await svc.run_command(vpn_protocol.ACTION_PROXY_LINK, {})
+    assert result["priority"] == 0
+    svc._cfg = VpnConfig(mtg_public_host="203.0.113.9", mtg_priority=5)
+    assert (await svc.run_command(vpn_protocol.ACTION_PROXY_LINK, {}))["priority"] == 5
+
+
 async def test_proxy_rotate_secret_updates_backend_and_db(env):
     svc, proxy, _events = env
     result = await svc.run_command(vpn_protocol.ACTION_PROXY_ROTATE_SECRET, {})

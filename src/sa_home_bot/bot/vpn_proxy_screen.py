@@ -21,8 +21,18 @@ ONLY_PROXY_CARD = (
 
 TEXT = (
     "✈️ <b>Прокси Telegram</b>\n\n"
-    "Telegram без VPN. Нажмите кнопку — Telegram сам предложит подключить."
+    "Telegram без VPN. Нажмите кнопку — Telegram сам предложит подключить.\n\n"
+    "Если прокси не подключается — включите VPN (AmneziaVPN или Hiddify): через "
+    "него Telegram работает надёжнее."
 )
+
+
+def sort_results(results: list[dict]) -> list[dict]:
+    return sorted(
+        results,
+        key=lambda r: int(r.get("priority") or 0),
+        reverse=True,
+    )
 
 
 def country_of(result: dict) -> Country:
