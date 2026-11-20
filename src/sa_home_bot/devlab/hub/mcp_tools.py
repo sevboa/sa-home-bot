@@ -27,6 +27,7 @@ class Param:
     type: str
     description: str
     required: bool = False
+    items: dict[str, Any] | None = None
 
 
 Handler = Callable[..., Awaitable[Any]]
@@ -44,7 +45,7 @@ class Tool:
         for param in self.params:
             spec: dict[str, Any] = {"type": param.type, "description": param.description}
             if param.type == "array":
-                spec["items"] = {"type": "string"}
+                spec["items"] = param.items or {"type": "string"}
             properties[param.name] = spec
         return {
             "type": "object",
@@ -61,12 +62,40 @@ class Tool:
             if param.required and param.name not in arguments:
                 raise HubError(f"{self.name}: нужен параметр {param.name}")
         for name, value in arguments.items():
-            expected = JSON_TYPES[known[name].type]
+            param = known[name]
+            expected = JSON_TYPES[param.type]
             bad = isinstance(value, bool) or not isinstance(value, expected)
-            if known[name].type == "array":
-                bad = not isinstance(value, list) or not all(isinstance(v, str) for v in value)
+            if param.type == "array":
+                bad = not isinstance(value, list)
+                if not bad and param.items:
+                    item_type = param.items.get("type")
+                    if item_type == "object":
+                        props = param.items.get("properties", {})
+                        required = set(param.items.get("required", []))
+                        for item in value:
+                            if not isinstance(item, dict):
+                                bad = True
+                                break
+                            if not required.issubset(item.keys()):
+                                bad = True
+                                break
+                            for prop_name, prop_spec in props.items():
+                                if prop_name in item:
+                                    prop_expected = JSON_TYPES.get(prop_spec.get("type", "string"))
+                                    val = item[prop_name]
+                                    if prop_expected and (
+                                        isinstance(val, bool) or not isinstance(val, prop_expected)
+                                    ):
+                                        bad = True
+                                        break
+                            if bad:
+                                break
+                    elif item_type == "string" and not all(isinstance(v, str) for v in value):
+                        bad = True
+                elif not bad and not all(isinstance(v, str) for v in value):
+                    bad = True
             if bad:
-                raise HubError(f"{self.name}: параметр {name} — {known[name].type}")
+                raise HubError(f"{self.name}: параметр {name} — {param.type}")
         return arguments
 
 
@@ -264,6 +293,23 @@ async def release(ctx: Context, id: str) -> Any:
     return await send(ctx, protocol.MSG_RELEASE, id, {})
 
 
+async def review(
+    ctx: Context,
+    id: str,
+    verdict: str,
+    issues: list[dict[str, str]] | None = None,
+    fix_commit: str = "",
+    tests: str = "",
+) -> Any:
+    return await ctx.store.queue.add_review(
+        ctx.client, id, verdict, issues or [], fix_commit, tests
+    )
+
+
+async def reviews(ctx: Context, model: str = "", since: str = "") -> Any:
+    return {"reviews": await ctx.store.queue.reviews(model, since)}
+
+
 ID = Param("id", "string", "Номер задания из devlab_submit.", required=True)
 
 TOOLS: tuple[Tool, ...] = (
@@ -447,6 +493,50 @@ TOOLS: tuple[Tool, ...] = (
         " задания в статусе waiting_owner; статус не меняется.",
         (ID,),
         release,
+    ),
+    Tool(
+        protocol.TOOL_REVIEW,
+        "Записать оценку принятого задания. Вердикт и метки проблем только из списков протокола.",
+        (
+            ID,
+            Param(
+                "verdict",
+                "string",
+                "Вердикт: " + ", ".join(protocol.REVIEW_VERDICTS),
+                required=True,
+            ),
+            Param(
+                "issues",
+                "array",
+                "Список объектов {tag, note}; tag из: " + ", ".join(protocol.REVIEW_ISSUE_TAGS),
+                items={
+                    "type": "object",
+                    "properties": {
+                        "tag": {"type": "string", "description": "Метка проблемы"},
+                        "note": {"type": "string", "description": "Пояснение"},
+                    },
+                    "required": ["tag", "note"],
+                },
+            ),
+            Param(
+                "fix_commit",
+                "string",
+                "Хеш коммита с правками, если verdict=accepted_with_fixes.",
+            ),
+            Param(
+                "tests", "string", "Идентификатор прогона тестов (job id test-задания)."
+            ),
+        ),
+        review,
+    ),
+    Tool(
+        protocol.TOOL_REVIEWS,
+        "Журнал оценок: свои или по модели/дате. since — дата ISO, «с какого дня».",
+        (
+            Param("model", "string", "Фильтр по имени модели."),
+            Param("since", "string", "Начальная дата ISO (с какого дня), включительно."),
+        ),
+        reviews,
     ),
 )
 

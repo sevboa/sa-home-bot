@@ -263,6 +263,8 @@ TOOL_ANSWER = "devlab_answer"
 TOOL_RESUME = "devlab_resume"
 TOOL_STOP = "devlab_stop"
 TOOL_RELEASE = "devlab_release"
+TOOL_REVIEW = "devlab_review"
+TOOL_REVIEWS = "devlab_reviews"
 
 RESOURCE_TASK_TEMPLATE = "devlab://task-template"
 RESOURCE_USAGE = "devlab://usage"

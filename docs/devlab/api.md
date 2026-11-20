@@ -70,6 +70,8 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_resume` | `id`, `text`, `model` | в очередь, с замечаниями и/или другой моделью (с `warnings`) |
 | `devlab_stop` | `id` | остановка |
 | `devlab_release` | `id` | `release`: только для waiting_owner |
+| `devlab_review` | `id`, `verdict`, `issues`, `fix_commit`, `tests` | записать оценку задания (Этап Р20.2, 2026-11-20) |
+| `devlab_reviews` | `model`, `since` | журнал оценок с фильтром по модели и дате (Этап Р20.2, 2026-11-20) |
 
 `answer`, `resume`, `stop`, `release` возвращают `seq` сообщения и новый `status`. Текст `answer` и
 `resume` лежит в `payload.text` (`protocol.PAYLOAD_TEXT`).
@@ -112,5 +114,16 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
   агента при `question`/`done`/`failed`/`stopped`; до первой выгрузки — ошибка «нет файла».
   `PUT /api/log` от своего исполнителя: для `agent` принимается только `steps.jsonl` (до `STEPS_MAX_BYTES`),
   для `test` — `output.log` и `junit.xml`.
+
+### devlab_review и devlab_reviews (Этап Р20.2, 2026-11-20)
+
+- `devlab_review`: записывает оценку принятого задания. Параметры: `id` (обязательный), `verdict` (обязательный,
+  одно из `accepted`, `accepted_with_fixes`, `resumed_with_step_list`, `redone`, `abandoned`), `issues`
+  (массив объектов `{tag, note}` где `tag` — одно из `loop`, `missed_case`, `unhandled_error`,
+  `debug_leftover`, `comments`, `rules`, `scope`, `env`), `fix_commit` (хеш коммита с правками), `tests`
+  (id test-задания с полным прогоном). Возвращает записанную оценку.
+- `devlab_reviews`: читает журнал оценок. Параметры: `model` (фильтр по имени модели), `since` (дата ISO,
+  включительно). Возвращает `{"reviews": [...]}`. Каждая запись содержит `id`, `model`, `profile`, `title`,
+  `base_branch`, `tokens`, `resumes`, `verdict`, `issues`, `fix_commit`, `tests`, `reviewed`.
 
 `nodectl devlab connect` берёт адрес из `connect.hub_url`: на ноде хаба (alfred) tailscale-IP, на других нодах имя `hub_node` (2026-11-01).
