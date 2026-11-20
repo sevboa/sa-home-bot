@@ -365,7 +365,11 @@ async def _after_delivery(
         await ai_flow.piggyback_dialogue_episode(
             node_link, message.chat.id, str(user_turn["content"]), raw
         )
-    if getattr(history, "compress_after", False) and message.chat is not None:
+    if (
+        getattr(history, "compress_after", False)
+        and message.chat is not None
+        and dismissal.mode is None
+    ):
         dialogue_context.COMPRESSOR.schedule(
             node_link,
             store,
