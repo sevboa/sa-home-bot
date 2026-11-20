@@ -28,6 +28,8 @@ TEXT_LIMIT = 4096
 TITLE_CHARS = 60
 QUESTION_CHARS = 1500
 CARD_TIME_FORMAT = "%d.%m %H:%M"
+SLOT_WAIT_ICON = "📌"
+SLOT_WAIT_TEXT = "ждёт слот"
 STATUS_ICONS = {
     protocol.STATUS_RUNNING: "🟢",
     protocol.STATUS_WAITING_OWNER: "❓",
@@ -125,7 +127,6 @@ def _role(job: dict[str, Any]) -> str | None:
 def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     job_id = str(job.get(protocol.FIELD_ID, ""))
     status = job.get(protocol.FIELD_STATUS, "")
-    icon = STATUS_ICONS.get(status, "")
     jtype = job_type(job)
     kind = job.get(protocol.FIELD_KIND)
     params = job.get(protocol.FIELD_PARAMS) or {}
@@ -135,6 +136,9 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     title = clip(str(job.get(protocol.FIELD_TITLE, "")), TITLE_CHARS)
     linked_id = link(job_id, card_cb(job_id, offset))
 
+    slot_wait = status == protocol.STATUS_RUNNING and job.get(protocol.FIELD_SLOT_WAIT)
+    icon = SLOT_WAIT_ICON if slot_wait else STATUS_ICONS.get(status, "")
+
     parts = [f"{n}. {icon} {linked_id} · {jtype} · {model}"]
 
     age_sec = _age_seconds(
@@ -143,7 +147,10 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     if age_sec is not None:
         parts.append(f"· {format_dhms(age_sec)}")
 
-    if status == protocol.STATUS_RUNNING:
+    if slot_wait:
+        parts.append(f"· {SLOT_WAIT_TEXT}")
+
+    if status == protocol.STATUS_RUNNING and not slot_wait:
         steps = job.get(protocol.FIELD_STEPS, 0)
         if steps:
             parts.append(f"· шаг {steps}")
@@ -178,8 +185,19 @@ def page_html(
         running_c = counts.get(protocol.STATUS_RUNNING, 0)
         waiting_c = counts.get(protocol.STATUS_WAITING_OWNER, 0)
         queued_c = counts.get(protocol.STATUS_QUEUED, 0)
+        slot_wait_c = sum(
+            1
+            for job in jobs
+            if job.get(protocol.FIELD_STATUS) == protocol.STATUS_RUNNING
+            and job.get(protocol.FIELD_SLOT_WAIT)
+        )
         if running_c or waiting_c or queued_c:
-            header_parts.append(f" (🟢{running_c} ❓{waiting_c} ⏳{queued_c})")
+            parts = [f"🟢{running_c - slot_wait_c}"]
+            if slot_wait_c:
+                parts.append(f"📌{slot_wait_c}")
+            parts.append(f"❓{waiting_c}")
+            parts.append(f"⏳{queued_c}")
+            header_parts.append(" (" + " ".join(parts) + ")")
     header_parts.append(f" · стр. {current_page} из {pages_total}")
     lines = ["<p>" + "".join(header_parts) + "</p>"]
 
@@ -294,8 +312,11 @@ def render_card(
     original_model = params.get(protocol.PARAM_ORIGINAL_MODEL)
     role_str = _role(job)
 
+    slot_wait = status == protocol.STATUS_RUNNING and job.get(protocol.FIELD_SLOT_WAIT)
+    status_display = f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT}" if slot_wait else escape(status)
+
     lines = [
-        f"<p>Задание <code>{escape(job_id)}</code> · {jtype} · {escape(status)}</p>",
+        f"<p>Задание <code>{escape(job_id)}</code> · {jtype} · {status_display}</p>",
         f"<p>Проект: {escape(project)}</p>",
         f"<p>Заголовок: {escape(title)}</p>",
         f"<p>Модель: {escape(model)}</p>",

@@ -367,3 +367,21 @@ async def test_owner_job_and_jobs_include_steps_last_step_and_deps(owner):
     assert job_a_info[protocol.FIELD_STEPS] == 0
     assert job_a_info[protocol.FIELD_LAST_STEP] == ""
     assert job_a_info[protocol.FIELD_DEPS] == []
+
+
+async def test_owner_views_include_slot_wait(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(job.id, protocol.MSG_STARTED)
+    await queue.post_from_executor(job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: "?"})
+    await queue.post_from_client(
+        CLIENT_A, job.id, protocol.MSG_ANSWER, {protocol.PAYLOAD_TEXT: "ans"}
+    )
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert view[protocol.FIELD_SLOT_WAIT] is True
+    await queue.post_from_executor(job.id, protocol.MSG_STARTED)
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert view[protocol.FIELD_SLOT_WAIT] is False
+    queued = await queue.submit(CLIENT_A, "demo", MODEL, "# queued\nbody")
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": queued.id})
+    assert view[protocol.FIELD_SLOT_WAIT] is False

@@ -154,6 +154,12 @@ class HubService:
         queue = self._store.queue
         job_ids = [job.id for job in jobs]
         step_stats = await queue.step_stats(job_ids) if job_ids else {}
+        running_agent_ids = [
+            job.id
+            for job in jobs
+            if job.status == protocol.STATUS_RUNNING and job.kind == protocol.JOB_KIND_AGENT
+        ]
+        waiting = await queue.slot_waiting(running_agent_ids) if running_agent_ids else set()
         dep_ids_all: list[str] = []
         for job in jobs:
             dep_ids_all.extend(job.params.get(protocol.PARAM_DEPENDS_ON, []))
@@ -169,6 +175,7 @@ class HubService:
                 {protocol.FIELD_ID: dep_id, protocol.FIELD_STATUS: dep_statuses.get(dep_id, "")}
                 for dep_id in dep_ids
             ]
+            view[protocol.FIELD_SLOT_WAIT] = job.id in waiting
             views.append(view)
         return views
 

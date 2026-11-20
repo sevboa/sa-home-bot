@@ -556,6 +556,35 @@ class HubQueue:
         )
         return {row["id"]: row["status"] for row in await cur.fetchall()}
 
+    async def slot_waiting(self, job_ids: Collection[str]) -> set[str]:
+        if not job_ids:
+            return set()
+        placeholders = _in(job_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT m1.job_id "
+            f"FROM messages m1 "
+            f"JOIN jobs j ON j.id = m1.job_id "
+            f"WHERE m1.job_id IN ({placeholders}) "
+            f"AND m1.direction = ? AND m1.kind = ? "
+            f"AND m1.seq > COALESCE(("
+            f" SELECT MAX(m2.seq) FROM messages m2 "
+            f" WHERE m2.job_id = m1.job_id "
+            f" AND m2.direction = ? AND m2.kind = ?"
+            f"), 0) "
+            f"AND j.status = ? AND j.kind = ?",
+            (
+                *job_ids,
+                protocol.DIRECTION_TO_EXECUTOR,
+                protocol.MSG_ANSWER,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_STARTED,
+                protocol.STATUS_RUNNING,
+                protocol.JOB_KIND_AGENT,
+            ),
+        )
+        rows = await cur.fetchall()
+        return {row["job_id"] for row in rows}
+
     async def get_job(self, job_id: str, client: str | None = None) -> Job:
         job = await self._load(self._db.conn, job_id)
         if client is not None and job.client != client:
