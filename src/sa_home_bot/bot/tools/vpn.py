@@ -7,6 +7,7 @@ from sa_home_bot.bot import (
     recipients,
     vpn_facts,
     vpn_nodes,
+    vpn_proxy_screen,
 )
 from sa_home_bot.bot.tools.core import (
     NO_SWARM_LINK,
@@ -155,6 +156,7 @@ async def tool_vpn(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     if action == vpn_protocol.ACTION_PROXY_LINK and not args.get("server"):
         results = await vpn_nodes.fanout(ctx.node_link, action, {})
+        results = vpn_proxy_screen.sort_results(results)
         if not results:
             return "недоступно: прокси Telegram сейчас не настроен ни на одном сервере"
         return json.dumps(results, ensure_ascii=False)

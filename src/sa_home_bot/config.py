@@ -659,6 +659,7 @@ class VpnConfig(BaseModel):
 
     mtg_domain: str = "www.microsoft.com"
     mtg_port: int = Field(default=443, ge=1, le=65535)
+    mtg_priority: int = 0
     mtg_public_host: str = ""
     socks_port: int = Field(default=1080, ge=1, le=65535)
     socks_host: str = ""

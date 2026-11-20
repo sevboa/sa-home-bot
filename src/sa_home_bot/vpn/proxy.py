@@ -54,6 +54,7 @@ class ProxyMixin:
             "socks_port": self._cfg.socks_port,
             "node": self._node,
             "label": self._cfg.location,
+            "priority": self._cfg.mtg_priority,
         }
 
     async def _proxy_rotate_secret(self, args: dict[str, Any]) -> dict[str, Any]:

@@ -134,6 +134,14 @@ async def test_unknown_question_falls_back_to_list():
     assert cb.message.edits[-1] == vpn_faq.LIST_TEXT
 
 
+async def test_sort_results_orders_by_priority_stably():
+    low = {"node": "jeeves", "priority": 0}
+    high = {"node": "wooster", "priority": 5}
+    tie = {"node": "alfred", "priority": 0}
+    assert vpn_proxy_screen.sort_results([low, tie, high]) == [high, low, tie]
+    assert vpn_proxy_screen.sort_results([high, tie, low]) == [high, tie, low]
+
+
 async def test_proxy_screen_url_buttons_per_country(results):
     cb, _ = await _press(f"act:vpn:{vpn_protocol.ACTION_PROXY_LINK}", sub=PROXY_GUEST, chat_id=779)
     text = cb.message.edits[-1]
@@ -147,6 +155,17 @@ async def test_proxy_screen_url_buttons_per_country(results):
     assert "⚙️ Секрет и порт" not in button_texts(markup)
     for b in buttons:
         assert b.url or len(b.callback_data.encode()) <= 64
+
+
+async def test_proxy_screen_connect_buttons_follow_priority(results):
+    state = results
+    state["r"] = [_proxy("jeeves", "🇳🇱 Нидерланды"), _proxy("wooster", "🇺🇸 США")]
+    state["r"][0]["priority"] = 0
+    state["r"][1]["priority"] = 5
+    cb, _ = await _press(f"act:vpn:{vpn_protocol.ACTION_PROXY_LINK}", sub=PROXY_GUEST, chat_id=779)
+    markup = cb.message.edit_markups[-1]
+    connect = [b.text for b in all_buttons(markup) if b.text.endswith("Подключить")]
+    assert connect == ["🇺🇸 Подключить", "🇳🇱 Подключить"]
 
 
 async def test_proxy_screen_admin_gets_secret_button(results):
