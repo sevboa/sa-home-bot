@@ -100,8 +100,10 @@ async def test_base_fetch_drop_cycle(hub, repo, tmp_path, capsys, monkeypatch):
     assert run_git(repo, "rev-parse", "refs/devlab/agent/j1").stdout.strip() == head
 
     assert await run_branch(hub, repo, tmp_path, "drop", ["agent/j1", "base/task1"]) == 0
-    refs = run_git(bare, "for-each-ref", "refs/heads").stdout
-    assert "agent/j1" not in refs and "base/task1" not in refs
+    refs = run_git(bare, "for-each-ref", "--format=%(refname)", "refs/heads").stdout.split()
+    assert "refs/heads/agent/j1" not in refs and "refs/heads/base/task1" not in refs
+    assert "refs/heads/archive/agent/j1" in refs
+    assert run_git(bare, "rev-parse", "archive/agent/j1").stdout.strip() == head
     assert all(token not in part for argv in argvs for part in argv)
 
 

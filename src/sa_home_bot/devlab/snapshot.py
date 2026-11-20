@@ -181,6 +181,21 @@ def fetch_agent(root: Path, url: str, token: str, project: str, job_id: str) -> 
     return local
 
 
+def agent_archive_refspecs(root: Path, url: str, token: str, project: str, branch: str) -> str:
+    result = _git(
+        root,
+        "ls-remote",
+        hub_remote(url, project),
+        f"refs/heads/{branch}",
+        env=hub_env(token),
+        secret=token,
+    )
+    sha = result.stdout.split()[0] if result.stdout.split() else ""
+    if not sha:
+        raise SnapshotError(f"ветки {branch} нет на хабе, архивировать нечего")
+    return f"{sha}:refs/heads/{protocol.ARCHIVE_BRANCH_PREFIX}{branch}"
+
+
 def drop_branches(root: Path, url: str, token: str, project: str, branches: list[str]) -> None:
     refspecs = []
     for branch in branches:
@@ -194,7 +209,10 @@ def drop_branches(root: Path, url: str, token: str, project: str, branches: list
         )
         if not prefix:
             raise SnapshotError(f"удалять можно только agent/* и base/*, не {branch!r}")
-        refspecs.append(f":refs/heads/{check_branch_name(branch, prefix)}")
+        name = check_branch_name(branch, prefix)
+        if prefix == protocol.AGENT_BRANCH_PREFIX:
+            refspecs.append(agent_archive_refspecs(root, url, token, project, name))
+        refspecs.append(f":refs/heads/{name}")
     _git(
         root,
         "push",

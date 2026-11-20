@@ -101,6 +101,49 @@ def test_project_name(repo, spec, override, expected):
     assert snapshot.project_name(repo, override) == expected
 
 
+class StubResult:
+    def __init__(self, stdout: str = ""):
+        self.stdout = stdout
+
+
+def test_drop_branches_pushes_archive_refspec_before_delete(tmp_path, monkeypatch):
+    calls = []
+
+    def stub(cwd, *argv, env=None, secret=""):
+        calls.append((list(argv), env, secret))
+        if argv[0] == "ls-remote":
+            return StubResult("abc123\trefs/heads/agent/x\n")
+        return StubResult()
+
+    monkeypatch.setattr(snapshot, "_git", stub)
+    snapshot.drop_branches(tmp_path, "http://h", "t0", "demo", ["agent/x", "base/y"])
+    push = next(a for a in calls if a[0][0] == "push")
+    assert push[0][-3:] == [
+        "abc123:refs/heads/archive/agent/x",
+        ":refs/heads/agent/x",
+        ":refs/heads/base/y",
+    ]
+    ls = next(a for a in calls if a[0][0] == "ls-remote")
+    assert "refs/heads/agent/x" in ls[0]
+    assert "t0" not in ls[0]
+    assert any("Bearer t0" in v for v in ls[1].values())
+    assert ls[2] == "t0"
+
+
+def test_drop_branches_missing_agent_branch_fails_without_push(tmp_path, monkeypatch):
+    calls = []
+
+    def stub(cwd, *argv, env=None, secret=""):
+        calls.append(list(argv))
+        return StubResult()
+
+    monkeypatch.setattr(snapshot, "_git", stub)
+    with pytest.raises(snapshot.SnapshotError, match="agent/x"):
+        snapshot.drop_branches(tmp_path, "http://h", "t0", "demo", ["agent/x", "base/y"])
+    assert len(calls) == 1
+    assert calls[0][0] == "ls-remote"
+
+
 def settings_for(hub_client: TestClient) -> Settings:
     url = hub_client.make_url("/")
     return Settings.model_validate(
