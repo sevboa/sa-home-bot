@@ -248,7 +248,7 @@ async def mtproto_probe(
         resp = stream[4:4 + n]
         resp_ctor = struct.unpack("<I", resp[20:24])[0]
         resp_nonce = resp[24:40]
-    except (EOFError, OSError, TimeoutError) as exc:
+    except (EOFError, OSError, TimeoutError, struct.error) as exc:
         writer.close()
         with contextlib.suppress(OSError):
             await writer.wait_closed()
