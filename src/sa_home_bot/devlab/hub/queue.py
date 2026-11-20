@@ -865,6 +865,11 @@ class HubQueue:
         if executor is not None:
             where.append("j.executor = ?")
             args.append(executor)
+        where.append(
+            "NOT (m.kind = ? AND EXISTS (SELECT 1 FROM messages r "
+            "WHERE r.job_id = m.job_id AND r.direction = ? AND r.kind = ? AND r.seq > m.seq))"
+        )
+        args.extend([protocol.MSG_STOP, protocol.DIRECTION_TO_EXECUTOR, protocol.MSG_RESUME])
         async with self._tx() as conn:
             cur = await conn.execute(
                 "SELECT m.* FROM messages m JOIN jobs j ON j.id = m.job_id"

@@ -509,6 +509,47 @@ async def test_poll_by_job_and_executor_marks_read(queue):
         await queue.poll()
 
 
+@pytest.mark.parametrize(
+    ("setup_job", "expect_stop", "expect_resume"),
+    [
+        ("stop_then_resume", False, True),
+        ("stop_only", True, False),
+    ],
+)
+async def test_poll_filters_stale_stop_when_resume_follows(
+    queue, setup_job, expect_stop, expect_resume
+):
+    if setup_job == "stop_then_resume":
+        job = await running_job(queue)
+        await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+        await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME)
+    else:
+        job = await running_job(queue)
+        await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+
+    kinds = [m.kind for m in await queue.poll(executor=EXECUTOR)]
+    if expect_stop:
+        assert S.MSG_STOP in kinds
+    else:
+        assert S.MSG_STOP not in kinds
+    if expect_resume:
+        assert S.MSG_RESUME in kinds
+    else:
+        assert S.MSG_RESUME not in kinds
+
+
+async def test_poll_stop_not_filtered_when_resume_then_later_stop(queue):
+    job = await running_job(queue)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+    await queue.post_from_executor(job.id, S.MSG_STOPPED, executor=EXECUTOR)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+
+    kinds = [m.kind for m in await queue.poll(executor=EXECUTOR)]
+    assert S.MSG_STOP in kinds
+    assert S.MSG_RESUME in kinds
+
+
 async def test_stop_queued_notifies_client_without_executor(queue):
     job = await submit(queue)
     await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
