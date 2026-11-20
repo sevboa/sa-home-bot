@@ -39,3 +39,16 @@ XHTTP прячет долгий туннель за отдельными HTTP-з
 
 ## Ограничение
 У XHTTP поле `flow` пустое: `xtls-rprx-vision` с XHTTP не работает.
+
+## Ссылка
+При выдаче Reality-устройства (2026-11-20) ответ содержит `xhttp_share_url`, если задана
+секция `[vpn.reality.xhttp]`: ссылка `vless://…?…&type=xhttp&path=<закодированный
+path>&mode=<mode>#<метка устройства + " · XHTTP">` на вход XHTTP, параметр `flow` не
+выводится (пустой). Ссылку понимают xray-клиенты (v2RayTun, Happ) и её же разбирает
+`parse_vless_url` (`type` по умолчанию `tcp`, `path` раскодируется, `mode` по умолчанию
+пустой, `flow` при `type=xhttp` по умолчанию пустой). Параметры собираются в
+`RealityParams.xhttp_from_config` (port/sni из секции, `network="xhttp"`, path/mode из
+секции), выдача — `peers.py::_reality_artifacts` (и для обычных чатов, и для пробника),
+sing-box конфиги XHTTP не поддерживают и на такие параметры бросают
+`ValueError("sing-box не поддерживает XHTTP")`. Без секции ответ и все ссылки прежние
+байт в байт.

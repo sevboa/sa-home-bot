@@ -452,6 +452,9 @@ def test_reality_artifacts_regular_chat_with_alt_uses_alt_for_share_url():
         def _reality_alt_params(self):
             return RealityParams.alt_from_config(self._reality_cfg)
 
+        def _reality_xhttp_params(self):
+            return None
+
     mixin = FakeMixin()
     artifacts = mixin._reality_artifacts("uuid-nl", "📱 iPhone", chat_id=123)
     assert "198.51.100.1:2083" in artifacts["share_url"]
@@ -481,6 +484,9 @@ def test_reality_artifacts_probe_chat_with_alt_uses_original_for_share_url():
         def _reality_alt_params(self):
             return RealityParams.alt_from_config(self._reality_cfg)
 
+        def _reality_xhttp_params(self):
+            return None
+
     mixin = FakeMixin()
     artifacts = mixin._reality_artifacts("uuid-nl", "📱 iPhone", chat_id=PROBE_CHAT_ID)
     assert "198.51.100.1:8443" in artifacts["share_url"]
@@ -508,6 +514,9 @@ def test_reality_artifacts_without_alt_uses_original_and_no_alt_share_url():
 
         def _reality_alt_params(self):
             return RealityParams.alt_from_config(self._reality_cfg)
+
+        def _reality_xhttp_params(self):
+            return None
 
     mixin = FakeMixin()
     artifacts = mixin._reality_artifacts("uuid-nl", "📱 iPhone", chat_id=123)

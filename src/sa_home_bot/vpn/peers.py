@@ -274,6 +274,11 @@ class PeersMixin:
         if alt is not None:
             alt_share_url = render_vless_url(alt, client_uuid, profile_label)
             result["alt_share_url"] = alt_share_url
+        xhttp = self._reality_xhttp_params()
+        if xhttp is not None:
+            result["xhttp_share_url"] = render_vless_url(
+                xhttp, client_uuid, profile_label + " · XHTTP"
+            )
         return result
 
     async def _issue_locked(

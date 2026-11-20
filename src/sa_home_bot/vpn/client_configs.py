@@ -64,5 +64,9 @@ class ClientConfigsMixin:
         assert self._reality_cfg is not None
         return RealityParams.alt_from_config(self._reality_cfg)
 
+    def _reality_xhttp_params(self) -> RealityParams | None:
+        assert self._reality_cfg is not None
+        return RealityParams.xhttp_from_config(self._reality_cfg)
+
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id
