@@ -7,7 +7,7 @@ from typing import Any
 from sa_home_bot.devlab import protocol
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class ModelSummary:
     model: str
     jobs: int
