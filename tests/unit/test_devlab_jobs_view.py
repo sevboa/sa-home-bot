@@ -342,7 +342,8 @@ def test_render_card_includes_all_fields() -> None:
     job[protocol.FIELD_DEPS] = [{"id": "job-5", "status": protocol.STATUS_RUNNING}]
     job[protocol.FIELD_PARAMS][protocol.PARAM_FALLBACK] = "gpt-4o-mini"
     job[protocol.FIELD_PARAMS][protocol.PARAM_ORIGINAL_MODEL] = "gpt-5"
-    job[protocol.FIELD_PARAMS][protocol.PARAM_DEPENDS_ON] = "base/main"
+    job["base_branch"] = "base/main"
+    job[protocol.FIELD_PARAMS][protocol.PARAM_DEPENDS_ON] = ["job-5"]
     msg, _ = render_card(job, 0, NOW)
 
     assert "job-1" in msg.html
