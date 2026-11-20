@@ -74,3 +74,4 @@ sing-box конфиги XHTTP не поддерживают и на такие �
 /24 вмещает индексы 0..63, новых транспортов в эту раскладку больше не добавить
 без смены схемы. Конфиг пробника (`probe_client_config.py`) при
 `network="xhttp"` выводит `xhttpSettings` с `path` и `mode`, `flow` пустой.
+- `deploy/setup-reality-server.sh` при повторном запуске сохраняет вход `reality-xhttp` (как и `reality-alt`).
