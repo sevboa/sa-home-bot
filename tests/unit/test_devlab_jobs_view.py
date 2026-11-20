@@ -9,6 +9,7 @@ import pytest
 
 from sa_home_bot.bot import ai_lines
 from sa_home_bot.bot.devlab_jobs_view import (
+    CARD_TIME_FORMAT,
     CB_JOBS,
     CODE_ACT_RELEASE,
     CODE_ACT_RESUME,
@@ -31,6 +32,7 @@ from sa_home_bot.bot.devlab_jobs_view import (
     render_page,
 )
 from sa_home_bot.devlab import protocol
+from sa_home_bot.utils.timefmt import format_local
 
 NOW = datetime(2026, 11, 1, 12, 5, 0, tzinfo=UTC)
 
@@ -49,13 +51,13 @@ def _base_job(
         protocol.FIELD_KIND: kind,
         protocol.FIELD_STATUS: status,
         protocol.FIELD_TITLE: title,
-        protocol.PAYLOAD_MODEL: model,
+        protocol.FIELD_MODEL: model,
         protocol.FIELD_PARAMS: {
             protocol.PARAM_PURPOSE: purpose,
         },
         "project": "proj",
-        "created": "2026-11-01T12:00:00",
-        "started": "2026-11-01T12:01:00",
+        "created": "2026-11-01T12:00:00+00:00",
+        "started": "2026-11-01T12:01:00+00:00",
         "executor": "exec-1",
         protocol.PAYLOAD_TOKENS: 1000,
     }
@@ -355,7 +357,9 @@ def test_render_card_includes_all_fields() -> None:
     assert "Идёт 4м" in msg.html
     assert "Запасная модель: gpt-4o-mini" in msg.html
     assert "Взята вместо: gpt-5" in msg.html
-    assert "Создано / начато: 2026-11-01 12:00:00 / 2026-11-01 12:01:00" in msg.html
+    created = format_local("2026-11-01T12:00:00+00:00", CARD_TIME_FORMAT)
+    started = format_local("2026-11-01T12:01:00+00:00", CARD_TIME_FORMAT)
+    assert f"Создано / начато: {created} / {started}" in msg.html
     assert "1000" in msg.html
     assert "Последний шаг (2): Step 2 done" in msg.html
     assert "Please confirm?" in msg.html

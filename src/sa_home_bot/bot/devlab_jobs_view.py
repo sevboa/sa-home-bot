@@ -12,7 +12,7 @@ from sa_home_bot.bot.ui.callback_data import pack
 from sa_home_bot.bot.ui.keyboards import button, markup, refresh_row
 from sa_home_bot.devlab import protocol
 from sa_home_bot.utils.text import clip
-from sa_home_bot.utils.timefmt import format_dhms
+from sa_home_bot.utils.timefmt import format_dhms, format_local
 
 CB_JOBS = "dj"
 CODE_PAGE = "p"
@@ -27,6 +27,7 @@ SMALL_PAGE_SIZE = 10
 TEXT_LIMIT = 4096
 TITLE_CHARS = 60
 QUESTION_CHARS = 1500
+CARD_TIME_FORMAT = "%d.%m %H:%M"
 STATUS_ICONS = {
     protocol.STATUS_RUNNING: "🟢",
     protocol.STATUS_WAITING_OWNER: "❓",
@@ -128,7 +129,7 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     jtype = job_type(job)
     kind = job.get(protocol.FIELD_KIND)
     params = job.get(protocol.FIELD_PARAMS) or {}
-    model = job.get(protocol.PAYLOAD_MODEL, "")
+    model = job.get(protocol.FIELD_MODEL, "")
     if kind == protocol.JOB_KIND_TEST:
         model = params.get(protocol.FIELD_REF, model)
     title = clip(str(job.get(protocol.FIELD_TITLE, "")), TITLE_CHARS)
@@ -228,11 +229,7 @@ def render_page(
 def _format_dt(value: str | None) -> str:
     if not value:
         return "—"
-    try:
-        dt = datetime.fromisoformat(value)
-        return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return str(value)
+    return format_local(value, CARD_TIME_FORMAT, tolerant=True)
 
 
 def _card_action_row(
@@ -283,7 +280,7 @@ def render_card(
     project = job.get("project") or ""
     title = job.get(protocol.FIELD_TITLE) or ""
     params = job.get(protocol.FIELD_PARAMS) or {}
-    model = job.get(protocol.PAYLOAD_MODEL) or ""
+    model = job.get(protocol.FIELD_MODEL) or ""
     if job.get(protocol.FIELD_KIND) == protocol.JOB_KIND_TEST:
         model = params.get(protocol.FIELD_REF, model)
     created = job.get("created") or ""
