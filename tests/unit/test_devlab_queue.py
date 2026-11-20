@@ -1222,3 +1222,62 @@ async def test_resume_resets_requeue_attempts(queue):
     await queue.post_from_executor(job.id, S.MSG_FAILED, {S.PAYLOAD_TEXT: "x"})
     await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME, {})
     assert S.PARAM_ATTEMPTS not in (await queue.get_job(job.id)).params
+
+
+async def test_active_jobs_order_and_paging(queue):
+    running = await running_job(queue)
+    waiting = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(waiting.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
+    done = await submit(queue)
+    await queue.claim(EXECUTOR, [MODEL])
+    await queue.post_from_executor(done.id, S.MSG_DONE)
+    fix = await submit(queue, purpose=S.PURPOSE_FIX)
+    dev = await submit(queue, priority=5)
+    bench = await submit(queue, purpose=S.PURPOSE_BENCH)
+    jobs, total = await queue.active_jobs(0, 10)
+    assert total == 5
+    assert [j.id for j in jobs] == [running.id, waiting.id, fix.id, dev.id, bench.id]
+    page, total = await queue.active_jobs(2, 2)
+    assert [j.id for j in page] == [fix.id, dev.id]
+    assert total == 5
+
+
+async def test_step_stats_empty_list(queue):
+    assert await queue.step_stats([]) == {}
+
+
+async def test_step_stats_job_without_steps_absent(queue):
+    job = await submit(queue)
+    stats = await queue.step_stats([job.id])
+    assert stats == {}
+
+
+async def test_step_stats_two_steps_returns_count_and_last_text(queue):
+    job = await running_job(queue)
+    await queue.post_from_executor(job.id, S.MSG_STEP_DONE, {S.PAYLOAD_TEXT: "первый шаг"})
+    await queue.post_from_executor(job.id, S.MSG_STEP_DONE, {S.PAYLOAD_TEXT: "второй шаг"})
+    stats = await queue.step_stats([job.id])
+    assert stats == {job.id: (2, "второй шаг")}
+
+
+async def test_step_stats_multiple_jobs(queue):
+    job1 = await running_job(queue)
+    await queue.post_from_executor(job1.id, S.MSG_STEP_DONE, {S.PAYLOAD_TEXT: "шаг 1"})
+    job2 = await running_job(queue)
+    await queue.post_from_executor(job2.id, S.MSG_STEP_DONE, {S.PAYLOAD_TEXT: "шаг 2"})
+    await queue.post_from_executor(job2.id, S.MSG_STEP_DONE, {S.PAYLOAD_TEXT: "шаг 3"})
+    job3 = await submit(queue)
+    stats = await queue.step_stats([job1.id, job2.id, job3.id])
+    assert stats == {job1.id: (1, "шаг 1"), job2.id: (2, "шаг 3")}
+
+
+async def test_job_statuses_empty_list(queue):
+    assert await queue.job_statuses([]) == {}
+
+
+async def test_job_statuses_returns_status_map(queue):
+    job1 = await submit(queue)
+    job2 = await submit(queue)
+    statuses = await queue.job_statuses([job1.id, job2.id, "nope"])
+    assert statuses == {job1.id: S.STATUS_QUEUED, job2.id: S.STATUS_QUEUED}

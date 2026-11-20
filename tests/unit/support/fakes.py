@@ -236,9 +236,12 @@ class FakeMessage:
     bot: FakeBot = field(default_factory=FakeBot)
     answers: list[str] = field(default_factory=list)
     answer_markups: list[object] = field(default_factory=list)
+    rich_answers: list[tuple] = field(default_factory=list)
     edits: list[str] = field(default_factory=list)
     edit_keyboards: list[object] = field(default_factory=list)
     reply_markup_edits: list[object] = field(default_factory=list)
+    edit_calls: list[tuple[tuple, dict]] = field(default_factory=list)
+    document_answers: list[tuple] = field(default_factory=list)
 
     @property
     def chat(self) -> FakeChat:
@@ -253,14 +256,31 @@ class FakeMessage:
         self.answer_markups.append(reply_markup)
         return FakeSentMessage(message_id=len(self.answers))
 
+    async def answer_rich(self, rich_message, reply_markup=None, **_options):
+        self.rich_answers.append((rich_message, reply_markup, _options))
+        self.edits.append(rich_message.html if hasattr(rich_message, "html") else str(rich_message))
+        self.edit_keyboards.append(reply_markup)
+        return FakeSentMessage(message_id=len(self.rich_answers) + len(self.answers))
+
     reply = answer
 
-    async def edit_text(self, text, reply_markup=None, **_options):
-        self.edits.append(text)
+    async def edit_text(self, text=None, reply_markup=None, rich_message=None, **_options):
+        if rich_message is not None:
+            self.edit_calls.append(((rich_message,), {"reply_markup": reply_markup, **_options}))
+            self.edits.append(
+                rich_message.html if hasattr(rich_message, "html") else str(rich_message)
+            )
+        else:
+            self.edits.append(text or "")
         self.edit_keyboards.append(reply_markup)
 
     async def edit_reply_markup(self, reply_markup=None):
         self.reply_markup_edits.append(reply_markup)
+
+    async def answer_document(self, document, caption=None, **_options):
+        self.document_answers.append((document, caption))
+        msg_id = len(self.document_answers) + len(self.answers) + len(self.rich_answers)
+        return FakeSentMessage(message_id=msg_id)
 
 
 class FakeCallback:

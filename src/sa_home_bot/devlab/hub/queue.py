@@ -25,6 +25,14 @@ READY_SQL = (
     "JOIN jobs dep ON dep.id = d.value WHERE dep.status != ?)"
 )
 
+QUEUE_ORDER_SQL = (
+    "(kind = ?) DESC, "
+    "CASE json_extract(params, '$.purpose') "
+    "WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END ASC, "
+    "priority DESC, seq"
+)
+QUEUE_ORDER_ARGS = (protocol.JOB_KIND_TEST, protocol.PURPOSE_FIX, protocol.PURPOSE_BENCH)
+
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 BRANCH_TAIL_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 JOB_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -504,6 +512,50 @@ class HubQueue:
         row = await cur.fetchone()
         return _message(row) if row else None
 
+    async def step_stats(self, job_ids: Collection[str]) -> dict[str, tuple[int, str]]:
+        if not job_ids:
+            return {}
+        placeholders = _in(job_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT job_id, COUNT(*) as cnt, MAX(seq) as max_seq "
+            f"FROM messages WHERE job_id IN ({placeholders}) AND direction = ? AND kind = ? "
+            f"GROUP BY job_id",
+            (*job_ids, protocol.DIRECTION_TO_CLIENT, protocol.MSG_STEP_DONE),
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            return {}
+        job_ids_with_steps = [row["job_id"] for row in rows]
+        placeholders2 = _in(job_ids_with_steps)
+        cur = await self._db.conn.execute(
+            f"SELECT job_id, payload FROM messages "
+            f"WHERE job_id IN ({placeholders2}) AND direction = ? AND kind = ? "
+            f"AND seq IN (SELECT MAX(seq) FROM messages WHERE job_id IN ({placeholders2}) "
+            f"AND direction = ? AND kind = ? GROUP BY job_id)",
+            (
+                *job_ids_with_steps,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_STEP_DONE,
+                *job_ids_with_steps,
+                protocol.DIRECTION_TO_CLIENT,
+                protocol.MSG_STEP_DONE,
+            ),
+        )
+        last_steps = {
+            row["job_id"]: json.loads(row["payload"]).get(protocol.PAYLOAD_TEXT, "")
+            for row in await cur.fetchall()
+        }
+        return {row["job_id"]: (row["cnt"], last_steps.get(row["job_id"], "")) for row in rows}
+
+    async def job_statuses(self, job_ids: Collection[str]) -> dict[str, str]:
+        if not job_ids:
+            return {}
+        placeholders = _in(job_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT id, status FROM jobs WHERE id IN ({placeholders})", tuple(job_ids)
+        )
+        return {row["id"]: row["status"] for row in await cur.fetchall()}
+
     async def get_job(self, job_id: str, client: str | None = None) -> Job:
         job = await self._load(self._db.conn, job_id)
         if client is not None and job.client != client:
@@ -526,6 +578,33 @@ class HubQueue:
             f"SELECT {JOB_COLUMNS} FROM jobs{clause} ORDER BY seq", args
         )
         return [_job(row) for row in await cur.fetchall()]
+
+    async def active_jobs(self, offset: int, limit: int) -> tuple[list[Job], int]:
+        where = f"WHERE status IN ({_in(protocol.ACTIVE_STATUSES)}, ?)"
+        order = (
+            f" ORDER BY CASE status WHEN ? THEN 0 WHEN ? THEN 0 ELSE 1 END,"
+            f" CASE WHEN status IN ({_in(protocol.ACTIVE_STATUSES)}) THEN started END,"
+            f" {QUEUE_ORDER_SQL}"
+        )
+        cur = await self._db.conn.execute(
+            f"SELECT {JOB_COLUMNS} FROM jobs {where}{order} LIMIT ? OFFSET ?",
+            (
+                *protocol.ACTIVE_STATUSES,
+                protocol.STATUS_QUEUED,
+                *protocol.ACTIVE_STATUSES,
+                *protocol.ACTIVE_STATUSES,
+                *QUEUE_ORDER_ARGS,
+                limit,
+                offset,
+            ),
+        )
+        jobs = [_job(row) for row in await cur.fetchall()]
+        cur = await self._db.conn.execute(
+            f"SELECT COUNT(*) FROM jobs {where}",
+            (*protocol.ACTIVE_STATUSES, protocol.STATUS_QUEUED),
+        )
+        row = await cur.fetchone()
+        return jobs, row[0]
 
     async def claim(
         self,
@@ -568,16 +647,11 @@ class HubQueue:
             cur = await conn.execute(
                 f"SELECT {JOB_COLUMNS} FROM jobs WHERE status = ? AND "
                 f"({' OR '.join(fits)}) AND {READY_SQL}{bench}"
-                " ORDER BY (kind = ?) DESC, "
-                "CASE json_extract(params, '$.purpose') "
-                "WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END ASC, "
-                "priority DESC, seq LIMIT 1",
+                f" ORDER BY {QUEUE_ORDER_SQL} LIMIT 1",
                 (
                     *args,
                     *bench_args,
-                    protocol.JOB_KIND_TEST,
-                    protocol.PURPOSE_FIX,
-                    protocol.PURPOSE_BENCH,
+                    *QUEUE_ORDER_ARGS,
                 ),
             )
             row = await cur.fetchone()

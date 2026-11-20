@@ -135,7 +135,9 @@ def test_token_actions_are_callable_by_nodectl(tmp_path):
 OWNER_ACTION_IDS = (
     protocol.ACTION_OWNER_INBOX,
     protocol.ACTION_OWNER_JOB,
+    protocol.ACTION_OWNER_TASK,
     protocol.ACTION_OWNER_POST,
+    protocol.ACTION_OWNER_JOBS,
 )
 CLIENT_A = "claude-a"
 CLIENT_B = "claude-b"
@@ -229,6 +231,20 @@ async def test_owner_job_has_title_and_last_question(owner):
         await service.run_command(protocol.ACTION_OWNER_JOB, {"id": "nope"})
 
 
+async def test_owner_task_returns_full_text(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(
+        job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: "?"}
+    )
+    result = await service.run_command(protocol.ACTION_OWNER_TASK, {"id": job.id})
+    assert result[protocol.FIELD_ID] == job.id
+    assert result[protocol.FIELD_TITLE] == "Заголовок"
+    assert result[protocol.FIELD_TASK] == "# Заголовок\nтело"
+    with pytest.raises(ProtoError):
+        await service.run_command(protocol.ACTION_OWNER_TASK, {"id": "nope"})
+
+
 async def test_owner_post_answers_for_the_job_client(owner):
     service, queue, jobs = owner
     job = jobs[CLIENT_B]
@@ -290,3 +306,64 @@ async def test_owner_inbox_limit_is_capped(owner, monkeypatch):
         await queue.post_from_executor(jobs[CLIENT_A].id, protocol.MSG_STEP_DONE)
     result = await service.run_command(protocol.ACTION_OWNER_INBOX, {"since": 0, "limit": 1000})
     assert len(result["messages"]) == 2
+
+
+async def test_owner_jobs_lists_active_with_offset_and_total(owner):
+    service, queue, jobs = owner
+    result = await service.run_command(protocol.ACTION_OWNER_JOBS, {})
+    assert [j["client"] for j in result["jobs"]] == [CLIENT_A, CLIENT_B]
+    assert result["total"] == 2
+    assert result["offset"] == 0
+    page = await service.run_command(protocol.ACTION_OWNER_JOBS, {"offset": 1, "limit": 1})
+    assert [j["client"] for j in page["jobs"]] == [CLIENT_B]
+    assert page["total"] == 2
+    with pytest.raises(ProtoError):
+        await service.run_command(protocol.ACTION_OWNER_JOBS, {"limit": 0})
+
+
+async def test_owner_job_and_jobs_include_steps_last_step_and_deps(owner):
+    service, queue, jobs = owner
+    job_a = jobs[CLIENT_A]
+    jobs[CLIENT_B]
+    dep = await queue.submit(
+        CLIENT_A, "demo", MODEL, "# dep\ndep task"
+    )
+    job_with_deps = await queue.submit(
+        CLIENT_A, "demo", MODEL, "# main\nmain task", depends_on=[dep.id]
+    )
+    claimed_dep = await queue.claim("mycraft-1", [MODEL])
+    assert claimed_dep.id == dep.id
+    await queue.post_from_executor(
+        dep.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: "первый шаг"}
+    )
+    await queue.post_from_executor(
+        dep.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: "второй шаг"}
+    )
+    view_dep = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": dep.id})
+    assert view_dep[protocol.FIELD_STEPS] == 2
+    assert view_dep[protocol.FIELD_LAST_STEP] == "второй шаг"
+    assert view_dep[protocol.FIELD_DEPS] == []
+    view_job_with_deps = await service.run_command(
+        protocol.ACTION_OWNER_JOB, {"id": job_with_deps.id}
+    )
+    assert view_job_with_deps[protocol.FIELD_STEPS] == 0
+    assert view_job_with_deps[protocol.FIELD_LAST_STEP] == ""
+    assert view_job_with_deps[protocol.FIELD_DEPS] == [
+        {protocol.FIELD_ID: dep.id, protocol.FIELD_STATUS: protocol.STATUS_RUNNING}
+    ]
+    view_jobs = await service.run_command(protocol.ACTION_OWNER_JOBS, {})
+    job_map = {j[protocol.FIELD_ID]: j for j in view_jobs[protocol.FIELD_JOBS]}
+    dep_info = job_map[dep.id]
+    assert dep_info[protocol.FIELD_STEPS] == 2
+    assert dep_info[protocol.FIELD_LAST_STEP] == "второй шаг"
+    assert dep_info[protocol.FIELD_DEPS] == []
+    job_with_deps_info = job_map[job_with_deps.id]
+    assert job_with_deps_info[protocol.FIELD_STEPS] == 0
+    assert job_with_deps_info[protocol.FIELD_LAST_STEP] == ""
+    assert job_with_deps_info[protocol.FIELD_DEPS] == [
+        {protocol.FIELD_ID: dep.id, protocol.FIELD_STATUS: protocol.STATUS_RUNNING}
+    ]
+    job_a_info = job_map[job_a.id]
+    assert job_a_info[protocol.FIELD_STEPS] == 0
+    assert job_a_info[protocol.FIELD_LAST_STEP] == ""
+    assert job_a_info[protocol.FIELD_DEPS] == []

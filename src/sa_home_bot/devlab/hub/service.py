@@ -24,6 +24,9 @@ from sa_home_bot.utils.text import clip
 
 TITLE_MAX_CHARS = 120
 OWNER_INBOX_MAX_LIMIT = 200
+OWNER_JOBS_MAX_LIMIT = 50
+OWNER_JOBS_DEFAULT_LIMIT = 20
+LAST_STEP_CHARS = 200
 
 NAME_PARAM = ActionParam(name="name", title="Имя токена")
 TOKEN_ACTIONS = (
@@ -56,6 +59,11 @@ OWNER_ACTIONS = (
         params=(ActionParam(name=protocol.FIELD_ID, title="Номер задания"),),
     ),
     ActionSpec(
+        id=protocol.ACTION_OWNER_TASK,
+        title="Текст задачи (владелец)",
+        params=(ActionParam(name=protocol.FIELD_ID, title="Номер задания"),),
+    ),
+    ActionSpec(
         id=protocol.ACTION_OWNER_POST,
         title="Сообщение за клиента задания (владелец)",
         params=(
@@ -63,6 +71,14 @@ OWNER_ACTIONS = (
             ActionParam(name=protocol.FIELD_KIND, title="Вид", choices=protocol.CLIENT_MESSAGES),
             ActionParam(name=protocol.PAYLOAD_TEXT, title="Текст", required=False),
             ActionParam(name=protocol.PAYLOAD_MODEL, title="Модель", required=False),
+        ),
+    ),
+    ActionSpec(
+        id=protocol.ACTION_OWNER_JOBS,
+        title="Активные задания (владелец)",
+        params=(
+            ActionParam(name=protocol.FIELD_OFFSET, title="Смещение", required=False),
+            ActionParam(name=protocol.FIELD_LIMIT, title="Сколько заданий", required=False),
         ),
     ),
 )
@@ -134,12 +150,44 @@ class HubService:
             protocol.FIELD_CURSOR: pairs[-1][0].seq if pairs else since,
         }
 
+    async def _owner_views(self, jobs: list[Job]) -> list[dict[str, Any]]:
+        queue = self._store.queue
+        job_ids = [job.id for job in jobs]
+        step_stats = await queue.step_stats(job_ids) if job_ids else {}
+        dep_ids_all: list[str] = []
+        for job in jobs:
+            dep_ids_all.extend(job.params.get(protocol.PARAM_DEPENDS_ON, []))
+        dep_statuses = await queue.job_statuses(dep_ids_all) if dep_ids_all else {}
+        views: list[dict[str, Any]] = []
+        for job in jobs:
+            view = owner_job_view(job)
+            cnt, last = step_stats.get(job.id, (0, ""))
+            view[protocol.FIELD_STEPS] = cnt
+            view[protocol.FIELD_LAST_STEP] = clip(last, LAST_STEP_CHARS) if last else ""
+            dep_ids = job.params.get(protocol.PARAM_DEPENDS_ON, [])
+            view[protocol.FIELD_DEPS] = [
+                {protocol.FIELD_ID: dep_id, protocol.FIELD_STATUS: dep_statuses.get(dep_id, "")}
+                for dep_id in dep_ids
+            ]
+            views.append(view)
+        return views
+
     async def _owner_job(self, args: dict[str, Any]) -> dict[str, Any]:
         queue = self._store.queue
         job = await queue.get_job(str(args.get(protocol.FIELD_ID, "")))
         question = await queue.last_message(job.id, protocol.MSG_QUESTION)
         text = question.payload.get(protocol.PAYLOAD_TEXT, "") if question else ""
-        return {**owner_job_view(job), protocol.FIELD_QUESTION: text}
+        view = (await self._owner_views([job]))[0]
+        return {**view, protocol.FIELD_QUESTION: text}
+
+    async def _owner_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        queue = self._store.queue
+        job = await queue.get_job(str(args.get(protocol.FIELD_ID, "")))
+        return {
+            protocol.FIELD_ID: job.id,
+            protocol.FIELD_TITLE: task_title(job.task),
+            protocol.FIELD_TASK: job.task,
+        }
 
     async def _owner_post(self, args: dict[str, Any]) -> dict[str, Any]:
         queue = self._store.queue
@@ -157,13 +205,33 @@ class HubService:
         after = await queue.get_job(job.id)
         return {protocol.FIELD_SEQ: message.seq, protocol.FIELD_STATUS: after.status}
 
+    async def _owner_jobs(self, args: dict[str, Any]) -> dict[str, Any]:
+        queue = self._store.queue
+        offset = _int_arg(args, protocol.FIELD_OFFSET, 0)
+        limit = _int_arg(args, protocol.FIELD_LIMIT, OWNER_JOBS_DEFAULT_LIMIT)
+        if offset < 0:
+            raise HubError("offset не меньше 0")
+        if limit < 1:
+            raise HubError("limit не меньше 1")
+        jobs, total = await queue.active_jobs(offset, min(limit, OWNER_JOBS_MAX_LIMIT))
+        enriched = await self._owner_views(jobs)
+        return {
+            protocol.FIELD_JOBS: enriched,
+            protocol.FIELD_TOTAL: total,
+            protocol.FIELD_OFFSET: offset,
+        }
+
     async def _dispatch(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == protocol.ACTION_OWNER_INBOX:
             return await self._owner_inbox(args)
         if action == protocol.ACTION_OWNER_JOB:
             return await self._owner_job(args)
+        if action == protocol.ACTION_OWNER_TASK:
+            return await self._owner_task(args)
         if action == protocol.ACTION_OWNER_POST:
             return await self._owner_post(args)
+        if action == protocol.ACTION_OWNER_JOBS:
+            return await self._owner_jobs(args)
         name = str(args.get("name", ""))
         if action == protocol.ACTION_ISSUE_TOKEN:
             role = str(args.get("role", ""))
