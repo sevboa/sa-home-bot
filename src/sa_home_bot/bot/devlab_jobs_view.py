@@ -287,7 +287,7 @@ def render_card(
     started = job.get("started") or ""
     tokens = job.get(protocol.PAYLOAD_TOKENS) or 0
     question = job.get(protocol.FIELD_QUESTION)
-    base_branch = params.get(protocol.PARAM_DEPENDS_ON, "")
+    base_branch = job.get("base_branch") or ""
     steps = job.get(protocol.FIELD_STEPS, 0)
     last_step = job.get(protocol.FIELD_LAST_STEP, "")
     fallback = params.get(protocol.PARAM_FALLBACK)
