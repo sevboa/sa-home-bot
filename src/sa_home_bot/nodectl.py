@@ -119,7 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
     p.add_argument(
         "devlab_command",
-        choices=("connect", "snapshot", "base", "fetch", "drop", "wait", "watch"),
+        choices=("connect", "snapshot", "base", "fetch", "drop", "wait", "watch", "reviews"),
         help="connect: получить токен, подключить MCP, поставить скилы; "
         "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test; "
         "base <имя>: запушить коммит (--ref, по умолчанию HEAD) в base/<имя>; "
@@ -127,7 +127,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "drop <ветка>...: удалить agent/* и base/* на хабе; "
         "wait <id>: дождаться done|failed|stopped|waiting_owner, последняя строка — JSON; "
         "watch: печатать новые сообщения ящика по строке JSON, до --timeout; "
-        "тайм-аут — код 124",
+        "тайм-аут — код 124; "
+        "reviews: сводка журнала приёмки по моделям",
     )
     p.add_argument("devlab_names", nargs="*", help="base/fetch/drop: имена веток или id")
     p.add_argument("--ref", default="HEAD", help="base: что пушить (по умолчанию HEAD)")
@@ -156,6 +157,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="watch: виды событий через запятую; по умолчанию все, кроме started и step_done",
     )
+    p.add_argument("--model", default="", help="reviews: фильтр по имени модели")
+    p.add_argument("--since", default="", help="reviews: начальная дата ISO (с какого дня)")
     p = sub.add_parser(
         "call", help="вызвать любое умение любой службы роя (то же, что делает Альфред)"
     )
@@ -562,6 +565,12 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 timeout=args.timeout,
                 kinds=kinds,
+            )
+        if args.devlab_command == "reviews":
+            return devlab_snapshot.reviews_command(
+                settings,
+                model=args.model,
+                since=args.since,
             )
         if args.devlab_command in ("base", "fetch", "drop"):
             return devlab_snapshot.branch_command(

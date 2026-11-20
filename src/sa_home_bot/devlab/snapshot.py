@@ -18,6 +18,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.connect import TOKEN_PATH, hub_url
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, SpecError, parse_spec
+from sa_home_bot.devlab.reviews import format_summary, summarize
 
 GIT_TIMEOUT_S = 300
 BRANCH_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -478,3 +479,36 @@ def watch_command(
         if remaining <= 0:
             return 0
         sleep(min(interval, remaining))
+
+
+def reviews_command(
+    settings: Settings,
+    *,
+    model: str = "",
+    since: str = "",
+    token_path: str = TOKEN_PATH,
+    call: Callable[[str, str, str, dict[str, Any]], dict[str, Any]] = call_tool,
+) -> int:
+    try:
+        token = read_token(token_path)
+        url = hub_url(settings)
+    except SnapshotError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    arguments: dict[str, Any] = {}
+    if model:
+        arguments["model"] = model
+    if since:
+        arguments["since"] = since
+    try:
+        reply = call(url, token, protocol.TOOL_REVIEWS, arguments)
+    except HubUnavailable as exc:
+        print(f"Ошибка: хаб недоступен: {exc}", file=sys.stderr)
+        return 1
+    except SnapshotError as exc:
+        print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
+        return 1
+    reviews = reply.get("reviews") or []
+    summary = summarize(reviews)
+    print(format_summary(summary))
+    return 0
