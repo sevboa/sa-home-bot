@@ -49,8 +49,8 @@ def _base_job(
         protocol.FIELD_KIND: kind,
         protocol.FIELD_STATUS: status,
         protocol.FIELD_TITLE: title,
-        protocol.FIELD_PAYLOAD: {
-            protocol.PAYLOAD_MODEL: model,
+        protocol.PAYLOAD_MODEL: model,
+        protocol.FIELD_PARAMS: {
             protocol.PARAM_PURPOSE: purpose,
         },
         "project": "proj",
@@ -60,7 +60,7 @@ def _base_job(
         protocol.PAYLOAD_TOKENS: 1000,
     }
     if kind == protocol.JOB_KIND_TEST and ref:
-        job[protocol.FIELD_PAYLOAD][protocol.FIELD_REF] = ref
+        job[protocol.FIELD_PARAMS][protocol.FIELD_REF] = ref
     return job
 
 
@@ -180,14 +180,14 @@ def test_job_line_dependency_all_done() -> None:
 
 def test_job_line_role_executor_hidden() -> None:
     job = _base_job(1)
-    job[protocol.FIELD_PAYLOAD][protocol.PARAM_PROFILE] = protocol.DEFAULT_PROFILE
+    job[protocol.FIELD_PARAMS][protocol.PARAM_PROFILE] = protocol.DEFAULT_PROFILE
     line = job_line(1, job, 0, NOW)
     assert "executor" not in line
 
 
 def test_job_line_role_docs_visible() -> None:
     job = _base_job(1)
-    job[protocol.FIELD_PAYLOAD][protocol.PARAM_PROFILE] = "docs"
+    job[protocol.FIELD_PARAMS][protocol.PARAM_PROFILE] = "docs"
     line = job_line(1, job, 0, NOW)
     assert "docs" in line
 
@@ -254,14 +254,14 @@ def test_page_html_offset_pagination() -> None:
 def test_page_html_long_titles_fallback_to_small_page() -> None:
     long_title = "x" * 300
     jobs = [_base_job(i, title=long_title) for i in range(50)]
-    msg, markup_kb, size = render_page(jobs, 0, len(jobs), NOW)
+    msg, markup_kb, size = render_page(jobs[:PAGE_SIZE], 0, len(jobs), NOW)
     assert size == PAGE_SIZE
     assert len(msg.html) <= TEXT_LIMIT
 
 
 def test_render_page_size_20_with_nav() -> None:
     jobs = [_base_job(i) for i in range(25)]
-    msg, markup_kb, size = render_page(jobs, 0, 25, NOW)
+    msg, markup_kb, size = render_page(jobs[:PAGE_SIZE], 0, 25, NOW)
     assert size == PAGE_SIZE
     assert isinstance(msg, type(msg))
     assert msg.html is not None
@@ -280,7 +280,9 @@ def test_render_page_size_20_with_nav() -> None:
 
 def test_render_page_offset_20_links_carry_offset() -> None:
     jobs = [_base_job(i) for i in range(25)]
-    msg, markup_kb, _ = render_page(jobs, 20, 25, NOW)
+    msg, markup_kb, _ = render_page(jobs[20:25], 20, 25, NOW)
+    for n in range(21, 26):
+        assert f"{n}." in msg.html
     link_datas = [m.group(1) for m in re.finditer(r'data="([^"]+)"', msg.html)]
     assert all(d.endswith(":20") for d in link_datas)
 
@@ -288,17 +290,23 @@ def test_render_page_offset_20_links_carry_offset() -> None:
 def test_render_page_long_titles_no_fallback() -> None:
     long_title = "x" * 500
     jobs = [_base_job(i, title=long_title) for i in range(PAGE_SIZE + 5)]
-    msg, markup_kb, size = render_page(jobs, 0, len(jobs), NOW)
+    msg, markup_kb, size = render_page(jobs[:PAGE_SIZE], 0, len(jobs), NOW)
     assert size == PAGE_SIZE
     assert len(msg.html) <= TEXT_LIMIT
     data_values = [btn.callback_data for row in markup_kb.inline_keyboard for btn in row]
     assert f"{CB_JOBS}:{CODE_PAGE}:20" in data_values
 
 
-def test_render_page_clamp_offset() -> None:
+def test_render_page_offset_20_shows_five_jobs() -> None:
     jobs = [_base_job(i) for i in range(5)]
-    msg, markup_kb, _ = render_page(jobs, 100, 5, NOW)
-    assert "стр. 1 из 1" in msg.html
+    msg, markup_kb, _ = render_page(jobs, 20, 25, NOW)
+    for n in range(21, 26):
+        assert f"{n}." in msg.html
+    assert "<p>1." not in msg.html
+    assert "<p>26." not in msg.html
+    data_values = [btn.callback_data for row in markup_kb.inline_keyboard for btn in row]
+    assert f"{CB_JOBS}:{CODE_PAGE}:20" in data_values
+    assert f"{CB_JOBS}:{CODE_PAGE}:0" in data_values
 
 
 def test_render_card_buttons_with_offset_20() -> None:
@@ -330,9 +338,9 @@ def test_render_card_includes_all_fields() -> None:
     job[protocol.FIELD_STEPS] = 2
     job[protocol.FIELD_LAST_STEP] = "Step 2 done"
     job[protocol.FIELD_DEPS] = [{"id": "job-5", "status": protocol.STATUS_RUNNING}]
-    job[protocol.FIELD_PAYLOAD][protocol.PARAM_FALLBACK] = "gpt-4o-mini"
-    job[protocol.FIELD_PAYLOAD][protocol.PARAM_ORIGINAL_MODEL] = "gpt-5"
-    job[protocol.FIELD_PAYLOAD][protocol.PARAM_DEPENDS_ON] = "base/main"
+    job[protocol.FIELD_PARAMS][protocol.PARAM_FALLBACK] = "gpt-4o-mini"
+    job[protocol.FIELD_PARAMS][protocol.PARAM_ORIGINAL_MODEL] = "gpt-5"
+    job[protocol.FIELD_PARAMS][protocol.PARAM_DEPENDS_ON] = "base/main"
     msg, _ = render_card(job, 0, NOW)
 
     assert "job-1" in msg.html

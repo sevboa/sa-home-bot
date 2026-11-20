@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -103,6 +104,31 @@ async def _hub(
 
 def _post_args(job_id: str, kind: str) -> dict[str, Any]:
     return {protocol.FIELD_ID: job_id, protocol.FIELD_KIND: kind}
+
+
+async def _show_card(
+    callback: CallbackQuery,
+    node_link: ServiceLink,
+    config: Settings,
+    job_id: str,
+    offset: int,
+    confirm_stop: bool = False,
+    answer: bool = True,
+) -> None:
+    result = await _hub(
+        node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
+    )
+    if result.reply is None:
+        if answer:
+            await callback.answer(result.error, show_alert=True)
+        return
+    job = result.reply
+    rich_msg, keyboard = render_card(
+        job, offset, now=datetime.now(UTC), confirm_stop=confirm_stop
+    )
+    await redraw_rich(callback, rich_msg, keyboard)
+    if answer:
+        await callback.answer()
 
 
 def _counts_by_status(jobs: list[dict[str, Any]]) -> dict[str, int]:
@@ -265,38 +291,14 @@ async def on_jobs_callback(
             return
         job_id = parts[2]
         offset = int_or(parts[3], 0)
-        result = await _hub(
-            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
-        )
-        if result.reply is None:
-            await callback.answer(result.error, show_alert=True)
-            return
-        job = result.reply.get(protocol.FIELD_JOB)
-        if job is None:
-            await callback.answer("Задание не найдено", show_alert=True)
-            return
-        rich_msg, keyboard = render_card(job, offset, now=datetime.now(UTC))
-        await redraw_rich(callback, rich_msg, keyboard)
+        await _show_card(callback, node_link, config, job_id, offset)
     elif code == CODE_ACT_STOP:
         if len(parts) < 4:
             await callback.answer()
             return
         job_id = parts[2]
         offset = int_or(parts[3], 0)
-        result = await _hub(
-            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
-        )
-        if result.reply is None:
-            await callback.answer(result.error, show_alert=True)
-            return
-        job = result.reply.get(protocol.FIELD_JOB)
-        if job is None:
-            await callback.answer("Задание не найдено", show_alert=True)
-            return
-        rich_msg, keyboard = render_card(
-            job, offset, now=datetime.now(UTC), confirm_stop=True
-        )
-        await redraw_rich(callback, rich_msg, keyboard)
+        await _show_card(callback, node_link, config, job_id, offset, confirm_stop=True)
     elif code in JOBS_POST_KINDS:
         if len(parts) < 4:
             await callback.answer()
@@ -316,18 +318,7 @@ async def on_jobs_callback(
             )
         )
         _kick(devlab_notifier)
-        job_result = await _hub(
-            node_link, config, protocol.ACTION_OWNER_JOB, {protocol.FIELD_ID: job_id}
-        )
-        if job_result.reply is None:
-            await callback.answer(job_result.error, show_alert=True)
-            return
-        job = job_result.reply.get(protocol.FIELD_JOB)
-        if job is None:
-            await callback.answer("Задание не найдено", show_alert=True)
-            return
-        rich_msg, keyboard = render_card(job, offset, now=datetime.now(UTC))
-        await redraw_rich(callback, rich_msg, keyboard)
+        await _show_card(callback, node_link, config, job_id, offset, answer=False)
     elif code == CODE_TASK:
         if len(parts) < 3:
             await callback.answer()
@@ -344,8 +335,9 @@ async def on_jobs_callback(
             await callback.answer("Текста задачи нет", show_alert=True)
             return
         title = result.reply.get(protocol.FIELD_TITLE, "")
-        caption = title[:1000] if title else ""
+        caption = html.escape(title[:1000]) if title else ""
         document = BufferedInputFile(task_text.encode("utf-8"), filename=f"task-{job_id}.md")
         await callback.message.answer_document(document, caption=caption)
         await callback.answer()
+        return
     await callback.answer()

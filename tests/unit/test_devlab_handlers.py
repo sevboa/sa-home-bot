@@ -52,18 +52,17 @@ def jobs_link(jobs, total, offset=0):
                 protocol.FIELD_OFFSET: offset,
             },
             protocol.ACTION_OWNER_JOB: {
-                protocol.FIELD_JOB: {
-                    protocol.FIELD_ID: "job-1",
-                    protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
-                    protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
-                    protocol.FIELD_TITLE: "Test Job",
-                    protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
-                    "project": "proj",
-                    "created": "2026-11-01T12:00:00",
-                    "started": "2026-11-01T12:01:00",
-                    "executor": "exec-1",
-                    protocol.PAYLOAD_TOKENS: 1000,
-                }
+                protocol.FIELD_ID: "job-1",
+                protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+                protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+                protocol.FIELD_TITLE: "Test Job",
+                protocol.FIELD_PARAMS: {protocol.PARAM_PURPOSE: protocol.PURPOSE_DEV},
+                protocol.PAYLOAD_MODEL: "gpt-4o",
+                "project": "proj",
+                "created": "2026-11-01T12:00:00",
+                "started": "2026-11-01T12:01:00",
+                "executor": "exec-1",
+                protocol.PAYLOAD_TOKENS: 1000,
             },
             protocol.ACTION_OWNER_TASK: {
                 protocol.FIELD_ID: "job-1",
@@ -210,7 +209,8 @@ async def test_cmd_jobs_owner_gets_rich_page():
             protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
             protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
             protocol.FIELD_TITLE: "Job 1",
-            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+            protocol.FIELD_PARAMS: {protocol.PARAM_PURPOSE: protocol.PURPOSE_DEV},
+            protocol.PAYLOAD_MODEL: "gpt-4o",
         }
     ]
     link = jobs_link(jobs, 1)
@@ -300,7 +300,8 @@ async def test_jobs_callback_page_navigation():
             protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
             protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
             protocol.FIELD_TITLE: f"Job {i}",
-            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+            protocol.FIELD_PARAMS: {protocol.PARAM_PURPOSE: protocol.PURPOSE_DEV},
+            protocol.PAYLOAD_MODEL: "gpt-4o",
         }
         for i in range(25)
     ]
@@ -312,7 +313,492 @@ async def test_jobs_callback_page_navigation():
     rich_msg = cb.message.edit_calls[0][0][0]
     assert rich_msg is not None
     assert "21." in rich_msg.html
-    assert "40." not in rich_msg.html
+    assert "25." in rich_msg.html
+    assert "<p>26." not in rich_msg.html
+    assert "<p>40." not in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:p:-20" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:p:40" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
+    assert "dj:p:0" in rich_msg.html
+    assert "dj:c:job-0:0" not in rich_msg.html
 
 
 async def test_jobs_callback_page_clamp_offset():
@@ -322,7 +808,8 @@ async def test_jobs_callback_page_clamp_offset():
             protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
             protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
             protocol.FIELD_TITLE: f"Job {i}",
-            protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
+            protocol.FIELD_PARAMS: {protocol.PARAM_PURPOSE: protocol.PURPOSE_DEV},
+            protocol.PAYLOAD_MODEL: "gpt-4o",
         }
         for i in range(5)
     ]
@@ -334,18 +821,17 @@ async def test_jobs_callback_page_clamp_offset():
                 protocol.FIELD_OFFSET: 0,
             },
             protocol.ACTION_OWNER_JOB: {
-                protocol.FIELD_JOB: {
-                    protocol.FIELD_ID: "job-1",
-                    protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
-                    protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
-                    protocol.FIELD_TITLE: "Test Job",
-                    protocol.FIELD_PAYLOAD: {protocol.PAYLOAD_MODEL: "gpt-4o"},
-                    "project": "proj",
-                    "created": "2026-11-01T12:00:00",
-                    "started": "2026-11-01T12:01:00",
-                    "executor": "exec-1",
-                    protocol.PAYLOAD_TOKENS: 1000,
-                }
+                protocol.FIELD_ID: "job-1",
+                protocol.FIELD_KIND: protocol.JOB_KIND_AGENT,
+                protocol.FIELD_STATUS: protocol.STATUS_RUNNING,
+                protocol.FIELD_TITLE: "Test Job",
+                protocol.FIELD_PARAMS: {protocol.PARAM_PURPOSE: protocol.PURPOSE_DEV},
+                protocol.PAYLOAD_MODEL: "gpt-4o",
+                "project": "proj",
+                "created": "2026-11-01T12:00:00",
+                "started": "2026-11-01T12:01:00",
+                "executor": "exec-1",
+                protocol.PAYLOAD_TOKENS: 1000,
             },
             protocol.ACTION_OWNER_POST: {protocol.FIELD_STATUS: protocol.STATUS_RUNNING},
         }

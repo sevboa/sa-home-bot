@@ -7,7 +7,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage
 
 from sa_home_bot.bot import ai_lines
-from sa_home_bot.bot.pagination import clamp_offset, nav_row
+from sa_home_bot.bot.pagination import nav_row
 from sa_home_bot.bot.ui.callback_data import pack
 from sa_home_bot.bot.ui.keyboards import button, markup, refresh_row
 from sa_home_bot.devlab import protocol
@@ -73,7 +73,7 @@ def job_type(job: dict[str, Any]) -> str:
     kind = job.get(protocol.FIELD_KIND)
     if kind == protocol.JOB_KIND_TEST:
         return "тест"
-    params = job.get(protocol.FIELD_PAYLOAD) or {}
+    params = job.get(protocol.FIELD_PARAMS) or {}
     purpose = params.get(protocol.PARAM_PURPOSE)
     return purpose or protocol.PURPOSE_DEV
 
@@ -108,13 +108,13 @@ def _first_waiting_dep(job: dict[str, Any]) -> str | None:
     if not deps:
         return None
     for dep in deps:
-        if dep.get("status") != protocol.STATUS_DONE:
-            return str(dep.get("id", ""))
+        if dep.get(protocol.FIELD_STATUS) != protocol.STATUS_DONE:
+            return str(dep.get(protocol.FIELD_ID, ""))
     return None
 
 
 def _role(job: dict[str, Any]) -> str | None:
-    params = job.get(protocol.FIELD_PAYLOAD) or {}
+    params = job.get(protocol.FIELD_PARAMS) or {}
     profile = params.get(protocol.PARAM_PROFILE)
     if profile and profile != protocol.DEFAULT_PROFILE:
         return profile
@@ -127,8 +127,8 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     icon = STATUS_ICONS.get(status, "")
     jtype = job_type(job)
     kind = job.get(protocol.FIELD_KIND)
-    params = job.get(protocol.FIELD_PAYLOAD) or {}
-    model = params.get(protocol.PAYLOAD_MODEL, "")
+    params = job.get(protocol.FIELD_PARAMS) or {}
+    model = job.get(protocol.PAYLOAD_MODEL, "")
     if kind == protocol.JOB_KIND_TEST:
         model = params.get(protocol.FIELD_REF, model)
     title = clip(str(job.get(protocol.FIELD_TITLE, "")), TITLE_CHARS)
@@ -213,17 +213,10 @@ def render_page(
     if now is None:
         now = datetime.now(UTC)
     size = PAGE_SIZE
-    page_jobs = jobs[offset : offset + size]
-    html = page_html(page_jobs, offset, total, size, now, counts)
+    html = page_html(jobs[:size], offset, total, size, now, counts)
     if len(html) > TEXT_LIMIT:
         size = SMALL_PAGE_SIZE
-        page_jobs = jobs[offset : offset + size]
-        html = page_html(page_jobs, offset, total, size, now, counts)
-    clamped_offset = clamp_offset(offset, size, total)
-    if clamped_offset != offset:
-        page_jobs = jobs[clamped_offset : clamped_offset + size]
-        html = page_html(page_jobs, clamped_offset, total, size, now, counts)
-        offset = clamped_offset
+        html = page_html(jobs[:size], offset, total, size, now, counts)
     keyboard_rows: list[list[InlineKeyboardButton]] = []
     nav = nav_row(offset, size, total, page_cb)
     if nav:
@@ -268,8 +261,8 @@ def _deps_text(job: dict[str, Any]) -> str | None:
         return None
     parts = []
     for dep in deps:
-        dep_id = dep.get("id", "")
-        dep_status = dep.get("status", "")
+        dep_id = dep.get(protocol.FIELD_ID, "")
+        dep_status = dep.get(protocol.FIELD_STATUS, "")
         if dep_id:
             parts.append(f"{dep_id} ({dep_status})")
     return ", ".join(parts) if parts else None
@@ -287,15 +280,15 @@ def render_card(
     job_id = str(job.get(protocol.FIELD_ID, ""))
     status = job.get(protocol.FIELD_STATUS, "")
     jtype = job_type(job)
-    project = job.get("project", "")
-    title = job.get(protocol.FIELD_TITLE, "")
-    params = job.get(protocol.FIELD_PAYLOAD) or {}
-    model = params.get(protocol.PAYLOAD_MODEL, "")
+    project = job.get("project") or ""
+    title = job.get(protocol.FIELD_TITLE) or ""
+    params = job.get(protocol.FIELD_PARAMS) or {}
+    model = job.get(protocol.PAYLOAD_MODEL) or ""
     if job.get(protocol.FIELD_KIND) == protocol.JOB_KIND_TEST:
         model = params.get(protocol.FIELD_REF, model)
-    created = job.get("created")
-    started = job.get("started")
-    tokens = job.get(protocol.PAYLOAD_TOKENS, 0)
+    created = job.get("created") or ""
+    started = job.get("started") or ""
+    tokens = job.get(protocol.PAYLOAD_TOKENS) or 0
     question = job.get(protocol.FIELD_QUESTION)
     base_branch = params.get(protocol.PARAM_DEPENDS_ON, "")
     steps = job.get(protocol.FIELD_STEPS, 0)
