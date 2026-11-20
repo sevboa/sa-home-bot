@@ -1322,3 +1322,31 @@ async def test_job_statuses_returns_status_map(queue):
     job2 = await submit(queue)
     statuses = await queue.job_statuses([job1.id, job2.id, "nope"])
     assert statuses == {job1.id: S.STATUS_QUEUED, job2.id: S.STATUS_QUEUED}
+
+
+async def test_slot_waiting_empty_list(queue):
+    assert await queue.slot_waiting([]) == set()
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected_waiting"),
+    [
+        ("answer_no_started", True),
+        ("answer_then_started", False),
+        ("no_answer", False),
+    ],
+    ids=["answer_no_started", "answer_then_started", "no_answer"],
+)
+async def test_slot_waiting_detects_waiting(queue, setup, expected_waiting):
+    job = await running_job(queue)
+    await queue.post_from_executor(job.id, S.MSG_STARTED)
+    if setup != "no_answer":
+        await queue.post_from_executor(job.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "?"})
+        await queue.post_from_client(CLIENT, job.id, S.MSG_ANSWER, {S.PAYLOAD_TEXT: "ans"})
+    if setup == "answer_then_started":
+        await queue.post_from_executor(job.id, S.MSG_STARTED)
+    waiting = await queue.slot_waiting([job.id])
+    if expected_waiting:
+        assert waiting == {job.id}
+    else:
+        assert waiting == set()

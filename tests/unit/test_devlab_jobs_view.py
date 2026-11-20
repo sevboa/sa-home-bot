@@ -485,3 +485,93 @@ def test_card_action_row_position_before_navigation() -> None:
     assert rows[0][0].callback_data == f"{CB_JOBS}:{CODE_TASK}:job-1"
     assert rows[1][0].callback_data == f"{CB_JOBS}:{CODE_ACT_STOP}:job-1:20"
     assert rows[2][0].callback_data == f"{CB_JOBS}:{CODE_PAGE}:20"
+
+
+def test_job_line_slot_wait_shows_pin_and_text() -> None:
+    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON, SLOT_WAIT_TEXT
+
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_SLOT_WAIT] = True
+    line = job_line(1, job, 0, NOW)
+    assert SLOT_WAIT_ICON in line
+    assert SLOT_WAIT_TEXT in line
+    assert "🟢" not in line
+    assert "шаг" not in line
+
+
+def test_job_line_slot_wait_false_shows_normal() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_SLOT_WAIT] = False
+    job[protocol.FIELD_STEPS] = 2
+    line = job_line(1, job, 0, NOW)
+    assert "🟢" in line
+    assert "шаг 2" in line
+    assert "ждёт слот" not in line
+
+
+def test_job_line_slot_wait_only_for_running() -> None:
+    job = _base_job(1, status=protocol.STATUS_WAITING_OWNER)
+    job[protocol.FIELD_SLOT_WAIT] = True
+    line = job_line(1, job, 0, NOW)
+    assert "❓" in line
+    assert "ждёт слот" not in line
+
+
+def test_render_card_slot_wait_shows_in_status_and_age() -> None:
+    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON, SLOT_WAIT_TEXT
+
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_SLOT_WAIT] = True
+    msg, _ = render_card(job, 0, NOW)
+    assert f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT}" in msg.html
+    assert f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT} Идёт" in msg.html
+    assert "running" not in msg.html
+
+
+def test_render_card_slot_wait_false_shows_normal_status() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_SLOT_WAIT] = False
+    msg, _ = render_card(job, 0, NOW)
+    assert "running" in msg.html
+    assert "Идёт" in msg.html
+    assert "ждёт слот" not in msg.html
+
+
+def test_page_html_header_includes_slot_wait_count() -> None:
+    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON
+
+    jobs = [
+        _base_job(1, status=protocol.STATUS_RUNNING),
+        _base_job(2, status=protocol.STATUS_RUNNING),
+        _base_job(3, status=protocol.STATUS_QUEUED),
+    ]
+    jobs[0][protocol.FIELD_SLOT_WAIT] = True
+    jobs[1][protocol.FIELD_SLOT_WAIT] = False
+    counts = {
+        protocol.STATUS_RUNNING: 2,
+        protocol.STATUS_WAITING_OWNER: 0,
+        protocol.STATUS_QUEUED: 1,
+    }
+    html = page_html(jobs, 0, 3, 20, NOW, counts)
+    assert "🟢2" in html
+    assert f"{SLOT_WAIT_ICON}1" in html
+    assert "⏳1" in html
+
+
+def test_page_html_header_no_slot_wait_shows_without_pin() -> None:
+    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON
+
+    jobs = [
+        _base_job(1, status=protocol.STATUS_RUNNING),
+        _base_job(2, status=protocol.STATUS_QUEUED),
+    ]
+    jobs[0][protocol.FIELD_SLOT_WAIT] = False
+    counts = {
+        protocol.STATUS_RUNNING: 1,
+        protocol.STATUS_WAITING_OWNER: 0,
+        protocol.STATUS_QUEUED: 1,
+    }
+    html = page_html(jobs, 0, 2, 20, NOW, counts)
+    assert "🟢1" in html
+    assert f"{SLOT_WAIT_ICON}" not in html
+    assert "⏳1" in html
