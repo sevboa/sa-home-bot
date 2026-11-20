@@ -27,6 +27,7 @@ from sa_home_bot.graph_memory.protocol import (
     SERVICE_NAME,
 )
 from sa_home_bot.llm.openai_chat import read_api_key
+from sa_home_bot.node.power_rule import fetch_switch_status
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ERR_UNAVAILABLE,
@@ -434,11 +435,22 @@ class GraphMemoryService:
         await self._db.conn.commit()
         log.info("graph_memory: эпизод id=%s обработан", episode_id)
 
+    async def _companion_awake(self) -> bool:
+        if not self._cfg.wake_gate_url:
+            return True
+        status = await fetch_switch_status(self._cfg.wake_gate_url)
+        if status is None:
+            return False
+        return bool((status.get("companion") or {}).get("running"))
+
     async def _ingest_loop(self) -> None:
         await self._reset_stuck_processing()
         while True:
             row = await self._next_pending()
             if row is None:
+                await asyncio.sleep(IDLE_POLL_S)
+                continue
+            if not await self._companion_awake():
                 await asyncio.sleep(IDLE_POLL_S)
                 continue
             await self._process_one(row)

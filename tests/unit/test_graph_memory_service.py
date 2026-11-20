@@ -6,6 +6,7 @@ import pytest_asyncio
 from sa_home_bot.config import GraphMemoryConfig, LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.graph_memory import service as service_module
 from sa_home_bot.graph_memory.service import (
     NO_THINKING_BODY,
     OLLAMA_API_KEY,
@@ -182,3 +183,62 @@ async def test_person_cards_empty_ids_skip_neo4j(svc):
 
 def test_person_ids_accept_single_int():
     assert GraphMemoryService._person_ids({"ids": 7136623771}) == [7136623771]
+
+
+SWITCH_URL = "http://127.0.0.1:8090/v1/switch/status"
+
+
+async def test_companion_awake_empty_url_true(svc):
+    assert svc._cfg.wake_gate_url == ""
+    assert await svc._companion_awake() is True
+
+
+async def test_companion_awake_sleeping_companion_false(svc, monkeypatch):
+    svc._cfg.wake_gate_url = SWITCH_URL
+    calls = []
+
+    async def fake_fetch(url):
+        calls.append(url)
+        return {"companion": {"running": False}}
+
+    monkeypatch.setattr(service_module, "fetch_switch_status", fake_fetch)
+    assert await svc._companion_awake() is False
+    assert calls == [SWITCH_URL]
+
+
+async def test_companion_awake_switch_unreachable_false(svc, monkeypatch):
+    svc._cfg.wake_gate_url = SWITCH_URL
+
+    async def fake_fetch(url):
+        return None
+
+    monkeypatch.setattr(service_module, "fetch_switch_status", fake_fetch)
+    assert await svc._companion_awake() is False
+
+
+async def test_companion_awake_running_companion_true(svc, monkeypatch):
+    svc._cfg.wake_gate_url = SWITCH_URL
+    async def fake_fetch(url):
+        return {"companion": {"running": True}}
+
+    monkeypatch.setattr(service_module, "fetch_switch_status", fake_fetch)
+    assert await svc._companion_awake() is True
+
+
+async def test_ingest_loop_waits_for_awake_companion(svc, monkeypatch):
+    svc._cfg.wake_gate_url = SWITCH_URL
+    async def fake_fetch(url):
+        return {"companion": {"running": False}}
+
+    monkeypatch.setattr(service_module, "fetch_switch_status", fake_fetch)
+    await svc.run_command("add_episode", {"text": "факт", "chat_id": CHAT_A})
+
+    def boom(_seconds):
+        raise RuntimeError("stop-the-loop")
+
+    monkeypatch.setattr(service_module.asyncio, "sleep", boom)
+    with pytest.raises(RuntimeError):
+        await svc._ingest_loop()
+    row = await svc._next_pending()
+    assert row is not None
+    assert row["attempts"] == 0

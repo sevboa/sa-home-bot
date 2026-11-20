@@ -252,6 +252,7 @@ class GraphMemoryConfig(BaseModel):
     embedding_model: str = "nomic-embed-text"
     ingest_timeout_s: float = 120.0
     search_timeout_s: float = 15.0
+    wake_gate_url: str = ""
 
 
 class DevlabHubConfig(BaseModel):
