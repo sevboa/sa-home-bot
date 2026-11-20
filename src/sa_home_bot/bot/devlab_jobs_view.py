@@ -192,7 +192,7 @@ def page_html(
             and job.get(protocol.FIELD_SLOT_WAIT)
         )
         if running_c or waiting_c or queued_c:
-            parts = [f"🟢{running_c}"]
+            parts = [f"🟢{running_c - slot_wait_c}"]
             if slot_wait_c:
                 parts.append(f"📌{slot_wait_c}")
             parts.append(f"❓{waiting_c}")
@@ -333,8 +333,7 @@ def render_card(
     if status in (protocol.STATUS_RUNNING, protocol.STATUS_WAITING_OWNER):
         age_sec = _age_seconds(created, started, now, status)
         if age_sec is not None:
-            prefix = f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT} " if slot_wait else ""
-            lines.append(f"<p>{prefix}Идёт {format_dhms(age_sec)}</p>")
+            lines.append(f"<p>Идёт {format_dhms(age_sec)}</p>")
     elif status == protocol.STATUS_QUEUED:
         age_sec = _age_seconds(created, started, now, status)
         if age_sec is not None:

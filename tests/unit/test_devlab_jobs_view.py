@@ -20,6 +20,8 @@ from sa_home_bot.bot.devlab_jobs_view import (
     CODE_TASK,
     PAGE_SIZE,
     QUESTION_CHARS,
+    SLOT_WAIT_ICON,
+    SLOT_WAIT_TEXT,
     TEXT_LIMIT,
     act_cb,
     card_cb,
@@ -488,8 +490,6 @@ def test_card_action_row_position_before_navigation() -> None:
 
 
 def test_job_line_slot_wait_shows_pin_and_text() -> None:
-    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON, SLOT_WAIT_TEXT
-
     job = _base_job(1, status=protocol.STATUS_RUNNING)
     job[protocol.FIELD_SLOT_WAIT] = True
     line = job_line(1, job, 0, NOW)
@@ -506,7 +506,7 @@ def test_job_line_slot_wait_false_shows_normal() -> None:
     line = job_line(1, job, 0, NOW)
     assert "🟢" in line
     assert "шаг 2" in line
-    assert "ждёт слот" not in line
+    assert SLOT_WAIT_TEXT not in line
 
 
 def test_job_line_slot_wait_only_for_running() -> None:
@@ -514,17 +514,15 @@ def test_job_line_slot_wait_only_for_running() -> None:
     job[protocol.FIELD_SLOT_WAIT] = True
     line = job_line(1, job, 0, NOW)
     assert "❓" in line
-    assert "ждёт слот" not in line
+    assert SLOT_WAIT_TEXT not in line
 
 
 def test_render_card_slot_wait_shows_in_status_and_age() -> None:
-    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON, SLOT_WAIT_TEXT
-
     job = _base_job(1, status=protocol.STATUS_RUNNING)
     job[protocol.FIELD_SLOT_WAIT] = True
     msg, _ = render_card(job, 0, NOW)
     assert f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT}" in msg.html
-    assert f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT} Идёт" in msg.html
+    assert "Идёт" in msg.html
     assert "running" not in msg.html
 
 
@@ -534,12 +532,10 @@ def test_render_card_slot_wait_false_shows_normal_status() -> None:
     msg, _ = render_card(job, 0, NOW)
     assert "running" in msg.html
     assert "Идёт" in msg.html
-    assert "ждёт слот" not in msg.html
+    assert SLOT_WAIT_TEXT not in msg.html
 
 
 def test_page_html_header_includes_slot_wait_count() -> None:
-    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON
-
     jobs = [
         _base_job(1, status=protocol.STATUS_RUNNING),
         _base_job(2, status=protocol.STATUS_RUNNING),
@@ -553,14 +549,12 @@ def test_page_html_header_includes_slot_wait_count() -> None:
         protocol.STATUS_QUEUED: 1,
     }
     html = page_html(jobs, 0, 3, 20, NOW, counts)
-    assert "🟢2" in html
+    assert "🟢1" in html
     assert f"{SLOT_WAIT_ICON}1" in html
     assert "⏳1" in html
 
 
 def test_page_html_header_no_slot_wait_shows_without_pin() -> None:
-    from sa_home_bot.bot.devlab_jobs_view import SLOT_WAIT_ICON
-
     jobs = [
         _base_job(1, status=protocol.STATUS_RUNNING),
         _base_job(2, status=protocol.STATUS_QUEUED),
