@@ -50,3 +50,14 @@ Bare-репозитории лежат в `<data_dir>/git/<имя>.git`. Про�
 прогона). Тесты политики: parametrize и настоящий `git push` в `test_devlab_git.py`.
 
 `nodectl devlab connect` берёт адрес из `connect.hub_url`: на ноде хаба (alfred) tailscale-IP, на других нодах имя `hub_node` (2026-11-01).
+
+### Архив веток агентов (2026-11-20)
+При `nodectl devlab drop agent/<id>` работу агента нельзя терять: журнал приёмки ссылается на
+коммиты в `agent/<id>`. Перед удалением `drop_branches` узнаёт коммит ветки через
+`git ls-remote` (тот же `_git` с `hub_env(token)` и `secret=token`) и в том же push добавляет
+refspec `<sha>:refs/heads/archive/agent/<id>` перед `:refs/heads/agent/<id>`. Ветки нет на хабе —
+`SnapshotError`, ничего не пушится. `base/*` удаляются как раньше, без архива.
+
+Создавать `archive/agent/*` может только клиент (`ALLOW_CREATE` в `refpolicy.POLICY`), обновлять
+и удалять — нельзя: архив не должен исчезать или перезаписываться. Префикс `agent/` не
+перехватывает `archive/agent/…` (startswith не совпадает), исполнитель туда не пушит.
