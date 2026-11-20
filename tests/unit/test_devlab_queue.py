@@ -1322,3 +1322,117 @@ async def test_job_statuses_returns_status_map(queue):
     job2 = await submit(queue)
     statuses = await queue.job_statuses([job1.id, job2.id, "nope"])
     assert statuses == {job1.id: S.STATUS_QUEUED, job2.id: S.STATUS_QUEUED}
+
+
+async def test_add_review_unknown_job(queue):
+    with pytest.raises(HubError, match="задания"):
+        await queue.add_review(CLIENT, "nope", S.REVIEW_ACCEPTED, [])
+
+
+@pytest.mark.parametrize(
+    "bad_verdict",
+    ["acceptedd", "reject", ""],
+)
+async def test_add_review_bad_verdict(queue, bad_verdict):
+    job = await submit(queue)
+    with pytest.raises(HubError, match="вердикт"):
+        await queue.add_review(CLIENT, job.id, bad_verdict, [])
+
+
+@pytest.mark.parametrize(
+    "bad_tag",
+    ["loopp", "missed", "unknown", ""],
+)
+async def test_add_review_bad_tag(queue, bad_tag):
+    job = await submit(queue)
+    issues = [{S.FIELD_TAG: bad_tag, S.FIELD_NOTE: "note"}]
+    with pytest.raises(HubError, match="метка"):
+        await queue.add_review(CLIENT, job.id, S.REVIEW_ACCEPTED, issues)
+
+
+async def test_add_review_issue_not_dict(queue):
+    job = await submit(queue)
+    issues = ["not a dict"]
+    with pytest.raises(HubError, match="issues"):
+        await queue.add_review(CLIENT, job.id, S.REVIEW_ACCEPTED, issues)
+
+
+async def test_add_review_missing_note(queue):
+    job = await submit(queue)
+    issues = [{S.FIELD_TAG: S.ISSUE_LOOP}]
+    with pytest.raises(HubError, match="issues"):
+        await queue.add_review(CLIENT, job.id, S.REVIEW_ACCEPTED, issues)
+
+
+async def test_add_review_and_reviews_match(queue):
+    job = await submit(queue)
+    issues = [
+        {S.FIELD_TAG: S.ISSUE_LOOP, S.FIELD_NOTE: "infinite loop"},
+        {S.FIELD_TAG: S.ISSUE_MISSED_CASE, S.FIELD_NOTE: "edge case"},
+    ]
+    added = await queue.add_review(
+        CLIENT,
+        job.id,
+        S.REVIEW_ACCEPTED_WITH_FIXES,
+        issues,
+        fix_commit="abc123",
+        tests="pytest output",
+    )
+    all_reviews = await queue.reviews()
+    assert len(all_reviews) == 1
+    assert added == all_reviews[0]
+    assert added[S.FIELD_ID] == job.id
+    assert added[S.FIELD_MODEL] == MODEL
+    assert added[S.PARAM_PROFILE] == S.DEFAULT_PROFILE
+    assert added[S.FIELD_TITLE] == "цель"
+    assert added[S.FIELD_BASE_BRANCH] == job.base_branch
+    assert added[S.PAYLOAD_TOKENS] == 0
+    assert added[S.FIELD_RESUMES] == 0
+    assert added[S.FIELD_VERDICT] == S.REVIEW_ACCEPTED_WITH_FIXES
+    assert added[S.FIELD_ISSUES] == issues
+    assert added[S.FIELD_FIX_COMMIT] == "abc123"
+    assert added[S.FIELD_TESTS] == "pytest output"
+    assert added[S.FIELD_REVIEWED] is not None
+
+
+
+
+
+async def test_add_review_replaces_previous(queue):
+    job = await submit(queue)
+    await queue.add_review(CLIENT, job.id, S.REVIEW_ACCEPTED, [])
+    issues = [{S.FIELD_TAG: S.ISSUE_SCOPE, S.FIELD_NOTE: "out of scope"}]
+    await queue.add_review(CLIENT, job.id, S.REVIEW_ABANDONED, issues)
+    all_reviews = await queue.reviews()
+    assert len(all_reviews) == 1
+    assert all_reviews[0][S.FIELD_VERDICT] == S.REVIEW_ABANDONED
+    assert all_reviews[0][S.FIELD_ISSUES] == issues
+
+
+async def test_reviews_filter_by_model(queue):
+    job1 = await submit(queue, model=MODEL)
+    job2 = await submit(queue, model=OTHER_MODEL)
+    await queue.add_review(CLIENT, job1.id, S.REVIEW_ACCEPTED, [])
+    await queue.add_review(CLIENT, job2.id, S.REVIEW_ACCEPTED, [])
+    filtered = await queue.reviews(model=MODEL)
+    assert len(filtered) == 1
+    assert filtered[0][S.FIELD_ID] == job1.id
+
+
+async def test_reviews_filter_by_since(queue):
+    job1 = await submit(queue)
+    await queue.add_review(CLIENT, job1.id, S.REVIEW_ACCEPTED, [])
+    import asyncio
+    await asyncio.sleep(0.01)
+    job2 = await submit(queue)
+    await queue.add_review(CLIENT, job2.id, S.REVIEW_ACCEPTED, [])
+    since = (await queue.reviews())[0][S.FIELD_REVIEWED]
+    filtered = await queue.reviews(since=since)
+    assert len(filtered) == 2
+    await queue.reviews(since=since)
+    import datetime
+    future = (
+        datetime.datetime.fromisoformat(since) + datetime.timedelta(seconds=1)
+    ).isoformat()
+    filtered_empty = await queue.reviews(since=future)
+    assert len(filtered_empty) == 0

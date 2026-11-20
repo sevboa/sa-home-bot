@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS job_progress (
     counter INTEGER NOT NULL,
     changed TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reviews (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+    verdict TEXT NOT NULL,
+    issues TEXT NOT NULL DEFAULT '[]',
+    fix_commit TEXT,
+    tests TEXT,
+    client TEXT NOT NULL,
+    created TEXT NOT NULL
+);
 """
 
 PARAMS_COLUMN = "params"
@@ -810,6 +819,127 @@ class HubQueue:
             message = await self._post(conn, job_id, protocol.DIRECTION_TO_EXECUTOR, kind, payload)
         self._wake_waiters(job_id)
         return message
+
+    async def add_review(
+        self,
+        client: str,
+        job_id: str,
+        verdict: str,
+        issues: list[dict[str, str]],
+        fix_commit: str = "",
+        tests: str = "",
+    ) -> dict[str, Any]:
+        if verdict not in protocol.REVIEW_VERDICTS:
+            raise HubError(
+                f"вердикт: {', '.join(protocol.REVIEW_VERDICTS)}"
+            )
+        if not isinstance(issues, list):
+            raise HubError("issues: список объектов с tag и note")
+        for issue in issues:
+            if not isinstance(issue, dict):
+                raise HubError("issues: список объектов с tag и note")
+            tag = issue.get(protocol.FIELD_TAG)
+            note = issue.get(protocol.FIELD_NOTE)
+            if tag not in protocol.REVIEW_ISSUE_TAGS:
+                raise HubError(
+                    f"метка: {', '.join(protocol.REVIEW_ISSUE_TAGS)}"
+                )
+            if not isinstance(note, str):
+                raise HubError("issues: список объектов с tag и note")
+        issues_json = json.dumps(issues, ensure_ascii=False)
+        async with self._tx() as conn:
+            cur = await conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+            if not await cur.fetchone():
+                raise HubError(f"задания {job_id!r} нет")
+            await conn.execute(
+                "INSERT INTO reviews (job_id, verdict, issues, fix_commit, tests, client, created)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(job_id) DO UPDATE SET verdict = excluded.verdict,"
+                " issues = excluded.issues, fix_commit = excluded.fix_commit,"
+                " tests = excluded.tests, client = excluded.client, created = excluded.created",
+                (job_id, verdict, issues_json, fix_commit, tests, client, utc_now().isoformat()),
+            )
+            row = await self._select_reviews(conn, "WHERE r.job_id = ?", (job_id,))
+            if not row:
+                raise HubError(f"оценка {job_id!r} не записалась")
+            return self._review_view(row[0])
+
+    @staticmethod
+    def _review_view(row: aiosqlite.Row) -> dict[str, Any]:
+        issues = json.loads(row["issues"])
+        return {
+            protocol.FIELD_ID: row["id"],
+            protocol.FIELD_MODEL: row["model"],
+            protocol.PARAM_PROFILE: row["profile"],
+            protocol.FIELD_TITLE: row["title"],
+            protocol.FIELD_BASE_BRANCH: row["base_branch"],
+            protocol.PAYLOAD_TOKENS: row["tokens"],
+            protocol.FIELD_RESUMES: row["resumes"],
+            protocol.FIELD_VERDICT: row["verdict"],
+            protocol.FIELD_ISSUES: issues,
+            protocol.FIELD_FIX_COMMIT: row["fix_commit"],
+            protocol.FIELD_TESTS: row["tests"],
+            protocol.FIELD_REVIEWED: row["reviewed"],
+        }
+
+    async def _select_reviews(
+        self, conn: aiosqlite.Connection, where: str, args: tuple[Any, ...]
+    ) -> list[aiosqlite.Row]:
+        sql = f"""
+            SELECT
+                j.id,
+                j.model,
+                json_extract(j.params, '$.{protocol.PARAM_PROFILE}') AS profile,
+                TRIM(
+                    SUBSTR(j.task, 1,
+                        CASE
+                            WHEN INSTR(j.task, '\n') > 0 THEN INSTR(j.task, '\n') - 1
+                            ELSE LENGTH(j.task)
+                        END
+                    ),
+                    '# '
+                ) AS title,
+                j.base_branch,
+                j.tokens,
+                (
+                    SELECT COUNT(*)
+                    FROM messages m
+                    WHERE m.job_id = j.id
+                      AND m.direction = ?
+                      AND m.kind = ?
+                ) AS resumes,
+                r.verdict,
+                r.issues,
+                r.fix_commit,
+                r.tests,
+                r.created AS reviewed
+            FROM reviews r
+            JOIN jobs j ON j.id = r.job_id
+            {where}
+            ORDER BY r.created
+        """
+        cur = await conn.execute(
+            sql, (protocol.DIRECTION_TO_EXECUTOR, protocol.MSG_RESUME, *args)
+        )
+        return await cur.fetchall()
+
+    async def reviews(
+        self, model: str = "", since: str = ""
+    ) -> list[dict[str, Any]]:
+        where = ""
+        args: list[Any] = []
+        if model:
+            where = "WHERE j.model = ?"
+            args.append(model)
+        if since:
+            if where:
+                where += " AND r.created >= ?"
+            else:
+                where = "WHERE r.created >= ?"
+            args.append(since)
+        async with self._tx() as conn:
+            rows = await self._select_reviews(conn, where, tuple(args))
+            return [self._review_view(row) for row in rows]
 
     async def inbox(self, client: str, since: int = 0, limit: int = DEFAULT_PAGE) -> list[Message]:
         cur = await self._db.conn.execute(
