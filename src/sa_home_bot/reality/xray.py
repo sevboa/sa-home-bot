@@ -26,25 +26,40 @@ class XrayBackend(Protocol):
 
 
 class DualXrayBackend:
-    def __init__(self, primary: XrayBackend, alt: XrayBackend) -> None:
+    def __init__(
+        self,
+        primary: XrayBackend,
+        alt: XrayBackend | None = None,
+        xhttp: XrayBackend | None = None,
+    ) -> None:
         self.primary = primary
         self.alt = alt
+        self.xhttp = xhttp
 
     async def add_client(self, client_uuid: str, email: str, flow: str) -> None:
         await self.primary.add_client(client_uuid, email, flow)
-        alt_clients = await self.alt.list_clients()
-        if email not in alt_clients:
+        if self.alt is not None:
+            alt_clients = await self.alt.list_clients()
+            if email not in alt_clients:
+                try:
+                    await self.alt.add_client(client_uuid, email, flow)
+                except ProtoError as exc:
+                    log.warning("reality: alt add_client %s — %s", email, exc)
+        if self.xhttp is not None:
             try:
-                await self.alt.add_client(client_uuid, email, flow)
+                await self.xhttp.add_client(client_uuid, email, "")
             except ProtoError as exc:
-                log.warning("reality: alt add_client %s — %s", email, exc)
+                log.warning("reality: xhttp add_client %s — %s", email, exc)
 
     async def remove_client(self, email: str) -> None:
         await self.primary.remove_client(email)
-        try:
-            await self.alt.remove_client(email)
-        except ProtoError as exc:
-            log.warning("reality: alt remove_client %s — %s", email, exc)
+        for name, second in (("alt", self.alt), ("xhttp", self.xhttp)):
+            if second is None:
+                continue
+            try:
+                await second.remove_client(email)
+            except ProtoError as exc:
+                log.warning("reality: %s remove_client %s — %s", name, email, exc)
 
     async def list_clients(self) -> set[str]:
         return await self.primary.list_clients()
@@ -65,10 +80,16 @@ async def _reconcile_one(backend: XrayBackend, desired: dict[str, str], flow: st
 async def reconcile_clients(backend: XrayBackend, desired: dict[str, str], flow: str) -> None:
     if isinstance(backend, DualXrayBackend):
         await _reconcile_one(backend.primary, desired, flow)
-        try:
-            await _reconcile_one(backend.alt, desired, flow)
-        except ProtoError as exc:
-            log.warning("reality: alt reconcile — %s", exc)
+        if backend.alt is not None:
+            try:
+                await _reconcile_one(backend.alt, desired, flow)
+            except ProtoError as exc:
+                log.warning("reality: alt reconcile — %s", exc)
+        if backend.xhttp is not None:
+            try:
+                await _reconcile_one(backend.xhttp, desired, "")
+            except ProtoError as exc:
+                log.warning("reality: xhttp reconcile — %s", exc)
     else:
         await _reconcile_one(backend, desired, flow)
 

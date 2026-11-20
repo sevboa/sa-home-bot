@@ -22,7 +22,20 @@ XHTTP прячет долгий туннель за отдельными HTTP-з
   Запись файла вынесена в `write_xray_config_with_test`, её зовут и fixup `reality-alt-inbound`.
   Ключи не логируются.
 - fixup `reality-xhttp-ufw-port` открывает порт в ufw.
-- Клиенты на вход добавятся в следующей задаче.
+- Клиенты: при старте службы `vpn` сверка `reconcile_clients` наполнит вход (см. «Клиенты»).
+
+## Клиенты
+- Секция `[vpn.reality.xhttp]` в конфиге: служба `vpn` (`vpn/app.py`) создаёт третий
+  `RealXrayBackend` с `inbound_tag` и `port` секции и передаёт его в `DualXrayBackend`
+  (`reality/xray.py`) — в том числе когда `alt` нет.
+- `add_client` добавляет на xhttp те же email и UUID с пустым `flow` (Vision с XHTTP не
+  работает); сбои `ProtoError` на xhttp только в журнал, как у alt, добавление не роняет.
+- `remove_client` удаляет на всех входах, сбои alt/xhttp в журнал.
+- `list_clients` и `stats` — только основной вход.
+- `reconcile_clients` при старте сверяет xhttp отдельно с пустым `flow`, сбой в журнал;
+  сверка наполнит вход после включения секции. Служба `vpn` после включения перезапускается
+  (не xray).
+- Без секции поведение прежнее байт в байт.
 
 ## Ограничение
 У XHTTP поле `flow` пустое: `xtls-rprx-vision` с XHTTP не работает.
