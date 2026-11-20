@@ -206,6 +206,9 @@ def test_sub_links_with_alt_returns_entries_and_entry():
         def _reality_alt_params(self):
             return RealityParams.alt_from_config(self._reality_cfg)
 
+        def _reality_xhttp_params(self):
+            return None
+
         def _sub_entry_name(self):
             return self._cfg.location
 
@@ -270,6 +273,9 @@ def test_sub_links_without_alt_has_no_entries_key():
 
         def _reality_alt_params(self):
             return RealityParams.alt_from_config(self._reality_cfg)
+
+        def _reality_xhttp_params(self):
+            return None
 
         def _sub_entry_name(self):
             return self._cfg.location
