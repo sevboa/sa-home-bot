@@ -489,6 +489,33 @@ class RealityAltConfig(BaseModel):
         return self.dest or f"{self.sni}:443"
 
 
+class RealityXhttpConfig(BaseModel):
+    port: int = Field(default=2087, ge=1, le=65535)
+    sni: str
+    dest: str = ""
+    inbound_tag: str = "reality-xhttp"
+    path: str
+    mode: str = "auto"
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        if not v.startswith("/") or len(v) < 2:
+            raise ValueError("path: строка должна начинаться с '/' и иметь длину не меньше 2")
+        return v
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        if v not in ("auto", "packet-up", "stream-up", "stream-one"):
+            raise ValueError("mode: должно быть auto, packet-up, stream-up или stream-one")
+        return v
+
+    @property
+    def effective_dest(self) -> str:
+        return self.dest or f"{self.sni}:443"
+
+
 class AwgAltConfig(BaseModel):
     interface: str = "awg1"
     port: int = Field(default=51821, ge=1, le=65535)
@@ -529,6 +556,7 @@ class RealityTransportConfig(BaseModel):
     inbound_tag: str = "reality-in"
     spare_fingerprints: list[str] = Field(default_factory=list)
     alt: RealityAltConfig | None = None
+    xhttp: RealityXhttpConfig | None = None
 
     @property
     def effective_dest(self) -> str:
@@ -554,6 +582,16 @@ class RealityTransportConfig(BaseModel):
                 raise ValueError("alt.port не должен совпадать с port")
             if self.alt.inbound_tag == self.inbound_tag:
                 raise ValueError("alt.inbound_tag не должен совпадать с inbound_tag")
+        if self.xhttp is not None:
+            if self.xhttp.port == self.port:
+                raise ValueError("xhttp.port не должен совпадать с port")
+            if self.xhttp.inbound_tag == self.inbound_tag:
+                raise ValueError("xhttp.inbound_tag не должен совпадать с inbound_tag")
+            if self.alt is not None:
+                if self.xhttp.port == self.alt.port:
+                    raise ValueError("xhttp.port не должен совпадать с alt.port")
+                if self.xhttp.inbound_tag == self.alt.inbound_tag:
+                    raise ValueError("xhttp.inbound_tag не должен совпадать с alt.inbound_tag")
         return self
 
 
