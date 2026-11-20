@@ -61,3 +61,9 @@ refspec `<sha>:refs/heads/archive/agent/<id>` перед `:refs/heads/agent/<id>
 Создавать `archive/agent/*` может только клиент (`ALLOW_CREATE` в `refpolicy.POLICY`), обновлять
 и удалять — нельзя: архив не должен исчезать или перезаписываться. Префикс `agent/` не
 перехватывает `archive/agent/…` (startswith не совпадает), исполнитель туда не пушит.
+
+Повторный drop (2026-11-20): хаб запрещает обновлять `archive/agent/*`, поэтому второй push
+архива отклоняется. Теперь `agent_archive_refspecs` одним `ls-remote` запрашивает оба ref —
+`refs/heads/<branch>` и `refs/heads/archive/<branch>` — и возвращает список refspec: архив совпадает
+с веткой — пустой список, архив не пушится второй раз, ветка удаляется; архив расходится —
+`SnapshotError` про `archive/<branch>` до любого push; архива нет — прежний push архива.

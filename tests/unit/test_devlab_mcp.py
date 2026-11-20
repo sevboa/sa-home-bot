@@ -651,6 +651,26 @@ async def test_devlab_review_invalid_issue_tag_is_tool_error(client, store, alic
     assert "метка" in text.lower()
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [protocol.ISSUE_SCOPE, protocol.ISSUE_TASK_SPEC],
+)
+async def test_devlab_review_accepts_issue_tag(client, store, alice, tag):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    is_error, written = await call(
+        client,
+        alice,
+        protocol.TOOL_REVIEW,
+        id=job_id,
+        verdict=protocol.REVIEW_ACCEPTED,
+        issues=[{"tag": tag, "note": "note"}],
+    )
+    assert not is_error
+    assert written[protocol.FIELD_ISSUES] == [{"tag": tag, "note": "note"}]
+
+
 async def test_devlab_reviews_filter_by_model_and_since(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice)

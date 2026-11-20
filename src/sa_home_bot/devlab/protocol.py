@@ -294,6 +294,7 @@ ISSUE_DEBUG_LEFTOVER = "debug_leftover"
 ISSUE_COMMENTS = "comments"
 ISSUE_RULES = "rules"
 ISSUE_SCOPE = "scope"
+ISSUE_TASK_SPEC = "task_spec"
 ISSUE_ENV = "env"
 REVIEW_ISSUE_TAGS = (
     ISSUE_LOOP,
@@ -303,6 +304,7 @@ REVIEW_ISSUE_TAGS = (
     ISSUE_COMMENTS,
     ISSUE_RULES,
     ISSUE_SCOPE,
+    ISSUE_TASK_SPEC,
     ISSUE_ENV,
 )
 
