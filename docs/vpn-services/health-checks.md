@@ -30,6 +30,23 @@ netns + veth + NAT заводит `node/fixups.py` и они переживаю�
 
 `src/sa_home_bot/vpn_series/mtg_probe.py::mtg_probe` проверяет прокси mtg на сервере с ноды-пробника: доходит ли TCP до порта и проходит ли TLS-хендшейк с SNI маскировки (`www.microsoft.com`). Ключи mtg не нужны и не читаются. Вердикты: `ok` (TCP и TLS прошли), `tcp_blocked` (TCP не доходит), `tls_blocked` (TCP есть, но TLS-хендшейк упал/завис — признак реза fake-TLS ТСПУ).
 
+## mtproto_probe (vpn_series)
+
+`src/sa_home_bot/vpn_series/mtg_probe.py::mtproto_probe` — настоящая проверка MTProto через fake-TLS
+прокси mtg (2026-11-20): полный путь клиента Telegram — fake-TLS рукопожатие с секретом mtg
+(hex или urlsafe base64 без паддинга, первый байт 0xee), obfuscated2-инициализация и запрос
+`req_pq_multi` к дата-центру (`dc`, по умолчанию 2) с проверкой ответа `resPQ` и тем же nonce. В
+отличие от `mtg_probe`, отличает живой прокси от сайта-маски, который лишь отвечает на TLS.
+
+Вердикты `MtprotoProbeResult`: `ok` (TCP, рукопожатие и resPQ с тем же nonce прошли), `tcp_blocked`
+(TCP не доходит), `tls_failed` (нет ServerHello: тип записи не 0x16, EOF или таймаут — признак реза
+fake-TLS ТСПУ), `mtproto_failed` (ответ не resPQ, nonce не совпал, EOF или таймаут после
+рукопожатия). Замеры: `tls_ms` (рукопожатие), `total_ms` (весь прогон); ошибка в `error`.
+
+Проверка детерминирована для тестов: случайность и время передаются параметрами в чистые функции
+(`parse_faketls_secret`, `build_client_hello`, `obfuscated2_init`). Пока вызывается вручную;
+подключение к `vpn_check` будет отдельной задачей.
+
 ## Серийная проверка: действие series (63.1.4, 2026-11-03)
 
 Действие `series` живёт **внутри** службы `vpn_check` (не отдельная служба). Причина: тот же netns пробника, иначе `vpn_check` и серия гасят друг другу туннель. Существующее поведение `check` (формат, тексты, отчёт `report_check`, события) **не меняется** — только добавляется действие и замок на слот.
