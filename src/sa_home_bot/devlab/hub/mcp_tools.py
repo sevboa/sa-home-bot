@@ -12,7 +12,8 @@ from sa_home_bot.devlab.hub.store import HubStore
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
 MARKDOWN_MIME = "text/markdown"
-JSON_TYPES: dict[str, type] = {"string": str, "integer": int, "array": list}
+JSON_TYPES: dict[str, type] = {"string": str, "integer": int, "array": list, "object": dict}
+ARRAY_OF_STRINGS = {"type": "string"}
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class Tool:
         for param in self.params:
             spec: dict[str, Any] = {"type": param.type, "description": param.description}
             if param.type == "array":
-                spec["items"] = param.items or {"type": "string"}
+                spec["items"] = param.items or ARRAY_OF_STRINGS
             properties[param.name] = spec
         return {
             "type": "object",
@@ -66,34 +67,10 @@ class Tool:
             expected = JSON_TYPES[param.type]
             bad = isinstance(value, bool) or not isinstance(value, expected)
             if param.type == "array":
-                bad = not isinstance(value, list)
-                if not bad and param.items:
-                    item_type = param.items.get("type")
-                    if item_type == "object":
-                        props = param.items.get("properties", {})
-                        required = set(param.items.get("required", []))
-                        for item in value:
-                            if not isinstance(item, dict):
-                                bad = True
-                                break
-                            if not required.issubset(item.keys()):
-                                bad = True
-                                break
-                            for prop_name, prop_spec in props.items():
-                                if prop_name in item:
-                                    prop_expected = JSON_TYPES.get(prop_spec.get("type", "string"))
-                                    val = item[prop_name]
-                                    if prop_expected and (
-                                        isinstance(val, bool) or not isinstance(val, prop_expected)
-                                    ):
-                                        bad = True
-                                        break
-                            if bad:
-                                break
-                    elif item_type == "string" and not all(isinstance(v, str) for v in value):
-                        bad = True
-                elif not bad and not all(isinstance(v, str) for v in value):
-                    bad = True
+                item_type = JSON_TYPES[(param.items or ARRAY_OF_STRINGS)["type"]]
+                bad = not isinstance(value, list) or not all(
+                    isinstance(v, item_type) for v in value
+                )
             if bad:
                 raise HubError(f"{self.name}: параметр {name} — {param.type}")
         return arguments
@@ -512,10 +489,10 @@ TOOLS: tuple[Tool, ...] = (
                 items={
                     "type": "object",
                     "properties": {
-                        "tag": {"type": "string", "description": "Метка проблемы"},
-                        "note": {"type": "string", "description": "Пояснение"},
+                        protocol.FIELD_TAG: {"type": "string", "description": "Метка проблемы"},
+                        protocol.FIELD_NOTE: {"type": "string", "description": "Пояснение"},
                     },
-                    "required": ["tag", "note"],
+                    "required": [protocol.FIELD_TAG, protocol.FIELD_NOTE],
                 },
             ),
             Param(
