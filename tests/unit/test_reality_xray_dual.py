@@ -237,3 +237,157 @@ async def test_reconcile_single_backend_failure_raises() -> None:
     desired = {"c1-phone": "uuid-1"}
     with pytest.raises(ProtoError):
         await reconcile_clients(backend, desired, "xtls-rprx-vision")
+
+
+async def test_dual_add_client_on_xhttp_empty_flow() -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    await dual.add_client("uuid-1", "c1-phone", "xtls-rprx-vision")
+
+    assert primary.add_calls == [("uuid-1", "c1-phone", "xtls-rprx-vision")]
+    assert alt.add_calls == [("uuid-1", "c1-phone", "xtls-rprx-vision")]
+    assert xhttp.add_calls == [("uuid-1", "c1-phone", "")]
+    assert primary.clients == {"c1-phone": "uuid-1"}
+    assert alt.clients == {"c1-phone": "uuid-1"}
+    assert xhttp.clients == {"c1-phone": "uuid-1"}
+
+
+async def test_dual_xhttp_add_failure_logged_primary_succeeds(caplog) -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    xhttp.should_fail_add.add("c1-phone")
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    await dual.add_client("uuid-1", "c1-phone", "xtls-rprx-vision")
+
+    assert primary.clients == {"c1-phone": "uuid-1"}
+    assert alt.clients == {"c1-phone": "uuid-1"}
+    assert xhttp.clients == {}
+    assert "xhttp add_client" in caplog.text
+
+
+async def test_dual_xhttp_remove_failure_logged(caplog) -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    alt.clients["c1-phone"] = "uuid-1"
+    xhttp.clients["c1-phone"] = "uuid-1"
+    xhttp.should_fail_remove.add("c1-phone")
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    await dual.remove_client("c1-phone")
+
+    assert primary.clients == {}
+    assert alt.clients == {}
+    assert xhttp.clients == {"c1-phone": "uuid-1"}
+    assert "xhttp remove_client" in caplog.text
+
+
+async def test_dual_alt_none_with_xhttp() -> None:
+    primary = FakeBackend("primary")
+    xhttp = FakeBackend("xhttp")
+    dual = DualXrayBackend(primary, None, xhttp)
+
+    await dual.add_client("uuid-1", "c1-phone", "xtls-rprx-vision")
+    await dual.remove_client("c1-phone")
+
+    assert primary.clients == {}
+    assert xhttp.clients == {}
+    assert xhttp.add_calls == [("uuid-1", "c1-phone", "")]
+    assert primary.remove_calls == ["c1-phone"]
+    assert xhttp.remove_calls == ["c1-phone"]
+
+
+async def test_dual_stats_calls_only_primary_with_xhttp() -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    primary.traffic["c1-phone"] = (10, 20)
+    alt.clients["c1-phone"] = "uuid-1"
+    xhttp.clients["c1-phone"] = "uuid-1"
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    result = await dual.stats()
+
+    assert result == {"c1-phone": (10, 20)}
+    assert primary.stats_calls == 1
+    assert alt.stats_calls == 0
+    assert xhttp.stats_calls == 0
+
+
+async def test_reconcile_dual_with_xhttp_flow_empty(caplog) -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    alt.clients["c1-phone"] = "uuid-1"
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    desired = {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    await reconcile_clients(dual, desired, "xtls-rprx-vision")
+
+    assert primary.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert alt.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert xhttp.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert xhttp.add_calls == [("uuid-1", "c1-phone", ""), ("uuid-2", "c2-laptop", "")]
+
+
+async def test_reconcile_dual_xhttp_failure_logged_primary_succeeds(caplog) -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    alt.clients["c1-phone"] = "uuid-1"
+    xhttp.should_fail_list = True
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    desired = {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    await reconcile_clients(dual, desired, "xtls-rprx-vision")
+
+    assert primary.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert alt.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert xhttp.clients == {}
+    assert "xhttp reconcile" in caplog.text
+
+
+async def test_reconcile_dual_alt_none_xhttp_works() -> None:
+    primary = FakeBackend("primary")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    xhttp.clients["c3-tablet"] = "uuid-3"
+    dual = DualXrayBackend(primary, None, xhttp)
+
+    desired = {"c1-phone": "uuid-1"}
+    await reconcile_clients(dual, desired, "xtls-rprx-vision")
+
+    assert primary.clients == {"c1-phone": "uuid-1"}
+    assert xhttp.clients == {"c1-phone": "uuid-1"}
+    assert xhttp.remove_calls == ["c3-tablet"]
+
+
+async def test_reconcile_dual_xhttp_remove_failure_logged(caplog) -> None:
+    primary = FakeBackend("primary")
+    alt = FakeBackend("alt")
+    xhttp = FakeBackend("xhttp")
+    primary.clients["c1-phone"] = "uuid-1"
+    primary.clients["c2-laptop"] = "uuid-2"
+    alt.clients["c1-phone"] = "uuid-1"
+    alt.clients["c2-laptop"] = "uuid-2"
+    xhttp.clients["c1-phone"] = "uuid-1"
+    xhttp.clients["c2-laptop"] = "uuid-2"
+    xhttp.should_fail_remove.add("c2-laptop")
+    dual = DualXrayBackend(primary, alt, xhttp)
+
+    desired = {"c1-phone": "uuid-1"}
+    await reconcile_clients(dual, desired, "xtls-rprx-vision")
+
+    assert primary.clients == {"c1-phone": "uuid-1"}
+    assert alt.clients == {"c1-phone": "uuid-1"}
+    assert xhttp.clients == {"c1-phone": "uuid-1", "c2-laptop": "uuid-2"}
+    assert "xhttp reconcile" in caplog.text

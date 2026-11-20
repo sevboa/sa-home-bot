@@ -72,6 +72,7 @@ class SubEntry:
     uuid: str
     params: RealityParams
     is_alt: bool = False
+    is_xhttp: bool = False
 
     @property
     def url(self) -> str:
@@ -95,11 +96,19 @@ class SubEntry:
         }
         if self.is_alt:
             d["is_alt"] = True
+        if self.is_xhttp:
+            d["is_xhttp"] = True
+        if self.params.network != "tcp":
+            d["params"]["network"] = self.params.network
+            d["params"]["xhttp_path"] = self.params.xhttp_path
+            d["params"]["xhttp_mode"] = self.params.xhttp_mode
         return d
 
     @classmethod
     def from_wire(cls, raw: dict) -> SubEntry:
         p = raw["params"]
+        network = str(p.get("network") or "tcp")
+        flow = str(p.get("flow") or "") if network == "xhttp" else str(p.get("flow") or DEFAULT_FLOW)
         return cls(
             node=str(raw["node"]),
             name=str(raw["name"]),
@@ -110,10 +119,14 @@ class SubEntry:
                 server_public_key=str(p["server_public_key"]),
                 short_id=str(p["short_id"]),
                 sni=str(p["sni"]),
-                flow=str(p.get("flow") or DEFAULT_FLOW),
+                flow=flow,
                 fingerprint=str(p.get("fingerprint") or CLIENT_FINGERPRINT),
+                network=network,
+                xhttp_path=str(p.get("xhttp_path") or ""),
+                xhttp_mode=str(p.get("xhttp_mode") or ""),
             ),
             is_alt=bool(raw.get("is_alt")),
+            is_xhttp=bool(raw.get("is_xhttp")),
         )
 
 
@@ -239,13 +252,13 @@ def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
 
 
 def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
-    return sorted(entries, key=lambda e: (e.is_alt, e.name, e.node))
+    return sorted(entries, key=lambda e: (e.is_xhttp, e.is_alt, e.name, e.node))
 
 
 def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[SubEntry]:
     if not fingerprints:
         return entries
-    base = [e for e in entries if e.is_alt] or entries
+    base = [e for e in entries if e.is_alt] or [e for e in entries if not e.is_xhttp] or entries
     result = list(entries)
     for fp in fingerprints:
         for e in base:
@@ -259,7 +272,9 @@ def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:
     if fmt == FORMAT_SINGBOX:
-        text = render_singbox_multi([(e.name, e.params, e.uuid) for e in sub.entries])
+        text = render_singbox_multi(
+            [(e.name, e.params, e.uuid) for e in sub.entries if not e.is_xhttp]
+        )
         return text, "application/json; charset=utf-8"
     plain = "\n".join(e.url for e in sub.entries) + "\n"
     if fmt == FORMAT_PLAIN:
@@ -476,7 +491,7 @@ def _countries_card(sub: Subscription) -> str:
     health = {n.name: n.health for n in sub.nodes}
     rows = []
     for entry in sub.entries:
-        if entry.is_alt:
+        if entry.is_alt or entry.is_xhttp:
             continue
         h = health.get(entry.name, "")
         mark = " — работает" if h == "ok" else " — может не работать" if h == "bad" else ""
@@ -511,6 +526,11 @@ def detect_platform(user_agent: str) -> str:
 _HIDDIFY_FIRST = (
     '<p class="hint">Поставьте его первым: при включённом Hiddify выпускается ключ для '
     "основного способа — AmneziaVPN (ниже), и он выручит, если AmneziaVPN не подключится.</p>"
+)
+
+_XHTTP_HINT = (
+    '<p class="hint">XHTTP — для приложений v2RayTun и Happ; Hiddify и AmneziaVPN его '
+    "не поддерживают.</p>"
 )
 
 
@@ -890,6 +910,7 @@ def render_page(
 <p class="hint">Российские сайты открываются напрямую, остальное — через VPN.</p>
 <details style="margin-top:12px"><summary class="sm">Другие способы</summary>
 <p class="hint">Не открылось? Откройте эту страницу в обычном браузере или добавьте вручную.</p>
+{_XHTTP_HINT if any(e.is_xhttp for e in sub.entries) else ""}
 <button class="btn alt" id="copy" type="button">📋 Скопировать ссылку</button>
 <input class="t" id="url" readonly value="{e(routed, quote=True)}" aria-label="Ссылка подписки">
 <p class="hint" id="copied" hidden>Ссылка скопирована. В Hiddify: «+» &rarr; «Добавить из буфера обмена».</p>

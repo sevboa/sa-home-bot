@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -206,6 +207,41 @@ def test_probe_slots_from_targets_with_alt():
         assert len({getattr(s, field) for s in slots}) == 5
     subnets = [s.subnet for s in slots]
     assert len(set(subnets)) == 5
+
+
+def test_alt_slot_bases_fit_24_and_indices_are_distinct():
+    servers = ["jeeves", "wooster", "watson"]
+    targets = [vpn_nodes.ProbeTarget(server=s, transport="reality") for s in servers]
+    for base in probe_net.ALT_SLOT_INDEX_BASES:
+        targets.extend(vpn_nodes.ProbeTarget(server=s, transport=base) for s in servers)
+    slots = probe_net.probe_slots_from_targets(targets)
+    indices = []
+    for slot in slots:
+        for addr in (slot.subnet, slot.veth_host_addr, slot.veth_ns_addr):
+            assert int(addr.split(".")[3].split("/")[0]) <= 255
+        indices.append(int(re.fullmatch(r"vprobe(\d+)h0", slot.veth_host).group(1)))
+    assert len(set(indices)) == len(indices)
+
+
+def test_probe_slots_from_targets_with_xhttp():
+    targets = [
+        vpn_nodes.ProbeTarget(server="jeeves", transport="reality"),
+        vpn_nodes.ProbeTarget(server="jeeves", transport="reality_xhttp"),
+    ]
+    slots = probe_net.probe_slots_from_targets(targets)
+    normal = [s for s in slots if s.transport != "reality_xhttp"]
+    xhttp = [s for s in slots if s.transport == "reality_xhttp"]
+    assert len(normal) == 1 and len(xhttp) == 1
+    assert xhttp[0].netns == "vpn-probe-jeeves-reality_xhttp"
+    assert xhttp[0].veth_host == "vprobe56h0"
+    assert xhttp[0].veth_ns == "vprobe56n0"
+    assert xhttp[0].subnet == "10.200.200.224/30"
+    assert xhttp[0].veth_host_addr == "10.200.200.225/30"
+    assert xhttp[0].veth_ns_addr == "10.200.200.226/30"
+    assert xhttp[0].socks_port == 11080 + probe_net.XHTTP_SLOT_INDEX_BASE
+    assert xhttp[0].iface is None
+    for field in ("veth_host", "veth_ns", "subnet", "netns"):
+        assert len({getattr(s, field) for s in slots}) == 2
 
 
 def test_probe_slots_from_targets_alt_index_stable():
@@ -451,6 +487,111 @@ def test_vpn_service_state_probe_transports_only_with_alt():
             assert "probe_transports" in state_with_alt
             assert state_with_alt["probe_transports"] == ["awg", "reality", "reality_alt"]
             assert state_with_alt["transports"] == ["awg", "reality"]
+            await db.close()
+
+    asyncio.run(test_state())
+
+
+def test_vpn_service_state_probe_transports_only_with_xhttp():
+    import asyncio
+    import tempfile
+
+    from sa_home_bot.config import RealityTransportConfig, RealityXhttpConfig, Settings, VpnConfig
+    from sa_home_bot.db.connection import Database
+    from sa_home_bot.db.migrations import apply_migrations
+    from sa_home_bot.vpn.service import VpnService
+
+    class FakeAwg:
+        def __init__(self):
+            self.peers = {}
+            self.server_pub = "server-pubkey"
+
+        async def server_public_key(self):
+            return self.server_pub
+
+    class FakeXray:
+        async def add_client(self, client_uuid, email, flow):
+            pass
+
+        async def remove_client(self, email):
+            pass
+
+        async def list_clients(self):
+            return set()
+
+        async def stats(self):
+            return {}
+
+    async def test_state():
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(tmp + "/vpn.sqlite")
+            await db.open()
+            await apply_migrations(db)
+            backend = FakeAwg()
+            xray = FakeXray()
+            events = []
+
+            async def emit(event_type, data):
+                events.append((event_type, data))
+
+            cfg_no_xhttp = VpnConfig(
+                subnet="10.9.0.0/29",
+                base_quota_gb=1,
+                extra_step_gb=1,
+                self_ceiling_gb=3,
+                warn_remaining_gb=0,
+                endpoint_host="203.0.113.9",
+                transports=["awg", "reality"],
+                reality=RealityTransportConfig(
+                    endpoint_host="1.2.3.4",
+                    port=8443,
+                    server_public_key="key",
+                    short_id="sid",
+                    sni="www.google.com",
+                ),
+            )
+            svc_no_xhttp = VpnService(
+            Settings(vpn=cfg_no_xhttp), db, backend, emit, reality_backend=xray
+        )
+            state_no_xhttp = await svc_no_xhttp.get_state()
+            assert "probe_transports" not in state_no_xhttp
+            assert state_no_xhttp["transports"] == ["awg", "reality"]
+
+            cfg_with_xhttp = VpnConfig(
+                subnet="10.9.0.0/29",
+                base_quota_gb=1,
+                extra_step_gb=1,
+                self_ceiling_gb=3,
+                warn_remaining_gb=0,
+                endpoint_host="203.0.113.9",
+                transports=["awg", "reality"],
+                reality=RealityTransportConfig(
+                    endpoint_host="1.2.3.4",
+                    port=8443,
+                    server_public_key="key",
+                    short_id="sid",
+                    sni="www.google.com",
+                    xhttp=RealityXhttpConfig(
+                        port=443, sni="www.google.com", path="/p", mode="auto"
+                    ),
+                ),
+            )
+            svc_with_xhttp = VpnService(
+            Settings(vpn=cfg_with_xhttp), db, backend, emit, reality_backend=xray
+        )
+
+            async def rollup(*, server=None):
+                return [
+                    {"transport": "reality", "status": "ok"},
+                    {"transport": "reality_xhttp", "status": "alerting"},
+                ]
+
+            svc_with_xhttp._check_rollup = rollup
+            state_with_xhttp = await svc_with_xhttp.get_state()
+            assert [r["transport"] for r in state_with_xhttp["check"]] == ["reality"]
+            assert "probe_transports" in state_with_xhttp
+            assert state_with_xhttp["probe_transports"] == ["awg", "reality", "reality_xhttp"]
+            assert state_with_xhttp["transports"] == ["awg", "reality"]
             await db.close()
 
     asyncio.run(test_state())

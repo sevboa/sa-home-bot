@@ -6,13 +6,13 @@ import logging
 
 from sa_home_bot.backup.snapshot import build_backup
 from sa_home_bot.bot.service_link import ServiceLink
-from sa_home_bot.config import Settings
+from sa_home_bot.config import RealityTransportConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
-from sa_home_bot.reality.xray import DualXrayBackend, RealXrayBackend
+from sa_home_bot.reality.xray import DualXrayBackend, RealXrayBackend, XrayBackend
 from sa_home_bot.utils.lifespan import Lifespan
 from sa_home_bot.vpn.awg import DualAwgBackend, RealAwgBackend
 from sa_home_bot.vpn.protocol import SERVICE_NAME, TRANSPORT_AWG, TRANSPORT_REALITY
@@ -20,6 +20,19 @@ from sa_home_bot.vpn.service import VpnService
 from sa_home_bot.vpn.subweb import SubscriptionWeb
 
 log = logging.getLogger(__name__)
+
+
+def _reality_xray_backend(reality: RealityTransportConfig) -> XrayBackend:
+    primary = RealXrayBackend(reality.api_addr, reality.inbound_tag, reality.port)
+    xhttp = None
+    if reality.xhttp is not None:
+        xhttp = RealXrayBackend(reality.api_addr, reality.xhttp.inbound_tag, reality.xhttp.port)
+    if reality.alt is not None:
+        alt = RealXrayBackend(reality.api_addr, reality.alt.inbound_tag, reality.alt.port)
+        return DualXrayBackend(primary, alt, xhttp)
+    if xhttp is not None:
+        return DualXrayBackend(primary, None, xhttp)
+    return primary
 
 
 async def run_vpn(settings: Settings) -> None:
@@ -45,20 +58,7 @@ async def run_vpn(settings: Settings) -> None:
                 "[vpn.reality] — транспорт отключён"
             )
         else:
-            primary = RealXrayBackend(
-                settings.vpn.reality.api_addr,
-                settings.vpn.reality.inbound_tag,
-                settings.vpn.reality.port,
-            )
-            if settings.vpn.reality.alt is not None:
-                alt = RealXrayBackend(
-                    settings.vpn.reality.api_addr,
-                    settings.vpn.reality.alt.inbound_tag,
-                    settings.vpn.reality.alt.port,
-                )
-                reality_backend = DualXrayBackend(primary, alt)
-            else:
-                reality_backend = primary
+            reality_backend = _reality_xray_backend(settings.vpn.reality)
 
     node_link = ServiceLink(
         settings.node.socket, token=settings.swarm.token, display_name="нода (vpn)"

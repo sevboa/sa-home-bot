@@ -130,6 +130,17 @@ class SubscriptionLinksMixin:
                     is_alt=True,
                 )
             )
+        xhttp_params = self._reality_xhttp_params()
+        if xhttp_params is not None:
+            entries.append(
+                subs.SubEntry(
+                    node=self._node_id,
+                    name=f"{self._sub_entry_name()} · XHTTP",
+                    uuid=client_uuid,
+                    params=xhttp_params,
+                    is_xhttp=True,
+                )
+            )
         awg_key = await self._active_row(chat_id, label, TRANSPORT_AWG) is not None
         resp = {
             "found": True,

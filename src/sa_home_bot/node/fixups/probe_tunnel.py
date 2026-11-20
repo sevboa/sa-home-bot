@@ -30,10 +30,11 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
-SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality", "reality_alt", "awg_alt")
+SUPPORTED_PROBE_TRANSPORTS = ("awg", "reality", "reality_alt", "reality_xhttp", "awg_alt")
 ISSUE_TIMEOUT_S = 20.0
 _ISSUE_TRANSPORT = {
     vpn_protocol.PROBE_TRANSPORT_REALITY_ALT: vpn_protocol.TRANSPORT_REALITY,
+    vpn_protocol.PROBE_TRANSPORT_REALITY_XHTTP: vpn_protocol.TRANSPORT_REALITY,
     vpn_protocol.PROBE_TRANSPORT_AWG_ALT: vpn_protocol.TRANSPORT_AWG,
 }
 
@@ -87,6 +88,10 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
         share_url = result.get("alt_share_url")
         if not share_url:
             raise FixupError(f"vpn@{slot.server} не вернул alt_share_url")
+    elif slot.transport == vpn_protocol.PROBE_TRANSPORT_REALITY_XHTTP:
+        share_url = result.get("xhttp_share_url")
+        if not share_url:
+            raise FixupError(f"vpn@{slot.server} не вернул xhttp_share_url")
     else:
         share_url = result.get("share_url")
         if not share_url:

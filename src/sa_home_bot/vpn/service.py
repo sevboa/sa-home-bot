@@ -60,6 +60,7 @@ from sa_home_bot.vpn.protocol import (
     PROBE_CHAT_ID,
     PROBE_TRANSPORT_AWG_ALT,
     PROBE_TRANSPORT_REALITY_ALT,
+    PROBE_TRANSPORT_REALITY_XHTTP,
     SERVICE_NAME,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
@@ -366,13 +367,19 @@ class VpnService(
                 row
                 for row in await self._check_rollup(server=self._node)
                 if row.get("transport")
-                not in (PROBE_TRANSPORT_REALITY_ALT, PROBE_TRANSPORT_AWG_ALT)
+                not in (
+                    PROBE_TRANSPORT_REALITY_ALT,
+                    PROBE_TRANSPORT_REALITY_XHTTP,
+                    PROBE_TRANSPORT_AWG_ALT,
+                )
             ],
             "access_control": True,
         }
         probe_transports: list[str] = []
         if self._reality_cfg is not None and self._reality_alt_params() is not None:
             probe_transports.append(PROBE_TRANSPORT_REALITY_ALT)
+        if self._reality_cfg is not None and self._reality_xhttp_params() is not None:
+            probe_transports.append(PROBE_TRANSPORT_REALITY_XHTTP)
         if self._cfg.awg_alt is not None and self._has(TRANSPORT_AWG):
             probe_transports.append(PROBE_TRANSPORT_AWG_ALT)
         if probe_transports:

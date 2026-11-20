@@ -584,6 +584,69 @@ def test_legacy_cleanup_fixup_demands_work_only_while_legacy_alive(root, legacy_
     assert probe_net.make_vpn_probe_legacy_cleanup_fixup().check() is not legacy_present
 
 
+def test_fetch_probe_config_reality_xhttp_uses_xhttp_share_url(root, monkeypatch):
+    slot = make_reality_slot()
+    slot.transport = "reality_xhttp"
+    slot.socks_port = 11136
+
+    class FakeClient:
+        async def command(self, action, args, dst, timeout):
+            return {
+                "xhttp_share_url": "vless://uuid-x@1.2.3.4:8443?type=xhttp&sni=www.google.com&fp=chrome&pbk=key&sid=sid&path=probe-path&mode=auto#probe"
+            }
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    async def fake_resolve_vpn_dst(client, server):
+        return type("Dst", (), {"node": server})()
+
+    monkeypatch.setattr(probe_tunnel, "ensure_xray_binary", lambda: None)
+    monkeypatch.setattr(probe_tunnel, "_node_client", lambda settings: FakeClient())
+    monkeypatch.setattr(probe_tunnel.vpn_nodes, "resolve_vpn_dst", fake_resolve_vpn_dst)
+    settings = make_settings(["vpn_check"])
+    probe_tunnel._probe_conf_apply(settings, slot)
+    install = root.sudo_commands("install")[0]
+    assert install[-1] == str(vpn_probe_state.reality_conf_path(slot))
+    assert install[1:3] == ["-D", "-m"] and "0600" in install
+
+
+def test_fetch_probe_config_reality_xhttp_without_xhttp_share_url_raises(root, monkeypatch):
+    slot = make_reality_slot()
+    slot.transport = "reality_xhttp"
+    slot.socks_port = 11136
+
+    class FakeClient:
+        async def command(self, action, args, dst, timeout):
+            return {"share_url": "vless://..."}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    async def fake_resolve_vpn_dst(client, server):
+        return type("Dst", (), {"node": server})()
+
+    monkeypatch.setattr(probe_tunnel, "ensure_xray_binary", lambda: None)
+    monkeypatch.setattr(probe_tunnel, "_node_client", lambda settings: FakeClient())
+    monkeypatch.setattr(probe_tunnel.vpn_nodes, "resolve_vpn_dst", fake_resolve_vpn_dst)
+    settings = make_settings(["vpn_check"])
+    with pytest.raises(probe_tunnel.FixupError, match="не вернул xhttp_share_url"):
+        probe_tunnel._probe_conf_apply(settings, slot)
+
+
+def test_reality_xhttp_in_supported_probe_transports():
+    from sa_home_bot.vpn import protocol as vpn_protocol
+
+    assert "reality_xhttp" in probe_tunnel.SUPPORTED_PROBE_TRANSPORTS
+    assert "reality_xhttp" not in vpn_protocol.TRANSPORTS
+
+
 def test_fixups_package_keeps_external_api():
     assert fixups.build_fixups is build_fixups
     assert fixups.SMARTCTL_WRAPPER_PATH.name == "smartctl"

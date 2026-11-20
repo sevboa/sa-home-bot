@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from sa_home_bot.reality.routing import (
     DIRECT_SUFFIXES,
@@ -28,6 +28,9 @@ class RealityParams:
     sni: str
     flow: str = DEFAULT_FLOW
     fingerprint: str = CLIENT_FINGERPRINT
+    network: str = "tcp"
+    xhttp_path: str = ""
+    xhttp_mode: str = ""
 
     @classmethod
     def from_config(cls, cfg: Any) -> RealityParams:
@@ -54,6 +57,23 @@ class RealityParams:
             sni=alt.sni,
             flow=cfg.flow,
             fingerprint=getattr(cfg, "fingerprint", CLIENT_FINGERPRINT),
+        )
+
+    @classmethod
+    def xhttp_from_config(cls, cfg: Any) -> RealityParams | None:
+        xhttp = getattr(cfg, "xhttp", None)
+        if xhttp is None:
+            return None
+        return cls(
+            endpoint_host=cfg.endpoint_host,
+            port=xhttp.port,
+            server_public_key=cfg.server_public_key,
+            short_id=cfg.short_id,
+            sni=xhttp.sni,
+            flow="",
+            network="xhttp",
+            xhttp_path=xhttp.path,
+            xhttp_mode=xhttp.mode,
         )
 
 
@@ -173,23 +193,26 @@ def render_singbox_config(
     *,
     all_proxy: bool = False,
 ) -> str:
+    if params.network != "tcp":
+        raise ValueError("sing-box не поддерживает XHTTP")
     return _dump_singbox(_singbox_config(params, client_uuid, all_proxy=all_proxy))
 
 
 def render_vless_url(params: RealityParams, client_uuid: str, label: str) -> str:
-    query = "&".join(
-        f"{k}={v}"
-        for k, v in (
-            ("encryption", "none"),
-            ("flow", params.flow),
-            ("security", "reality"),
-            ("sni", params.sni),
-            ("fp", params.fingerprint),
-            ("pbk", params.server_public_key),
-            ("sid", params.short_id),
-            ("type", "tcp"),
-        )
-    )
+    entries: list[tuple[str, str]] = [
+        ("encryption", "none"),
+        ("flow", params.flow),
+        ("security", "reality"),
+        ("sni", params.sni),
+        ("fp", params.fingerprint),
+        ("pbk", params.server_public_key),
+        ("sid", params.short_id),
+        ("type", params.network),
+    ]
+    if params.network == "xhttp":
+        entries.append(("path", quote(params.xhttp_path, safe="")))
+        entries.append(("mode", params.xhttp_mode))
+    query = "&".join(f"{k}={v}" for k, v in entries if v)
     return (
         f"vless://{client_uuid}@{params.endpoint_host}:{int(params.port)}"
         f"?{query}#{quote(label, safe='')}"
@@ -217,14 +240,18 @@ def parse_vless_url(url: str) -> tuple[RealityParams, str]:
             return default
         raise ValueError(f"vless:// без обязательного параметра {name}")
 
+    network = _param("type", default="tcp")
     params = RealityParams(
         endpoint_host=host,
         port=port,
         server_public_key=_param("pbk"),
         short_id=_param("sid"),
         sni=_param("sni"),
-        flow=_param("flow", default=DEFAULT_FLOW),
+        flow=_param("flow", default="" if network == "xhttp" else DEFAULT_FLOW),
         fingerprint=_param("fp", default=CLIENT_FINGERPRINT),
+        network=network,
+        xhttp_path=unquote(_param("path", default="")),
+        xhttp_mode=_param("mode", default=""),
     )
     return params, client_uuid
 
@@ -240,6 +267,9 @@ def render_singbox_multi(
 ) -> str:
     if not servers:
         raise ValueError("нужна хотя бы одна страна")
+    for _name, params, _uuid in servers:
+        if params.network != "tcp":
+            raise ValueError("sing-box не поддерживает XHTTP")
     _first_name, first_params, first_uuid = servers[0]
     config = _singbox_config(first_params, first_uuid, all_proxy=all_proxy)
     outbounds: list[dict] = []

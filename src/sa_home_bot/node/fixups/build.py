@@ -33,6 +33,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_server.make_sub_ufw_fixup(settings),
         vpn_server.make_reality_alt_ufw_fixup(settings),
         vpn_server.make_reality_alt_inbound_fixup(settings),
+        vpn_server.make_reality_xhttp_ufw_fixup(settings),
+        vpn_server.make_reality_xhttp_inbound_fixup(settings),
         vpn_server.make_awg_forward_fixup(settings),
         vpn_server.make_awg_alt_interface_fixup(settings),
         vpn_server.make_awg_alt_ufw_fixup(settings),

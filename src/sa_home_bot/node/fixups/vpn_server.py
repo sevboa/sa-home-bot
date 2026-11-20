@@ -124,9 +124,76 @@ def alt_inbound_matches(config: dict, alt) -> bool:
     return False
 
 
+def build_xhttp_inbound(config: dict, xhttp) -> dict:
+    reality_in = None
+    for inbound in config.get("inbounds", []):
+        if inbound.get("tag") == "reality-in":
+            reality_in = inbound
+            break
+    if reality_in is None:
+        raise FixupError("в конфиге xray нет входа reality-in")
+    inbound = copy.deepcopy(reality_in)
+    inbound["tag"] = xhttp.inbound_tag
+    inbound["port"] = xhttp.port
+    inbound["settings"]["clients"] = []
+    ss = inbound["streamSettings"]
+    ss["network"] = "xhttp"
+    ss["xhttpSettings"] = {"path": xhttp.path, "mode": xhttp.mode}
+    rs = inbound["streamSettings"]["realitySettings"]
+    rs["dest"] = xhttp.effective_dest
+    rs["serverNames"] = [xhttp.sni]
+    return inbound
+
+
+def xhttp_inbound_matches(config: dict, xhttp) -> bool:
+    for inbound in config.get("inbounds", []):
+        if inbound.get("tag") == xhttp.inbound_tag:
+            if inbound.get("port") != xhttp.port:
+                return False
+            ss = inbound.get("streamSettings", {})
+            if ss.get("network") != "xhttp":
+                return False
+            xs = ss.get("xhttpSettings", {})
+            if xs.get("path") != xhttp.path:
+                return False
+            if xs.get("mode") != xhttp.mode:
+                return False
+            rs = ss.get("realitySettings", {})
+            if rs.get("dest") != xhttp.effective_dest:
+                return False
+            if rs.get("serverNames") != [xhttp.sni]:
+                return False
+            return True
+    return False
+
+
 def _xray_api(args: list[str]) -> subprocess.CompletedProcess:
     xray = find_executable("xray") or "/usr/local/bin/xray"
     return subprocess.run([xray, "api", *args], capture_output=True, text=True, timeout=30)
+
+
+def write_xray_config_with_test(config_path: Path, config: dict) -> None:
+    fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".json")
+    try:
+        os.write(fd, json.dumps(config, indent=2).encode("utf-8"))
+        os.close(fd)
+        os.chmod(tmp_path, 0o600)
+        xray_bin = find_executable("xray") or "/usr/local/bin/xray"
+        test_result = subprocess.run(
+            [xray_bin, "run", "-test", "-c", tmp_path],
+            capture_output=True,
+            timeout=30,
+        )
+        if test_result.returncode != 0:
+            os.unlink(tmp_path)
+            raise FixupError(f"xray run -test: код {test_result.returncode}")
+        old_stat = config_path.stat()
+        os.chmod(tmp_path, stat.S_IMODE(old_stat.st_mode))
+        os.replace(tmp_path, config_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 
 def make_reality_alt_inbound_fixup(settings: Settings) -> Fixup:
@@ -173,27 +240,7 @@ def make_reality_alt_inbound_fixup(settings: Settings) -> Fixup:
         else:
             inbound = build_alt_inbound(config, alt)
             config["inbounds"].append(inbound)
-            fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".json")
-            try:
-                os.write(fd, json.dumps(config, indent=2).encode("utf-8"))
-                os.close(fd)
-                os.chmod(tmp_path, 0o600)
-                xray_bin = find_executable("xray") or "/usr/local/bin/xray"
-                test_result = subprocess.run(
-                    [xray_bin, "run", "-test", "-c", tmp_path],
-                    capture_output=True,
-                    timeout=30,
-                )
-                if test_result.returncode != 0:
-                    os.unlink(tmp_path)
-                    raise FixupError(f"xray run -test: код {test_result.returncode}")
-                old_stat = config_path.stat()
-                os.chmod(tmp_path, stat.S_IMODE(old_stat.st_mode))
-                os.replace(tmp_path, config_path)
-            except Exception:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                raise
+            write_xray_config_with_test(config_path, config)
 
         try:
             result = _xray_api(["lsi", f"--server={api_addr}", "--isOnlyTags=true"])
@@ -250,6 +297,112 @@ def make_reality_alt_ufw_fixup(settings: Settings) -> Fixup:
         needed=lambda s: bool(reality_alt_ufw_specs(s)) and ufw_in_use(),
         check=lambda: ufw_allows_all(specs),
         apply=lambda: ufw_allow_all(specs, "sa-home vpn: второй вход Reality (alt)"),
+    )
+
+
+def reality_xhttp_ufw_specs(settings: Settings) -> list[str]:
+    xhttp = getattr(settings.vpn.reality, "xhttp", None)
+    if xhttp is None:
+        return []
+    return [f"{xhttp.port}/tcp"]
+
+
+def make_reality_xhttp_inbound_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        xhttp = settings.vpn.reality.xhttp
+        api_addr = settings.vpn.reality.api_addr
+        try:
+            config_path = xray_config_path()
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not xhttp_inbound_matches(config, xhttp):
+            return False
+        try:
+            result = _xray_api(["lsi", f"--server={api_addr}", "--isOnlyTags=true"])
+        except Exception:
+            return False
+        if result.returncode != 0:
+            return False
+        try:
+            data = json.loads(result.stdout)
+        except Exception:
+            return False
+        for inbound in data.get("inbounds", []):
+            if inbound.get("tag") == xhttp.inbound_tag:
+                return True
+        return False
+
+    def apply() -> None:
+        xhttp = settings.vpn.reality.xhttp
+        api_addr = settings.vpn.reality.api_addr
+        config_path = xray_config_path()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        existing = None
+        for inbound in config.get("inbounds", []):
+            if inbound.get("tag") == xhttp.inbound_tag:
+                existing = inbound
+                break
+
+        if existing is not None:
+            if not xhttp_inbound_matches(config, xhttp):
+                raise FixupError("вход уже есть с другими настройками, менять вручную")
+        else:
+            inbound = build_xhttp_inbound(config, xhttp)
+            config["inbounds"].append(inbound)
+            write_xray_config_with_test(config_path, config)
+
+        try:
+            result = _xray_api(["lsi", f"--server={api_addr}", "--isOnlyTags=true"])
+        except Exception as exc:
+            raise FixupError("xray api lsi не ответил") from exc
+        if result.returncode != 0:
+            raise FixupError("xray api lsi не ответил")
+        try:
+            data = json.loads(result.stdout)
+        except Exception as exc:
+            raise FixupError("xray api lsi не ответил") from exc
+        has_tag = any(
+            inbound.get("tag") == xhttp.inbound_tag for inbound in data.get("inbounds", [])
+        )
+        if has_tag:
+            return
+
+        inbound = build_xhttp_inbound(config, xhttp)
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            os.write(fd, json.dumps({"inbounds": [inbound]}, indent=2).encode("utf-8"))
+            os.close(fd)
+            os.chmod(tmp_path, 0o600)
+            try:
+                adi_result = _xray_api(["adi", f"--server={api_addr}", tmp_path])
+                if adi_result.returncode != 0:
+                    raise FixupError(f"xray api adi: код {adi_result.returncode}")
+            finally:
+                os.unlink(tmp_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    return Fixup(
+        id="reality-xhttp-inbound",
+        title="Вход Reality с транспортом XHTTP в xray через API без рестарта",
+        needed=lambda s: needs.vpn(s) and getattr(s.vpn.reality, "xhttp", None) is not None,
+        check=check,
+        apply=apply,
+    )
+
+
+def make_reality_xhttp_ufw_fixup(settings: Settings) -> Fixup:
+    specs = reality_xhttp_ufw_specs(settings)
+    return Fixup(
+        id="reality-xhttp-ufw-port",
+        title=f"ufw: открыть TCP-порт входа XHTTP Reality ({specs[0] if specs else 'нет'})",
+        needed=lambda s: bool(reality_xhttp_ufw_specs(s)) and ufw_in_use(),
+        check=lambda: ufw_allows_all(specs),
+        apply=lambda: ufw_allow_all(specs, "sa-home vpn: вход Reality с транспортом XHTTP"),
     )
 
 
