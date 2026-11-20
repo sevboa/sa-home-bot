@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import pytest
 import pytest_asyncio
 
 from sa_home_bot.config import Settings, VpnConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import ProtoError
+from sa_home_bot.utils.process import ProcResult
 from sa_home_bot.vpn import protocol as vpn_protocol
+from sa_home_bot.vpn import proxy_backend as proxy_backend_module
+from sa_home_bot.vpn.proxy_backend import RealProxyBackend
 from sa_home_bot.vpn.service import GB, VpnService
 
 
@@ -179,3 +183,28 @@ async def test_sample_proxy_tolerates_missing_sudoers(env):
 
     proxy.counters = failing_counters
     await svc.sample_once()
+
+
+@pytest.mark.parametrize("daemon_code", [0, 1])
+async def test_real_backend_rotate_reloads_unit_before_restart(tmp_path, monkeypatch, daemon_code):
+    unit = tmp_path / "mtg.service"
+    unit.write_text("ExecStart=/usr/local/bin/simple-run mtg OLDSECRET\n")
+    calls: list[list[str]] = []
+
+    async def fake_run(argv: list[str]):
+        calls.append(list(argv))
+        return ProcResult(daemon_code, b"", b"boom" if daemon_code else b"")
+
+    monkeypatch.setattr(proxy_backend_module, "MTG_UNIT_PATH", unit)
+    monkeypatch.setattr(proxy_backend_module, "run", fake_run)
+    backend = RealProxyBackend()
+    if daemon_code == 0:
+        await backend.rotate_secret("NEWSECRET")
+    else:
+        with pytest.raises(ProtoError, match="daemon-reload"):
+            await backend.rotate_secret("NEWSECRET")
+    assert calls == [
+        ["systemctl", "--user", "daemon-reload"],
+        *([] if daemon_code else [["systemctl", "--user", "restart", "mtg.service"]]),
+    ]
+    assert "NEWSECRET" in unit.read_text()

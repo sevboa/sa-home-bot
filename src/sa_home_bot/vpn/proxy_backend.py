@@ -77,6 +77,11 @@ class RealProxyBackend:
         if count != 1:
             raise ProtoError(ERR_INTERNAL, "не удалось найти секрет в mtg.service для замены")
         MTG_UNIT_PATH.write_text(new_content, encoding="utf-8")
+        reloaded = await run(["systemctl", "--user", "daemon-reload"])
+        if reloaded.returncode != 0:
+            raise ProtoError(
+                ERR_INTERNAL, f"systemctl --user daemon-reload: {reloaded.stderr_text}"
+            )
         restarted = await run(["systemctl", "--user", "restart", "mtg.service"])
         if restarted.returncode != 0:
             raise ProtoError(

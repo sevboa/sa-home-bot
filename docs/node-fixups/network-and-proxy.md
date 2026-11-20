@@ -52,7 +52,9 @@ forward+NAT+MSS-clamp через nft при каждом старте (`awg-forw
 при первом старте службы); дальнейшая смена — только через `proxy_rotate_secret` (правит и БД, и
 юнит). mtg ставится из релизного архива с проверкой sha256 (`MTG_SHA256`) и `setcap
 cap_net_bind_service=+ep`; microsocks — пакетом. `[vpn].socks_host` (tailscale-адрес jeeves)
-обязателен.
+обязателен. Смена секрета (`vpn/proxy_backend.py::RealProxyBackend::rotate_secret`) делает
+`systemctl --user daemon-reload` после записи юнита и перед рестартом (2026-11-20): иначе systemd
+поднимает mtg со старым секретом из памяти и бот раздаёт неработающую ссылку.
 
 ## Сборка amneziawg-tools и установка xray
 - amneziawg-tools/amneziawg-go нет в apt Debian (проверено на alfred 2026-08-17) и апстрим не
