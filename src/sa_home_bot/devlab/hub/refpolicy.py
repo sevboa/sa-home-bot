@@ -20,6 +20,9 @@ POLICY: dict[str, dict[str, frozenset[str]]] = {
     protocol.ROLE_CLIENT: {
         protocol.BASE_BRANCH_PREFIX: frozenset({ALLOW_CREATE, ALLOW_UPDATE, ALLOW_DELETE}),
         protocol.AGENT_BRANCH_PREFIX: frozenset({ALLOW_DELETE}),
+        protocol.ARCHIVE_BRANCH_PREFIX + protocol.AGENT_BRANCH_PREFIX: frozenset(
+            {ALLOW_CREATE}
+        ),
     },
 }
 CLIENT_OWN_TEST_OPS = frozenset({ALLOW_CREATE, ALLOW_UPDATE})

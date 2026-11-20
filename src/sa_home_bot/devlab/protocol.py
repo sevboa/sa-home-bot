@@ -49,6 +49,7 @@ JOB_KINDS = (JOB_KIND_AGENT, JOB_KIND_TEST)
 BASE_BRANCH_PREFIX = "base/"
 WIP_BRANCH_PREFIX = "wip/"
 AGENT_BRANCH_PREFIX = "agent/"
+ARCHIVE_BRANCH_PREFIX = "archive/"
 TEST_BRANCH_PREFIX = "test/"
 HEADS_REF_PREFIX = "refs/heads/"
 
@@ -264,9 +265,54 @@ TOOL_ANSWER = "devlab_answer"
 TOOL_RESUME = "devlab_resume"
 TOOL_STOP = "devlab_stop"
 TOOL_RELEASE = "devlab_release"
+TOOL_REVIEW = "devlab_review"
+TOOL_REVIEWS = "devlab_reviews"
 
 RESOURCE_TASK_TEMPLATE = "devlab://task-template"
 RESOURCE_USAGE = "devlab://usage"
 
 TOKEN_PREFIX = "dlh_"
 MCP_CLIENT_NAME = "devlab"
+
+REVIEW_ACCEPTED = "accepted"
+REVIEW_ACCEPTED_WITH_FIXES = "accepted_with_fixes"
+REVIEW_RESUMED_WITH_STEP_LIST = "resumed_with_step_list"
+REVIEW_REDONE = "redone"
+REVIEW_ABANDONED = "abandoned"
+REVIEW_VERDICTS = (
+    REVIEW_ACCEPTED,
+    REVIEW_ACCEPTED_WITH_FIXES,
+    REVIEW_RESUMED_WITH_STEP_LIST,
+    REVIEW_REDONE,
+    REVIEW_ABANDONED,
+)
+
+ISSUE_LOOP = "loop"
+ISSUE_MISSED_CASE = "missed_case"
+ISSUE_UNHANDLED_ERROR = "unhandled_error"
+ISSUE_DEBUG_LEFTOVER = "debug_leftover"
+ISSUE_COMMENTS = "comments"
+ISSUE_RULES = "rules"
+ISSUE_SCOPE = "scope"
+ISSUE_ENV = "env"
+REVIEW_ISSUE_TAGS = (
+    ISSUE_LOOP,
+    ISSUE_MISSED_CASE,
+    ISSUE_UNHANDLED_ERROR,
+    ISSUE_DEBUG_LEFTOVER,
+    ISSUE_COMMENTS,
+    ISSUE_RULES,
+    ISSUE_SCOPE,
+    ISSUE_ENV,
+)
+
+FIELD_VERDICT = "verdict"
+FIELD_ISSUES = "issues"
+FIELD_TAG = "tag"
+FIELD_NOTE = "note"
+FIELD_FIX_COMMIT = "fix_commit"
+FIELD_TESTS = "tests"
+FIELD_RESUMES = "resumes"
+FIELD_TITLE = "title"
+FIELD_REVIEWED = "reviewed"
+FIELD_BASE_BRANCH = "base_branch"

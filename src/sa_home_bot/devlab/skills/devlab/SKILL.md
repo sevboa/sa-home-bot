@@ -115,7 +115,12 @@ description: Отдать задачу агенту-разработчику н�
    `add -A`, `stash` и `commit -a`), по правилам проекта пиши сообщение коммита.
 6. Отчёт владельцу: что сделано, модель и расход (`devlab_status`), результат полного прогона,
    замечания ревью и что правил сам, ветка `dev/<id>`, открытые вопросы.
-7. Чистка после отчёта: `nodectl devlab drop agent/<id> base/<имя>` (на хабе; `wip/*` убирает
+7. Записать оценку: `devlab_review id=<id> verdict=<…> issues=[{tag, note}] fix_commit=<sha> tests=<id прогона>`.
+   Вердикты: `accepted`, `accepted_with_fixes`, `resumed_with_step_list`, `redone`, `abandoned`.
+   Метки: `loop`, `missed_case`, `unhandled_error`, `debug_leftover`, `comments`, `rules`, `scope`
+   (лишний рефакторинг или чужие файлы), `env` (виновато окружение: рестарт, ужатая модель, призрак).
+   Свои вердикты и метки не придумывать. Журнал: `devlab_reviews` или `nodectl devlab reviews`.
+8. Чистка после отчёта: `nodectl devlab drop agent/<id> base/<имя>` (на хабе; `wip/*` убирает
    исполнитель) и `git update-ref -d refs/devlab/agent/<id>`. Ветку `dev/<id>` и worktree не
    удаляй, они у владельца.
 

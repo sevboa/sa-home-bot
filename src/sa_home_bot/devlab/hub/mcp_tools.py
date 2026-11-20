@@ -12,7 +12,8 @@ from sa_home_bot.devlab.hub.store import HubStore
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
 MARKDOWN_MIME = "text/markdown"
-JSON_TYPES: dict[str, type] = {"string": str, "integer": int, "array": list}
+JSON_TYPES: dict[str, type] = {"string": str, "integer": int, "array": list, "object": dict}
+ARRAY_OF_STRINGS = {"type": "string"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class Param:
     type: str
     description: str
     required: bool = False
+    items: dict[str, Any] | None = None
 
 
 Handler = Callable[..., Awaitable[Any]]
@@ -44,7 +46,7 @@ class Tool:
         for param in self.params:
             spec: dict[str, Any] = {"type": param.type, "description": param.description}
             if param.type == "array":
-                spec["items"] = {"type": "string"}
+                spec["items"] = param.items or ARRAY_OF_STRINGS
             properties[param.name] = spec
         return {
             "type": "object",
@@ -61,12 +63,16 @@ class Tool:
             if param.required and param.name not in arguments:
                 raise HubError(f"{self.name}: нужен параметр {param.name}")
         for name, value in arguments.items():
-            expected = JSON_TYPES[known[name].type]
+            param = known[name]
+            expected = JSON_TYPES[param.type]
             bad = isinstance(value, bool) or not isinstance(value, expected)
-            if known[name].type == "array":
-                bad = not isinstance(value, list) or not all(isinstance(v, str) for v in value)
+            if param.type == "array":
+                item_type = JSON_TYPES[(param.items or ARRAY_OF_STRINGS)["type"]]
+                bad = not isinstance(value, list) or not all(
+                    isinstance(v, item_type) for v in value
+                )
             if bad:
-                raise HubError(f"{self.name}: параметр {name} — {known[name].type}")
+                raise HubError(f"{self.name}: параметр {name} — {param.type}")
         return arguments
 
 
@@ -264,6 +270,23 @@ async def release(ctx: Context, id: str) -> Any:
     return await send(ctx, protocol.MSG_RELEASE, id, {})
 
 
+async def review(
+    ctx: Context,
+    id: str,
+    verdict: str,
+    issues: list[dict[str, str]] | None = None,
+    fix_commit: str = "",
+    tests: str = "",
+) -> Any:
+    return await ctx.store.queue.add_review(
+        ctx.client, id, verdict, issues or [], fix_commit, tests
+    )
+
+
+async def reviews(ctx: Context, model: str = "", since: str = "") -> Any:
+    return {"reviews": await ctx.store.queue.reviews(model, since)}
+
+
 ID = Param("id", "string", "Номер задания из devlab_submit.", required=True)
 
 TOOLS: tuple[Tool, ...] = (
@@ -447,6 +470,50 @@ TOOLS: tuple[Tool, ...] = (
         " задания в статусе waiting_owner; статус не меняется.",
         (ID,),
         release,
+    ),
+    Tool(
+        protocol.TOOL_REVIEW,
+        "Записать оценку принятого задания. Вердикт и метки проблем только из списков протокола.",
+        (
+            ID,
+            Param(
+                "verdict",
+                "string",
+                "Вердикт: " + ", ".join(protocol.REVIEW_VERDICTS),
+                required=True,
+            ),
+            Param(
+                "issues",
+                "array",
+                "Список объектов {tag, note}; tag из: " + ", ".join(protocol.REVIEW_ISSUE_TAGS),
+                items={
+                    "type": "object",
+                    "properties": {
+                        protocol.FIELD_TAG: {"type": "string", "description": "Метка проблемы"},
+                        protocol.FIELD_NOTE: {"type": "string", "description": "Пояснение"},
+                    },
+                    "required": [protocol.FIELD_TAG, protocol.FIELD_NOTE],
+                },
+            ),
+            Param(
+                "fix_commit",
+                "string",
+                "Хеш коммита с правками, если verdict=accepted_with_fixes.",
+            ),
+            Param(
+                "tests", "string", "Идентификатор прогона тестов (job id test-задания)."
+            ),
+        ),
+        review,
+    ),
+    Tool(
+        protocol.TOOL_REVIEWS,
+        "Журнал оценок: свои или по модели/дате. since — дата ISO, «с какого дня».",
+        (
+            Param("model", "string", "Фильтр по имени модели."),
+            Param("since", "string", "Начальная дата ISO (с какого дня), включительно."),
+        ),
+        reviews,
     ),
 )
 

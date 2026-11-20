@@ -33,6 +33,8 @@ TOOL_NAMES = {
     protocol.TOOL_RESUME,
     protocol.TOOL_STOP,
     protocol.TOOL_RELEASE,
+    protocol.TOOL_REVIEW,
+    protocol.TOOL_REVIEWS,
 }
 
 
@@ -576,3 +578,107 @@ async def test_devlab_test_log_serves_agent_steps_journal(client, store, alice):
         client, alice, protocol.TOOL_TEST_LOG, id=job_id, file=protocol.LOG_FILE_JUNIT
     )
     assert is_error
+
+
+async def test_devlab_review_writes_and_reads(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    claimed = await store.queue.claim("pc", [MODEL])
+    assert claimed and claimed.id == job_id
+    await store.queue.post_from_executor(job_id, protocol.MSG_STARTED, executor="pc")
+    await store.queue.post_from_executor(job_id, protocol.MSG_DONE, executor="pc")
+
+    is_error, written = await call(
+        client,
+        alice,
+        protocol.TOOL_REVIEW,
+        id=job_id,
+        verdict=protocol.REVIEW_ACCEPTED_WITH_FIXES,
+        issues=[{"tag": protocol.ISSUE_SCOPE, "note": "лишний рефакторинг"}],
+        fix_commit="abc123",
+        tests="test_job_id",
+    )
+    assert not is_error
+    assert written[protocol.FIELD_VERDICT] == protocol.REVIEW_ACCEPTED_WITH_FIXES
+    assert written[protocol.FIELD_ISSUES] == [
+        {"tag": protocol.ISSUE_SCOPE, "note": "лишний рефакторинг"}
+    ]
+    assert written[protocol.FIELD_FIX_COMMIT] == "abc123"
+    assert written[protocol.FIELD_TESTS] == "test_job_id"
+
+    is_error, reviews_list = await call(client, alice, protocol.TOOL_REVIEWS)
+    assert not is_error
+    assert len(reviews_list["reviews"]) == 1
+    review = reviews_list["reviews"][0]
+    assert review[protocol.FIELD_VERDICT] == protocol.REVIEW_ACCEPTED_WITH_FIXES
+    assert review[protocol.FIELD_ISSUES] == [
+        {"tag": protocol.ISSUE_SCOPE, "note": "лишний рефакторинг"}
+    ]
+    assert review[protocol.FIELD_FIX_COMMIT] == "abc123"
+    assert review[protocol.FIELD_TESTS] == "test_job_id"
+
+
+async def test_devlab_review_invalid_verdict_is_tool_error(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    is_error, text = await call(
+        client,
+        alice,
+        protocol.TOOL_REVIEW,
+        id=job_id,
+        verdict="invalid_verdict",
+        issues=[],
+    )
+    assert is_error
+    assert "вердикт" in text.lower()
+
+
+async def test_devlab_review_invalid_issue_tag_is_tool_error(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    is_error, text = await call(
+        client,
+        alice,
+        protocol.TOOL_REVIEW,
+        id=job_id,
+        verdict=protocol.REVIEW_ACCEPTED,
+        issues=[{"tag": "bad_tag", "note": "note"}],
+    )
+    assert is_error
+    assert "метка" in text.lower()
+
+
+async def test_devlab_reviews_filter_by_model_and_since(client, store, alice):
+    await register(client, store, alice)
+    _, submitted = await submit(client, alice)
+    job_id = submitted["job"]["id"]
+    claimed = await store.queue.claim("pc", [MODEL])
+    assert claimed and claimed.id == job_id
+    await store.queue.post_from_executor(job_id, protocol.MSG_STARTED, executor="pc")
+    await store.queue.post_from_executor(job_id, protocol.MSG_DONE, executor="pc")
+
+    await call(
+        client,
+        alice,
+        protocol.TOOL_REVIEW,
+        id=job_id,
+        verdict=protocol.REVIEW_ACCEPTED,
+        issues=[],
+    )
+
+    is_error, reviews_list = await call(client, alice, protocol.TOOL_REVIEWS, model=MODEL)
+    assert not is_error
+    assert len(reviews_list["reviews"]) == 1
+
+    is_error, reviews_list = await call(client, alice, protocol.TOOL_REVIEWS, model="other")
+    assert not is_error
+    assert reviews_list["reviews"] == []
+
+    from datetime import datetime, timedelta
+    future = (datetime.now() + timedelta(days=1)).isoformat()
+    is_error, reviews_list = await call(client, alice, protocol.TOOL_REVIEWS, since=future)
+    assert not is_error
+    assert reviews_list["reviews"] == []

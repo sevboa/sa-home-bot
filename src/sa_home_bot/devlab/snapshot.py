@@ -18,6 +18,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.connect import TOKEN_PATH, hub_url
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, SpecError, parse_spec
+from sa_home_bot.devlab.reviews import format_summary, summarize
 
 GIT_TIMEOUT_S = 300
 BRANCH_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -180,6 +181,21 @@ def fetch_agent(root: Path, url: str, token: str, project: str, job_id: str) -> 
     return local
 
 
+def agent_archive_refspecs(root: Path, url: str, token: str, project: str, branch: str) -> str:
+    result = _git(
+        root,
+        "ls-remote",
+        hub_remote(url, project),
+        f"refs/heads/{branch}",
+        env=hub_env(token),
+        secret=token,
+    )
+    sha = result.stdout.split()[0] if result.stdout.split() else ""
+    if not sha:
+        raise SnapshotError(f"ветки {branch} нет на хабе, архивировать нечего")
+    return f"{sha}:refs/heads/{protocol.ARCHIVE_BRANCH_PREFIX}{branch}"
+
+
 def drop_branches(root: Path, url: str, token: str, project: str, branches: list[str]) -> None:
     refspecs = []
     for branch in branches:
@@ -193,7 +209,10 @@ def drop_branches(root: Path, url: str, token: str, project: str, branches: list
         )
         if not prefix:
             raise SnapshotError(f"удалять можно только agent/* и base/*, не {branch!r}")
-        refspecs.append(f":refs/heads/{check_branch_name(branch, prefix)}")
+        name = check_branch_name(branch, prefix)
+        if prefix == protocol.AGENT_BRANCH_PREFIX:
+            refspecs.append(agent_archive_refspecs(root, url, token, project, name))
+        refspecs.append(f":refs/heads/{name}")
     _git(
         root,
         "push",
@@ -478,3 +497,36 @@ def watch_command(
         if remaining <= 0:
             return 0
         sleep(min(interval, remaining))
+
+
+def reviews_command(
+    settings: Settings,
+    *,
+    model: str = "",
+    since: str = "",
+    token_path: str = TOKEN_PATH,
+    call: Callable[[str, str, str, dict[str, Any]], dict[str, Any]] = call_tool,
+) -> int:
+    try:
+        token = read_token(token_path)
+        url = hub_url(settings)
+    except SnapshotError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    arguments: dict[str, Any] = {}
+    if model:
+        arguments["model"] = model
+    if since:
+        arguments["since"] = since
+    try:
+        reply = call(url, token, protocol.TOOL_REVIEWS, arguments)
+    except HubUnavailable as exc:
+        print(f"Ошибка: хаб недоступен: {exc}", file=sys.stderr)
+        return 1
+    except SnapshotError as exc:
+        print(f"Ошибка: {str(exc).replace(token, '***')}", file=sys.stderr)
+        return 1
+    reviews = reply.get("reviews") or []
+    summary = summarize(reviews)
+    print(format_summary(summary))
+    return 0
