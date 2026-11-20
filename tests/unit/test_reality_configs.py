@@ -243,6 +243,26 @@ def test_custom_fingerprint_flows_to_url_singbox_and_probe() -> None:
     assert "firefox" in render_probe_client_config(params, UUID, socks_port=1080)
 
 
+def test_render_probe_client_config_xhttp_network():
+    params = RealityParams(
+        endpoint_host="1.2.3.4",
+        port=8443,
+        server_public_key="key",
+        short_id="sid",
+        sni="www.google.com",
+        flow="",
+        network="xhttp",
+        xhttp_path="/probe-path",
+        xhttp_mode="auto",
+    )
+    config = json.loads(render_probe_client_config(params, "uuid-x", socks_port=11080))
+    stream = config["outbounds"][0]["streamSettings"]
+    assert stream["network"] == "xhttp"
+    assert stream["xhttpSettings"] == {"path": "/probe-path", "mode": "auto"}
+    assert config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["flow"] == ""
+    assert "mux" not in json.dumps(config)
+
+
 def test_params_from_config_defaults_and_overrides() -> None:
     from sa_home_bot.config import RealityTransportConfig
 

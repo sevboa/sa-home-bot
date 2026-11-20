@@ -62,3 +62,15 @@ path>&mode=<mode>#<метка устройства + " · XHTTP">` на вход
 sing-box конфиги XHTTP не поддерживают и на такие параметры бросают
 `ValueError("sing-box не поддерживает XHTTP")`. Без секции ответ и все ссылки прежние
 байт в байт.
+
+## Пробник
+(2026-11-20) Пробник умеет транспорт `reality_xhttp`: служба `vpn` при секции
+`[vpn.reality.xhttp]` отдаёт в состоянии `probe_transports` = транспорты +
+`reality_alt` + `reality_xhttp`, `transports` не меняется. Строки проверок
+`reality_xhttp` не попадают в `check` состояния (как `reality_alt`). Слот
+`reality_xhttp` выпускается с `transport="reality"` и берёт `xhttp_share_url`
+(`probe_tunnel` в `SUPPORTED_PROBE_TRANSPORTS`, `_ISSUE_TRANSPORT` ведёт на
+`reality`). Номер слота: `XHTTP_SLOT_INDEX_BASE (56) + позиция сервера` —
+/24 вмещает индексы 0..63, новых транспортов в эту раскладку больше не добавить
+без смены схемы. Конфиг пробника (`probe_client_config.py`) при
+`network="xhttp"` выводит `xhttpSettings` с `path` и `mode`, `flow` пустой.

@@ -42,7 +42,7 @@ def render_probe_client_config(params: RealityParams, client_uuid: str, *, socks
                     ]
                 },
                 "streamSettings": {
-                    "network": "tcp",
+                    "network": params.network,
                     "security": "reality",
                     "realitySettings": {
                         "serverName": params.sni,
@@ -50,6 +50,11 @@ def render_probe_client_config(params: RealityParams, client_uuid: str, *, socks
                         "shortId": params.short_id,
                         "fingerprint": params.fingerprint,
                     },
+                    **(
+                        {"xhttpSettings": {"path": params.xhttp_path, "mode": params.xhttp_mode}}
+                        if params.network == "xhttp"
+                        else {}
+                    ),
                 },
             }
         ],
