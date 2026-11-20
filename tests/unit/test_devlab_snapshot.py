@@ -130,6 +130,41 @@ def test_drop_branches_pushes_archive_refspec_before_delete(tmp_path, monkeypatc
     assert ls[2] == "t0"
 
 
+def test_drop_branches_matching_archive_skips_archive_push(tmp_path, monkeypatch):
+    calls = []
+
+    def stub(cwd, *argv, env=None, secret=""):
+        calls.append((list(argv), env, secret))
+        if argv[0] == "ls-remote":
+            return StubResult(
+                "abc123\trefs/heads/agent/x\nabc123\trefs/heads/archive/agent/x\n"
+            )
+        return StubResult()
+
+    monkeypatch.setattr(snapshot, "_git", stub)
+    snapshot.drop_branches(tmp_path, "http://h", "t0", "demo", ["agent/x", "base/y"])
+    push = next(a for a in calls if a[0][0] == "push")
+    assert push[0][-2:] == [":refs/heads/agent/x", ":refs/heads/base/y"]
+    assert not any("archive" in part for part in push[0])
+
+
+def test_drop_branches_diverging_archive_fails_without_push(tmp_path, monkeypatch):
+    calls = []
+
+    def stub(cwd, *argv, env=None, secret=""):
+        calls.append(list(argv))
+        if argv[0] == "ls-remote":
+            return StubResult(
+                "abc123\trefs/heads/agent/x\ndeff99\trefs/heads/archive/agent/x\n"
+            )
+        return StubResult()
+
+    monkeypatch.setattr(snapshot, "_git", stub)
+    with pytest.raises(snapshot.SnapshotError, match="archive/agent/x"):
+        snapshot.drop_branches(tmp_path, "http://h", "t0", "demo", ["agent/x"])
+    assert len(calls) == 1
+
+
 def test_drop_branches_missing_agent_branch_fails_without_push(tmp_path, monkeypatch):
     calls = []
 

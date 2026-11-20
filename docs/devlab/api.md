@@ -120,7 +120,8 @@ claude mcp add --transport http devlab http://alfred.tail61d88b.ts.net:8720/mcp 
 - `devlab_review`: записывает оценку принятого задания. Параметры: `id` (обязательный), `verdict` (обязательный,
   одно из `accepted`, `accepted_with_fixes`, `resumed_with_step_list`, `redone`, `abandoned`), `issues`
   (массив объектов `{tag, note}` где `tag` — одно из `loop`, `missed_case`, `unhandled_error`,
-  `debug_leftover`, `comments`, `rules`, `scope`, `env`), `fix_commit` (хеш коммита с правками), `tests`
+  `debug_leftover`, `comments`, `rules`, `scope`, `task_spec` (ошибка в постановке задачи, не модели),
+  `env`), `fix_commit` (хеш коммита с правками), `tests`
   (id test-задания с полным прогоном). Возвращает записанную оценку.
 - `devlab_reviews`: читает журнал оценок. Параметры: `model` (фильтр по имени модели), `since` (дата ISO,
   включительно). Возвращает `{"reviews": [...]}`. Каждая запись содержит `id`, `model`, `profile`, `title`,
