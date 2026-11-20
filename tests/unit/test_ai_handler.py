@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from sa_home_bot.bot import ai_flow, ai_lines, ai_reply, ai_turns, voice_mode
+from sa_home_bot.bot import tools as ai_tools
 from sa_home_bot.bot.handlers import ai as ai_handler
 from sa_home_bot.bot.reply_queue import ReplyQueue
 from sa_home_bot.bot.tool_debug import ToolCalls
@@ -1657,6 +1658,46 @@ async def test_history_is_shared_builder_and_compression_scheduled_after_reply(
     assert events == ["request", "schedule:1:77"]
     rows = await store.ai_turns_for_dialogue(1, 77)
     assert rows[-1]["content"] == "Отвечаю, и позвольте отлучиться"
+
+
+@pytest.mark.parametrize("mode", [None, "sleep"], ids=["no-dismissal", "sleep"])
+async def test_compression_after_reply_skipped_when_dismissed(store, monkeypatch, mode):
+    from sa_home_bot.bot import dialogue_context
+
+    scheduled: list[tuple[int, int]] = []
+    dismissed: list[str] = []
+
+    def fake_schedule(node_link, store_, config, chat_id, dialogue_id, dst, *, num_ctx):
+        scheduled.append((chat_id, dialogue_id))
+        return True
+
+    async def fake_dismissal(message, node_link, mode_, book, notifier):
+        dismissed.append(mode_)
+
+    monkeypatch.setattr(dialogue_context.COMPRESSOR, "schedule", fake_schedule)
+    monkeypatch.setattr(ai_flow, "perform_dismissal", fake_dismissal)
+
+    services = SimpleNamespace(
+        store=store,
+        config=Settings(),
+        node_link=None,
+        book=_admin_book(),
+        notifier=FakeNotifier(),
+        interactives=None,
+        active_ai_chats=ai_flow.ActiveAiChats(),
+    )
+    history = SimpleNamespace(compress_after=True)
+    box = ai_tools.DismissalBox(mode=mode)
+    message = FakeMessage(1, text="а дальше?")
+    await ai_reply._after_delivery(
+        message, services, 77, history, ai_flow.SpeechRemarkBox(), box, None, "ответ"
+    )
+
+    if mode is None:
+        assert scheduled == [(1, 77)]
+    else:
+        assert not scheduled
+    assert dismissed == ([] if mode is None else [mode])
 
 
 async def test_bare_greeting_starts_alfreds_portrait_but_a_question_does_not(store, monkeypatch):
