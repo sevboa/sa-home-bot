@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import stat
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -276,8 +277,15 @@ def test_fixup_check_and_apply(xray_dir, monkeypatch):
     assert fixup.check() is True
 
 
-def test_fixup_registered_in_build():
-    from sa_home_bot.node.fixups import build_fixups
+def test_fixup_registered_in_build(monkeypatch):
+    from sa_home_bot.node.fixups import build_fixups, vpn_server
+
+    monkeypatch.setattr(vpn_server, "ufw_in_use", lambda: True)
+    monkeypatch.setattr(
+        vpn_server.subprocess,
+        "run",
+        lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
 
     s = _settings(VpnWarpConfig())
     assert "vpn-warp" in [f.id for f in build_fixups(s)]
