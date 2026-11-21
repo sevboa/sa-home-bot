@@ -163,6 +163,10 @@ def sort_guests(guests: Sequence[Subscription]) -> list[Subscription]:
     return sorted(guests, key=lambda sub: not has_any_vpn_right(sub))
 
 
+def visible_guests(guests: Sequence[Subscription], offset: int) -> list[Subscription]:
+    return sort_guests(guests)[offset : offset + GUEST_PAGE_SIZE]
+
+
 def build_guests_view(
     guests: Sequence[Subscription], access: dict[int, list[dict]], offset: int
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -170,7 +174,7 @@ def build_guests_view(
     lines = [f"👥 <b>Гости VPN</b> ({len(guests)})", ""]
     if not guests:
         lines.append("Гостей нет.")
-    page = guests[offset : offset + GUEST_PAGE_SIZE]
+    page = visible_guests(guests, offset)
     for guest in page:
         servers = access.get(guest.chat_id) or []
         opened = [s for s in servers if s.get("allowed")]
