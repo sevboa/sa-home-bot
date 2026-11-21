@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from getpass import getuser
@@ -27,6 +28,7 @@ from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
 from sa_home_bot.reality import probe_client_config
 from sa_home_bot.vpn import protocol as vpn_protocol
+from sa_home_bot.vpn.service_common import MAX_DEVICE_LABEL_LEN
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
@@ -37,6 +39,13 @@ _ISSUE_TRANSPORT = {
     vpn_protocol.PROBE_TRANSPORT_REALITY_XHTTP: vpn_protocol.TRANSPORT_REALITY,
     vpn_protocol.PROBE_TRANSPORT_AWG_ALT: vpn_protocol.TRANSPORT_AWG,
 }
+
+
+def probe_device_label(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> str:
+    observer = settings.node.id or socket.gethostname()
+    suffix = f"-{slot.transport}"
+    room = MAX_DEVICE_LABEL_LEN - len(vpn_protocol.PROBE_LABEL_PREFIX) - len(suffix)
+    return f"{vpn_protocol.PROBE_LABEL_PREFIX}{observer[:room]}{suffix}"
 
 
 @asynccontextmanager
@@ -69,6 +78,7 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
         issue_args: dict = {
             "chat_id": vpn_protocol.PROBE_CHAT_ID,
+            "device_label": probe_device_label(settings, slot),
             "transport": _ISSUE_TRANSPORT.get(slot.transport, slot.transport),
         }
         if slot.transport == vpn_protocol.PROBE_TRANSPORT_AWG_ALT:

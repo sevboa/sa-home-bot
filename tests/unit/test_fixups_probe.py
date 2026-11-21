@@ -1,4 +1,6 @@
+import asyncio
 import json
+import socket
 
 import pytest
 
@@ -15,6 +17,7 @@ from sa_home_bot.node.fixups import (
 )
 from sa_home_bot.reality import probe_client_config
 from sa_home_bot.reality.client_config import RealityParams
+from sa_home_bot.vpn.service_common import MAX_DEVICE_LABEL_LEN
 from tests.unit.fixups_world import FakeRoot, make_reality_slot, make_settings, make_slot
 
 REALITY_PARAMS = RealityParams(
@@ -713,3 +716,74 @@ def test_state_fixup_without_conf_keeps_sni_empty(root):
     fixup.apply()
     written = vpn_probe_state.parse(root.installed[str(vpn_probe_state.STATE_PATH)])
     assert written[0].sni is None
+
+
+class _LabelRecordingClient:
+    def __init__(self, sent):
+        self.sent = sent
+
+    async def command(self, action, args, dst, timeout):
+        self.sent.append(args)
+        return {
+            "config_text": "cfg",
+            "share_url": "x",
+            "alt_share_url": "x",
+            "xhttp_share_url": "x",
+        }
+
+
+class _LabelRecordingNode:
+    def __init__(self, sent):
+        self.sent = sent
+
+    async def __aenter__(self):
+        return _LabelRecordingClient(self.sent)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("transport", "node_id", "expected_label", "issue_transport", "alt_flag"),
+    [
+        ("awg", "osip", "probe-osip-awg", "awg", False),
+        ("awg_alt", "osip", "probe-osip-awg_alt", "awg", True),
+        ("reality", "vanka", "probe-vanka-reality", "reality", False),
+        ("reality_alt", "osip", "probe-osip-reality_alt", "reality", False),
+        ("reality_xhttp", "osip", "probe-osip-reality_xhttp", "reality", False),
+        ("awg", "", f"probe-{socket.gethostname()}-awg", "awg", False),
+    ],
+)
+def test_fetch_probe_config_sends_stable_label(
+    monkeypatch, transport, node_id, expected_label, issue_transport, alt_flag
+):
+    sent = []
+
+    async def fake_resolve_vpn_dst(client, server):
+        return type("Dst", (), {"node": server})()
+
+    monkeypatch.setattr(probe_tunnel, "_node_client", lambda settings: _LabelRecordingNode(sent))
+    monkeypatch.setattr(probe_tunnel.vpn_nodes, "resolve_vpn_dst", fake_resolve_vpn_dst)
+    monkeypatch.setattr(
+        probe_tunnel.probe_client_config, "parse_vless_url", lambda url: ({}, "uuid")
+    )
+    monkeypatch.setattr(
+        probe_tunnel.probe_client_config,
+        "render_probe_client_config",
+        lambda params, client_uuid, socks_port: "{}",
+    )
+    settings = make_settings(["vpn_check"])
+    settings.node.id = node_id
+    asyncio.run(probe_tunnel._fetch_probe_config(settings, make_slot(transport=transport)))
+    assert sent[0]["device_label"] == expected_label
+    assert sent[0]["chat_id"] == 0
+    assert sent[0]["transport"] == issue_transport
+    assert bool(sent[0].get("awg_alt")) is alt_flag
+
+
+def test_probe_device_label_fits_limit_for_long_hostname():
+    settings = make_settings(["vpn_check"])
+    settings.node.id = "n" * 200
+    label = probe_tunnel.probe_device_label(settings, make_slot(transport="reality_xhttp"))
+    assert len(label) <= MAX_DEVICE_LABEL_LEN
+    assert label.startswith("probe-") and label.endswith("-reality_xhttp")
