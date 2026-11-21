@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 
 from sa_home_bot.bot import (
@@ -58,11 +59,12 @@ async def handle_admin_screen(ctx: Ctx, value: str | None, node_id: str | None) 
     chat_id = vpn_admin_view.parse_guest_value(value)
     if chat_id is None:
         offset = parse_offset(value)
-        access = {
-            guest.chat_id: await vpn_nodes.fanout_usage(ctx.node_link, guest.chat_id)
-            for guest in guests
-        }
         offset = clamp_offset(offset, vpn_admin_view.GUEST_PAGE_SIZE, len(guests))
+        page = vpn_admin_view.visible_guests(guests, offset)
+        usages = await asyncio.gather(
+            *(vpn_nodes.fanout_usage(ctx.node_link, guest.chat_id) for guest in page)
+        )
+        access = {guest.chat_id: usage for guest, usage in zip(page, usages, strict=True)}
         text, keyboard = vpn_admin_view.build_guests_view(guests, access, offset)
         await ctx.callback.answer()
         await ctx.edit(text, keyboard)
