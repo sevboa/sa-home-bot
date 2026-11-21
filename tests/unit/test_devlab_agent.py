@@ -10,6 +10,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.agent import tools as tools_module
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT, FOLDED_OUTPUT_PREFIX, REASONING_FIELD
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
@@ -33,6 +34,7 @@ from sa_home_bot.devlab.agent.model import (
 )
 from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER, with_flow_reminder
 from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
+from sa_home_bot.devlab.agent.script import script_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
     TOOL_EDIT_FILE,
@@ -40,6 +42,7 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_GREP,
     TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
+    TOOL_RUN_SCRIPT,
     TOOL_RUN_TESTS,
     TOOL_WRITE_FILE,
     ToolBox,
@@ -53,7 +56,9 @@ RED_TEST = (sys.executable, "-c", "print('boom'); import sys; sys.exit(1)")
 DEFAULT_FILES = {"src/app.py": "VALUE = 1\n"}
 
 
-def make_loop(tmp_path, model, spec=None, limits=None, files=None, on_change=None, trace=None):
+def make_loop(
+    tmp_path, model, spec=None, limits=None, files=None, on_change=None, trace=None, clock=None
+):
     for name, text in (files or DEFAULT_FILES).items():
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +72,7 @@ def make_loop(tmp_path, model, spec=None, limits=None, files=None, on_change=Non
         limits,
         on_change=on_change,
         trace=trace,
+        **({"clock": clock} if clock else {}),
     )
     return loop, sandbox
 
@@ -792,11 +798,15 @@ async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
         edit("c3"),
         tool_reply(TOOL_FINISH, "f1", summary="готово"),
     )
-    loop, _ = make_loop(tmp_path, model, trace=entries.append)
+    ticks = iter(range(1000))
+    loop, _ = make_loop(
+        tmp_path, model, trace=entries.append, clock=lambda: next(ticks) * 0.375
+    )
     result = await loop.run("правила", "задача")
     assert result.status is AgentStatus.FINISHED
     steps = [entry for entry in entries if "step" in entry]
     assert [entry["step"] for entry in steps] == [1, 2, 3, 4]
+    assert {entry["model_s"] for entry in steps} == {0.38}
     assert entries[0]["event"] == "start"
     assert entries[-1]["event"] == "end"
     assert entries[-1]["status"] == "finished"
@@ -808,6 +818,25 @@ async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
     assert steps[1]["calls"][0]["result"].startswith("ошибка")
     assert steps[-1]["calls"][0]["name"] == TOOL_FINISH
     assert steps[-1]["calls"][0]["rejected"] is False
+
+
+@pytest.mark.parametrize(
+    ("code", "failed"), [("print('ok')", False), ("raise ValueError('нет')", True)]
+)
+async def test_trace_notes_run_script_code_size_and_failure(tmp_path, monkeypatch, code, failed):
+    monkeypatch.setattr(
+        tools_module, "script_argv", lambda source: script_argv(source, python=sys.executable)
+    )
+    entries = []
+    spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
+    model = ScriptedChatModel(tool_reply(TOOL_RUN_SCRIPT, "s1", code=code))
+    loop, _ = make_loop(
+        tmp_path, model, spec=spec, limits=AgentLimits(max_steps=1), trace=entries.append
+    )
+    await loop.run("правила", "задача")
+    call = next(entry for entry in entries if "step" in entry)["calls"][0]
+    assert call["code_chars"] == len(code)
+    assert call["script_failed"] is failed
 
 
 async def test_trace_marks_rejected_finish_and_crane(tmp_path):

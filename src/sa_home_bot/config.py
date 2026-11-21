@@ -172,6 +172,7 @@ class DevlabProfileConfig(BaseModel):
     write_prefixes: list[str] = Field(default_factory=list)
     allow_no_changes: bool = False
     require_verdict: bool = False
+    code_mode: bool = False
 
 
 class DevlabConfig(BaseModel):

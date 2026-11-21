@@ -478,6 +478,7 @@ class AgentWorker(WorkerLoops):
                 write_prefixes=tuple(profile.write_prefixes),
                 allow_no_changes=profile.allow_no_changes,
                 require_verdict=profile.require_verdict,
+                code_mode=profile.code_mode,
             )
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)

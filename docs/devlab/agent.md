@@ -196,7 +196,7 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
   `stop` из `poll` отменяет задачу цикла → `abandon` → `stopped` (`agent/<id>` остаётся с частичным результатом,
   `wip/<id>` нет). Каталог задания удаляется после закрытия.
 - Журнал шагов (60.9.6): `agent/trace.py::StepTrace` пишет `<job root>/steps.jsonl` — строка JSON на событие:
-  `{"event": "start", "resumed"}` в начале каждого отрезка, по строке на ответ модели (`step`, `t`, `tokens_in/out`,
+  `{"event": "start", "resumed"}` в начале каждого отрезка, по строке на ответ модели (`step`, `t`, `model_s` — время запроса к модели, `tokens_in/out`,
   `cost_usd`, `window` — оценка окна в токенах после свёртки, `folded` — свёртка сработала, `text` — первые 300 симв.
   ответа без вызовов, `skipped` — число вызовов, пропущенных после `ask_owner` (0, если вопроса не было), `calls`: `name`, `args` — аргументы, длинные значения обрезаны через `context.shrink_arguments`,
   `result` — первые 300 симв. итога и `result_chars`, `rejected` — `finish`/`step_done` отклонён стражем) и
@@ -496,3 +496,71 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 `requeue` и для агентских заданий, предел — `AGENT_MAX_REQUEUES` = 2 (см. `docs/devlab/hub.md`,
 «Возврат агентского задания в очередь»); следующий заход продолжает с `wip/<id>` через
 `AgentRepo.open()`.
+
+## Code Mode: скрипт модели (2026-11-21)
+
+Роль с Code Mode получает инструмент `run_script(code)`: модель пишет Python, и за один ход скрипт читает
+сразу несколько файлов, ищет и печатает только нужные куски, ставит в очередь правки и узкие тесты. На стенде
+2026-11-20 модель без такого инструмента читала файлы по одному (23 `read_file` на задачу).
+
+Модуль `devlab/agent/script.py`. `script_argv(code)` собирает `[python, "-I", "-c", source]` для
+`Sandbox.exec` (тот же контейнер задания, корень проекта — текущий каталог, `-I`: модули проекта не
+импортируются). `source` = пролог + код модели (вставлен через `repr`) + исполнение в отдельном
+пространстве имён через `exec(compile(code, "<script>", "exec"))`. Пролог — строка в коде, не файл в дереве.
+Функции пролога:
+- `ls(prefix="")` — отсортированные относительные пути файлов, каталоги `IGNORED_DIRS` песочницы пропущены;
+- `read(path, start=1, end=None)` — строки с номерами `"{n}\t{line}"`, как у `read_file`;
+- `read_many(paths)` — словарь путь → текст файла целиком в том же виде;
+- `grep(pattern, prefix="", context=0)` — список `"path:n:line"` для совпадений и `"path-n-line"` для
+  соседних строк; файлы больше 200 000 байт и не UTF-8 пропускаются, не больше 200 совпадений
+  (`SCRIPT_GREP_MAX_MATCHES`, у `grep`-инструмента 50);
+- `edit(path, old, new)`, `write(path, content)`, `run_tests(paths)` — файлы не трогают, только дописывают
+  действие в список; аргументы — строки, иначе `TypeError` сразу в скрипте; `run_tests` принимает список
+  путей (или одну строку) и кладёт их через пробел, как `paths` у инструмента.
+
+Правки отложены, потому что политика путей роли (`write_prefixes`, `forbidden_paths`, секреты), дописывание
+перевода строки и журнал шагов живут на хосте в `ToolBox`; скрипт в контейнере их обошёл бы.
+
+Последней строкой пролог печатает `ACTIONS_MARKER` (`"DEVLAB_ACTIONS "`) и JSON
+`{"failed": bool, "actions": [{"tool": имя, "args": {...}}]}`. Имя действия — имя функции пролога
+(`ACTION_EDIT`/`ACTION_WRITE`/`ACTION_RUN_TESTS`), а не инструмента: `tools.py` будет импортировать
+`script.py`, и обратный импорт констант инструментов замкнул бы цикл; соответствие действие → инструмент
+лежит в `tools.py`. Исключение в коде печатает трассировку в stdout и ставит `failed`; `sys.exit(0)` —
+не сбой. `parse_output` берёт последнюю строку с маркером, вывод — текст без неё; нет маркера или JSON
+битый — `failed=True`, действий нет, вывод целиком. Тесты: `tests/unit/test_devlab_agent_script.py`.
+
+Флаг роли: `code_mode = true` в `[devlab.agent_profiles.<роль>]` (`DevlabProfileConfig.code_mode`, по
+умолчанию выключен). Работник агента переносит его в `AgentSpec.code_mode` тем же `replace`, что и
+`write_prefixes`; задание без роли идёт с `code_mode=False`. Тест:
+`test_profile_fields_reach_toolbox_spec` в `tests/unit/test_devlab_agent_worker.py`.
+
+Инструмент `run_script` (`TOOL_RUN_SCRIPT`, схема `RUN_SCRIPT_DEFINITION` в `tools.py`) есть в
+`ToolBox.definitions` и в обработчиках только при `spec.code_mode`; без флага `call` отвечает «неизвестный
+инструмент», набор и размер схем прежние. `ToolBox._run_script`:
+- снимает `changed_digests` песочницы до и после исполнения; если скрипт сам изменил файлы (`open(..., "w")`,
+  `os.remove`), действия не исполняются, ответ называет пути и велит менять файлы только через
+  `edit()`/`write()`, а изменённое вернуть через `edit_file`/`write_file` (`mutating=True`). Отката нет:
+  содержимого базы у `ToolBox` нет. Прямые записи запрещены, потому что обходят политику путей роли и
+  закрытые пути;
+- таймаут — обычный `ExecResult.summary`, без действий;
+- скрипт упал (`failed`) — вывод с трассировкой, действия не исполняются;
+- иначе действия по порядку через обычные обработчики (`SCRIPT_ACTION_TOOLS`: `edit` → `edit_file`,
+  `write` → `write_file`, `run_tests` → `run_tests`) — с той же проверкой путей и переводом строки.
+  Ответ: вывод скрипта (конец, обрезанный до `output_chars` общим `clip_tail` из `sandbox.py`, тем же, что
+  в `ExecResult.summary`), затем строка «действие N <инструмент>: <итог>» на каждое. Первая ошибка
+  (`ToolError`/`SandboxPathError`) останавливает остальные: они помечаются «пропущено после ошибки».
+  Красный `run_tests` ошибкой не считается.
+- `mutating` — если исполнено хоть одно `edit`/`write`; `green` — из последнего исполненного
+  `run_tests` (иначе `None`), его цикл и считает в красные прогоны.
+
+Ответ `run_script` не начинается с `[код 0]`, чтобы повтор скрипта не получал подсказку «результат зелёный».
+Тесты: `tests/unit/test_devlab_agent_run_script.py`.
+
+Журнал шагов (`steps.jsonl`): у каждого шага `model_s` — время `ChatModel.complete` в секундах по часам цикла
+(`clock`, `time.monotonic`), округлено до 0.01: ожидание GPU и генерация вместе, раздельных времён шлюз пока не
+отдаёт (стенд 2026-11-20: ~15 мин ожидания GPU терялись в общем времени задачи). У вызова `run_script` в `calls`
+добавлены `code_chars` — длина кода (по полным аргументам, до обрезки `shrink_arguments`) и `script_failed`:
+ответ начинается с `SCRIPT_FAILED_HEAD` (`"[скрипт упал]"`, `script.py`), его `ToolBox._run_script` ставит
+первой строкой, когда скрипт упал или маркер действий не разобран. Таймаут скрипта сюда не попадает: у него свой
+заголовок `[таймаут N с]`. Тесты: `test_trace_has_one_entry_per_step_and_cuts_long_arguments`,
+`test_trace_notes_run_script_code_size_and_failure` в `tests/unit/test_devlab_agent.py`.

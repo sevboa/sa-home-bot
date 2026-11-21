@@ -24,10 +24,12 @@ from sa_home_bot.devlab.agent.model import (
     ToolCall,
 )
 from sa_home_bot.devlab.agent.sandbox import OK_HEAD
+from sa_home_bot.devlab.agent.script import SCRIPT_FAILED_HEAD
 from sa_home_bot.devlab.agent.tools import (
     READ_ONLY_TOOLS,
     TOOL_ASK_OWNER,
     TOOL_FINISH,
+    TOOL_RUN_SCRIPT,
     TOOL_STEP_DONE,
     ToolBox,
     ToolError,
@@ -145,6 +147,14 @@ def _repeat_hint(name: str, text: str) -> str:
     return REPEAT_GREEN_HINT if text.startswith(OK_HEAD) else REPEAT_HINT
 
 
+def _script_code(arguments: str) -> str:
+    try:
+        code = json.loads(arguments).get("code", "")
+    except (ValueError, AttributeError):
+        return ""
+    return code if isinstance(code, str) else ""
+
+
 def _call_label(name: str, args: dict[str, Any]) -> str:
     target = args.get("path") or args.get("command") or ""
     return f"{name} {target}".strip()
@@ -181,9 +191,12 @@ class AgentLoop:
         if self._trace is not None:
             self._trace({"t": int(time.time()), **entry})
 
-    def _emit_step(self, seg: Segment, reply: ModelReply, window: int, folded: bool) -> None:
+    def _emit_step(
+        self, seg: Segment, reply: ModelReply, window: int, folded: bool, model_s: float
+    ) -> None:
         self._emit(
             step=seg.steps,
+            model_s=model_s,
             tokens_in=reply.tokens_in,
             tokens_out=reply.tokens_out,
             cost_usd=reply.cost_usd,
@@ -271,17 +284,19 @@ class AgentLoop:
             seg.calls = []
             seg.skipped = 0
             seg.repeat_reason = None
+            asked_at = self._clock()
             try:
                 reply = await self._model.complete(messages, self._tools.definitions)
             except PaidFreeModelError as exc:
                 return self._crane_result(seg, messages, Crane.PAID_FREE, str(exc))
             except ModelError as exc:
                 return self._result(AgentStatus.MODEL_FAILED, seg, reason=str(exc))
+            model_s = round(self._clock() - asked_at, 2)
             seg.tokens_in += reply.tokens_in
             seg.tokens_out += reply.tokens_out
             messages.append(reply.as_message())
             if not reply.tool_calls:
-                self._emit_step(seg, reply, window, window < before)
+                self._emit_step(seg, reply, window, window < before, model_s)
                 seg.idle += 1
                 if seg.idle > limits.max_idle_replies:
                     return self._result(
@@ -293,7 +308,7 @@ class AgentLoop:
                 continue
             seg.idle = 0
             finished = await self._handle_calls(reply.tool_calls, seg)
-            self._emit_step(seg, reply, window, window < before)
+            self._emit_step(seg, reply, window, window < before, model_s)
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
             if seg.repeat_reason is not None:
@@ -339,15 +354,17 @@ class AgentLoop:
             args = json.loads(shrink_arguments(call.arguments))
         except ValueError:
             args = {}
-        seg.calls.append(
-            {
-                "name": call.name,
-                "args": args,
-                "result": text[:TRACE_TEXT_CHARS],
-                "result_chars": len(text),
-                "rejected": text.startswith((FINISH_REJECTED, STEP_REJECTED)),
-            }
-        )
+        entry = {
+            "name": call.name,
+            "args": args,
+            "result": text[:TRACE_TEXT_CHARS],
+            "result_chars": len(text),
+            "rejected": text.startswith((FINISH_REJECTED, STEP_REJECTED)),
+        }
+        if call.name == TOOL_RUN_SCRIPT:
+            entry["code_chars"] = len(_script_code(call.arguments))
+            entry["script_failed"] = text.startswith(SCRIPT_FAILED_HEAD)
+        seg.calls.append(entry)
 
     async def _execute(self, call: ToolCall, seg: Segment) -> tuple[str, str | None]:
         try:
