@@ -201,10 +201,34 @@ def _awg_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None
     )
 
 
+def _reality_conf_doc_or_none(text: str | None) -> dict | None:
+    if text is None:
+        return None
+    try:
+        doc = json.loads(text)
+        doc["inbounds"][0]["port"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _reality_doc_port(doc: dict) -> int | None:
+    try:
+        return int(doc["inbounds"][0]["port"])
+    except (TypeError, ValueError):
+        return None
+
+
 def _reality_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
     ensure_xray_binary()
     conf_path = vpn_probe_state.reality_conf_path(slot)
-    if path_exists(conf_path):
+    existing_doc = _reality_conf_doc_or_none(_read_if_exists_or_none(conf_path))
+    if existing_doc is not None:
+        if _reality_doc_port(existing_doc) != slot.socks_port:
+            existing_doc["inbounds"][0]["port"] = slot.socks_port
+            install_root_file(
+                conf_path, json.dumps(existing_doc, indent=2), mode="0600", make_parents=True
+            )
         return
     conf_text = fetch_probe_config_or_fail(settings, slot, "reality-конфиг")
     install_root_file(conf_path, conf_text, mode="0600", make_parents=True)
