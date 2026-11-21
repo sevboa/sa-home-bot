@@ -11,6 +11,7 @@ from sa_home_bot.backup.snapshot import SnapshotBackup
 from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import Settings
 from sa_home_bot.db.connection import Database
+from sa_home_bot.domain.models import OK
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ActionParam,
@@ -79,6 +80,7 @@ from sa_home_bot.vpn.service_common import (
 from sa_home_bot.vpn.sub_peers import SubPeersMixin
 from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 from sa_home_bot.vpn.usage import UsageMixin
+from sa_home_bot.vpn.warp_probe import WarpProbeMixin
 
 __all__ = [
     "CHECK_STALE_FACTOR",
@@ -100,6 +102,7 @@ class VpnService(
     ProxyMixin,
     ChecksMixin,
     ApkMixin,
+    WarpProbeMixin,
 ):
     def __init__(
         self,
@@ -139,6 +142,10 @@ class VpnService(
         self._sub_stale: dict[tuple[str, str], list[subs.SubEntry | subs.AwgSubEntry]] = {}
         self._sub_stale_info: dict[tuple[str, str], subs.NodeInfo] = {}
         self._peer_nodes_cache: tuple[float, list[str]] | None = None
+        self._warp_status = OK
+        self._warp_count = 0
+        self._warp_since: datetime | None = None
+        self._warp_alive: bool | None = None
 
     def _has(self, transport: str) -> bool:
         return transport in self._transports
@@ -379,6 +386,9 @@ class VpnService(
             ],
             "access_control": True,
         }
+        warp = self.warp_state()
+        if warp is not None:
+            state["warp"] = warp
         probe_transports: list[str] = []
         if self._reality_cfg is not None and self._reality_alt_params() is not None:
             probe_transports.append(PROBE_TRANSPORT_REALITY_ALT)

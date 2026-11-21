@@ -17,6 +17,7 @@ from sa_home_bot.node.fixups.host import NODE_UNIT_NAME
 from sa_home_bot.node.fixups.privileged import find_executable
 from sa_home_bot.node.fixups.vpn_server import (
     XRAY_BLOCK_OUTBOUND_TAG,
+    XRAY_WARP_PROBE_INBOUND_TAG,
     write_xray_config_with_test,
     xray_client_inbound_tags,
     xray_config_path,
@@ -84,6 +85,28 @@ def _is_warp_rule(rule: dict) -> bool:
     return rule.get("balancerTag") == WARP_TAG or rule.get("outboundTag") == WARP_TAG
 
 
+def warp_probe_inbound(port: int) -> dict:
+    return {
+        "tag": XRAY_WARP_PROBE_INBOUND_TAG,
+        "listen": "127.0.0.1",
+        "port": port,
+        "protocol": "socks",
+        "settings": {"auth": "noauth", "udp": False},
+    }
+
+
+def warp_probe_rule() -> dict:
+    return {
+        "type": "field",
+        "inboundTag": [XRAY_WARP_PROBE_INBOUND_TAG],
+        "balancerTag": WARP_TAG,
+    }
+
+
+def _is_probe_rule(rule: dict) -> bool:
+    return rule.get("inboundTag") == [XRAY_WARP_PROBE_INBOUND_TAG]
+
+
 def warp_rule(domains: list[str], inbound_tags: list[str]) -> dict:
     return {
         "type": "field",
@@ -139,7 +162,11 @@ def _add_quic_sniffing(config: dict, tags: list[str]) -> None:
 
 
 def with_warp(
-    config: dict, keys: list[dict], domains: list[str], inbound_tags: list[str] | None = None
+    config: dict,
+    keys: list[dict],
+    domains: list[str],
+    probe_port: int,
+    inbound_tags: list[str] | None = None,
 ) -> dict:
     out = copy.deepcopy(config)
     tags = list(inbound_tags) if inbound_tags is not None else xray_client_inbound_tags(out)
@@ -150,14 +177,19 @@ def with_warp(
     balancers = [b for b in routing.get("balancers", []) if b.get("tag") != WARP_TAG]
     routing["balancers"] = [*balancers, warp_balancer()]
     rules = [r for r in routing.get("rules", []) if not _is_warp_rule(r)]
-    rules.insert(_last_block_index(rules) + 1, warp_rule(domains, tags))
+    at = _last_block_index(rules) + 1
+    rules[at:at] = [warp_probe_rule(), warp_rule(domains, tags)]
     routing["rules"] = rules
+    inbounds = [
+        i for i in out.setdefault("inbounds", []) if i.get("tag") != XRAY_WARP_PROBE_INBOUND_TAG
+    ]
+    out["inbounds"] = [*inbounds, warp_probe_inbound(probe_port)]
     out["burstObservatory"] = warp_observatory()
     _add_quic_sniffing(out, tags)
     return out
 
 
-def warp_applied(config: dict, n: int, domains: list[str]) -> bool:
+def warp_applied(config: dict, n: int, domains: list[str], probe_port: int) -> bool:
     warp_tags = sorted(o["tag"] for o in config.get("outbounds", []) if _is_warp_outbound(o))
     if warp_tags != sorted(warp_outbound_tag(i) for i in range(1, n + 1)):
         return False
@@ -167,10 +199,20 @@ def warp_applied(config: dict, n: int, domains: list[str]) -> bool:
     if config.get("burstObservatory") != warp_observatory():
         return False
     rules = routing.get("rules", [])
-    indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r)]
-    if len(indexes) != 1:
+    probe_indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r) and _is_probe_rule(r)]
+    indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r) and not _is_probe_rule(r)]
+    if len(indexes) != 1 or len(probe_indexes) != 1:
         return False
     index = indexes[0]
+    if probe_indexes[0] > index or probe_indexes[0] <= _last_block_index(rules):
+        return False
+    if rules[probe_indexes[0]] != warp_probe_rule():
+        return False
+    probe_inbounds = [
+        i for i in config.get("inbounds", []) if i.get("tag") == XRAY_WARP_PROBE_INBOUND_TAG
+    ]
+    if probe_inbounds != [warp_probe_inbound(probe_port)]:
+        return False
     if index <= _last_block_index(rules):
         return False
     tags = xray_client_inbound_tags(config)
@@ -288,14 +330,16 @@ def make_vpn_warp_fixup(settings: Settings) -> Fixup:
             config = json.loads(xray_config_path().read_text(encoding="utf-8"))
         except Exception:
             return False
-        return warp_applied(config, warp.keys, warp.domains)
+        return warp_applied(config, warp.keys, warp.domains, warp.probe_port)
 
     def apply() -> None:
         warp = settings.vpn.warp
         keys = ensure_warp_keys(warp.keys)
         config_path = xray_config_path()
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        write_xray_config_with_test(config_path, with_warp(config, keys, warp.domains))
+        write_xray_config_with_test(
+            config_path, with_warp(config, keys, warp.domains, warp.probe_port)
+        )
         restart = subprocess.run(["systemctl", "--user", "restart", "xray"], check=False)
         if restart.returncode != 0:
             raise FixupError("конфиг записан, но systemctl --user restart xray не сработал")

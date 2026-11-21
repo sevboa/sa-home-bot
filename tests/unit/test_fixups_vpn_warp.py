@@ -15,6 +15,7 @@ from tests.unit.fixups_world import make_settings
 
 DOMAINS = ["youtube.com", "googlevideo.com"]
 INBOUNDS = ["reality-in", "reality-alt"]
+PORT = 10886
 
 
 def _key(n: int = 1) -> dict:
@@ -44,21 +45,21 @@ def _config() -> dict:
 
 
 def _applied(n: int = 2) -> dict:
-    return vpn_warp.with_warp(_config(), [_key(i) for i in range(1, n + 1)], DOMAINS)
+    return vpn_warp.with_warp(_config(), [_key(i) for i in range(1, n + 1)], DOMAINS, PORT)
 
 
 def test_with_warp_idempotent():
     once = _applied()
-    twice = vpn_warp.with_warp(once, [_key(1), _key(2)], DOMAINS)
+    twice = vpn_warp.with_warp(once, [_key(1), _key(2)], DOMAINS, PORT)
     assert twice == once
     assert [o["tag"] for o in once["outbounds"]].count("warp-1") == 1
     assert len(once["routing"]["balancers"]) == 1
-    assert sum(1 for r in once["routing"]["rules"] if r.get("balancerTag") == "warp") == 1
+    assert sum(1 for r in once["routing"]["rules"] if r.get("balancerTag") == "warp") == 2
 
 
 def test_with_warp_rule_after_private_block_and_balancer():
     rules = _applied()["routing"]["rules"]
-    index = next(i for i, r in enumerate(rules) if r.get("balancerTag") == "warp")
+    index = next(i for i, r in enumerate(rules) if "domain" in r and r.get("balancerTag") == "warp")
     block_indexes = [i for i, r in enumerate(rules) if r.get("outboundTag") == "block"]
     assert index > max(block_indexes)
     assert rules[index]["inboundTag"] == INBOUNDS
@@ -80,7 +81,7 @@ def test_with_warp_balancer_and_observatory():
 
 def test_with_warp_adds_quic_to_sniffing_without_duplicates():
     out = _applied()
-    again = vpn_warp.with_warp(out, [_key(1), _key(2)], DOMAINS)
+    again = vpn_warp.with_warp(out, [_key(1), _key(2)], DOMAINS, PORT)
     for inbound in again["inbounds"]:
         if inbound["tag"] in INBOUNDS:
             assert inbound["sniffing"]["destOverride"] == ["http", "tls", "quic"]
@@ -93,12 +94,12 @@ def test_with_warp_replaces_manual_outbound_tag():
     config["routing"]["rules"].append(
         {"type": "field", "inboundTag": INBOUNDS, "domain": ["domain:x.com"], "outboundTag": "warp"}
     )
-    out = vpn_warp.with_warp(config, [_key(1)], DOMAINS)
+    out = vpn_warp.with_warp(config, [_key(1)], DOMAINS, PORT)
     assert [o["tag"] for o in out["outbounds"] if o["tag"].startswith("warp")] == ["warp-1"]
     warp_rules = [
         r for r in out["routing"]["rules"] if "warp" in (r.get("outboundTag"), r.get("balancerTag"))
     ]
-    assert len(warp_rules) == 1
+    assert len(warp_rules) == 2
 
 
 def test_warp_outbound_shape():
@@ -122,17 +123,23 @@ def test_warp_outbound_shape():
         (lambda c: c["inbounds"][0]["sniffing"]["destOverride"].remove("quic"), False),
         (lambda c: c["routing"]["rules"].reverse(), False),
         (lambda c: c["routing"]["rules"][-1].update(domain=["domain:other.com"]), False),
+        (
+            lambda c: c.update(inbounds=[i for i in c["inbounds"] if i["tag"] != "warp-probe"]),
+            False,
+        ),
+        (lambda c: c["inbounds"][-1].update(port=1), False),
+        (lambda c: c["routing"]["rules"].remove(vpn_warp.warp_probe_rule()), False),
     ],
 )
 def test_warp_applied(mutate, expected):
     config = _applied()
     mutate(config)
-    assert vpn_warp.warp_applied(config, 2, DOMAINS) is expected
+    assert vpn_warp.warp_applied(config, 2, DOMAINS, PORT) is expected
 
 
 def test_warp_applied_wrong_key_count():
-    assert vpn_warp.warp_applied(_applied(2), 3, DOMAINS) is False
-    assert vpn_warp.warp_applied(_config(), 1, DOMAINS) is False
+    assert vpn_warp.warp_applied(_applied(2), 3, DOMAINS, PORT) is False
+    assert vpn_warp.warp_applied(_config(), 1, DOMAINS, PORT) is False
 
 
 def _registration(client_id: bytes = b"\x01\x02\x03") -> dict:
@@ -272,7 +279,7 @@ def test_fixup_check_and_apply(xray_dir, monkeypatch):
     fixup.apply()
     assert (xray_dir / "warp-1.json").exists()
     assert (xray_dir / "warp-2.json").exists()
-    assert vpn_warp.warp_applied(written["cfg"], 2, DOMAINS)
+    assert vpn_warp.warp_applied(written["cfg"], 2, DOMAINS, PORT)
     (xray_dir / "config.json").write_text(json.dumps(written["cfg"]))
     assert fixup.check() is True
 
@@ -302,3 +309,27 @@ def test_warp_config_defaults_and_bounds():
     for bad in (0, 5):
         with pytest.raises(ValidationError):
             VpnWarpConfig(keys=bad)
+
+
+def test_probe_inbound_is_not_a_client_inbound():
+    config = _applied()
+    assert "warp-probe" in [i["tag"] for i in config["inbounds"]]
+    assert vpn_server.xray_client_inbound_tags(config) == INBOUNDS
+    assert vpn_server.xray_blocks_private(config)
+
+
+def test_probe_rule_precedes_domain_rule_and_follows_private_block():
+    rules = _applied()["routing"]["rules"]
+    probe = rules.index(vpn_warp.warp_probe_rule())
+    domain = next(
+        i for i, r in enumerate(rules) if "domain" in r and r.get("balancerTag") == "warp"
+    )
+    last_block = max(i for i, r in enumerate(rules) if r.get("outboundTag") == "block")
+    assert last_block < probe < domain
+
+
+def test_probe_inbound_listens_on_loopback_only():
+    inbound = vpn_warp.warp_probe_inbound(PORT)
+    assert inbound["listen"] == "127.0.0.1"
+    assert inbound["port"] == PORT
+    assert inbound["protocol"] == "socks"

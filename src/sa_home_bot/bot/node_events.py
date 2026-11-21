@@ -519,6 +519,8 @@ _VPN_ADMIN_EVENTS = (
     vpn_protocol.EVENT_VPN_NODE_QUOTA_WARNING,
     vpn_protocol.EVENT_VPN_PEER_ISSUED,
     vpn_protocol.EVENT_VPN_SERVER_RESTORED,
+    vpn_protocol.EVENT_VPN_WARP_DOWN,
+    vpn_protocol.EVENT_VPN_WARP_RECOVERED,
 )
 
 
@@ -587,6 +589,15 @@ async def _handle_vpn_event(name, data, book, notifier, store, node_link) -> Non
             country, int(data.get("used_bytes") or 0), int(data.get("limit_bytes") or 0)
         )
         await _record_and_notify_admins(book, notifier, store, name, None, text)
+    elif name in (vpn_protocol.EVENT_VPN_WARP_DOWN, vpn_protocol.EVENT_VPN_WARP_RECOVERED):
+        render = (
+            vpn_notify.warp_down_text
+            if name == vpn_protocol.EVENT_VPN_WARP_DOWN
+            else vpn_notify.warp_recovered_text
+        )
+        await _record_and_notify_admins(
+            book, notifier, store, name, data.get("node"), render(country)
+        )
     elif name == vpn_protocol.EVENT_VPN_PEER_ISSUED:
         if not chat_id:
             return
