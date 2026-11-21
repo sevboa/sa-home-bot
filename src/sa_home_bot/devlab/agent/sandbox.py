@@ -26,6 +26,12 @@ def clip_tail(text: str, limit: int) -> str:
     return f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
 
 
+def clip_head(text: str, limit: int, hint: str = "") -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n[обрезано: показано начало {limit} симв. из {len(text)}{hint}]"
+
+
 @dataclass(frozen=True)
 class ExecResult:
     exit_code: int

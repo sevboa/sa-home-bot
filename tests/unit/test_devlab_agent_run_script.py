@@ -71,6 +71,19 @@ async def test_action_outside_role_paths_stops_the_rest(project):
     assert not outcome.mutating
 
 
+async def test_long_output_keeps_head_and_failure_keeps_tail(project):
+    box = toolbox(project, output_chars=100)
+    outcome = await box.call(TOOL_RUN_SCRIPT, {"code": "print('начало' + 'x' * 30000)"})
+    assert outcome.text.startswith("начало")
+    assert "обрезано: показано начало" in outcome.text
+    failed = await box.call(
+        TOOL_RUN_SCRIPT, {"code": "print('x' * 30000)\nraise ValueError('конец')"}
+    )
+    assert failed.text.startswith(SCRIPT_FAILED_HEAD)
+    assert "ValueError: конец" in failed.text
+    assert "exec(compile" not in failed.text
+
+
 async def test_direct_write_from_script_blocks_actions(project):
     box = toolbox(project)
     code = "open('src/a.py', 'w').write('x = 0\\n')\nwrite('docs/n.md', 'новое\\n')"

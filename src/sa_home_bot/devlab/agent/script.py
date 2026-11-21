@@ -15,6 +15,8 @@ SCRIPT_GREP_MAX_MATCHES = 200
 SCRIPT_GREP_MAX_FILE_BYTES = 200_000
 SCRIPT_FILENAME = "<script>"
 SCRIPT_FAILED_HEAD = "[скрипт упал]"
+SCRIPT_OUTPUT_CHARS = 20_000
+SCRIPT_CLIPPED_HINT = "; печатай только нужное"
 PROCESS_FORBIDDEN = (
     "процессы из скрипта запрещены: команды — через run(), тесты — через run_tests()"
 )
@@ -179,9 +181,11 @@ try:
     exec(compile(_code, {SCRIPT_FILENAME!r}, "exec"), _namespace)
 except SystemExit as _exit:
     _failed = _exit.code not in (None, 0)
-except BaseException:
+except BaseException as _error:
     _failed = True
-    traceback.print_exc(file=sys.stdout)
+    traceback.print_exception(
+        type(_error), _error, _error.__traceback__.tb_next, file=sys.stdout
+    )
 sys.stdout.flush()
 print("\\n" + {ACTIONS_MARKER!r} + json.dumps(
     {{"failed": _failed, "actions": _ACTIONS}}, ensure_ascii=False

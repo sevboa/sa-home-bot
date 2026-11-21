@@ -8,13 +8,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from sa_home_bot.devlab.agent.paths import matches
-from sa_home_bot.devlab.agent.sandbox import Sandbox, SandboxPathError, clip_tail, safe_relative
+from sa_home_bot.devlab.agent.sandbox import (
+    Sandbox,
+    SandboxPathError,
+    clip_head,
+    clip_tail,
+    safe_relative,
+)
 from sa_home_bot.devlab.agent.script import (
     ACTION_EDIT,
     ACTION_RUN,
     ACTION_RUN_TESTS,
     ACTION_WRITE,
+    SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
+    SCRIPT_OUTPUT_CHARS,
     parse_output,
     script_argv,
     script_help,
@@ -178,7 +186,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 RUN_SCRIPT_DEFINITION = _schema(
     TOOL_RUN_SCRIPT,
     "Исполняет код Python. Корень проекта — текущий каталог, src в sys.path: пакеты проекта "
-    "импортируются. Нужное печатай через print. edit/write/run/run_tests исполняются после "
+    f"импортируются. Нужное печатай через print, вывод длиннее {SCRIPT_OUTPUT_CHARS} симв. "
+    "обрезается с конца. edit/write/run/run_tests исполняются после "
     "скрипта по порядку; процессы из скрипта запрещены. Один скрипт — весь шаг: читай все нужные "
     "файлы сразу через read_many, ищи grep с context, затем ставь edit/write и run_tests в том же "
     "скрипте. Функции:\n" + script_help(),
@@ -384,10 +393,12 @@ class ToolBox:
         if result.timed_out:
             return ToolOutcome(result.summary(self._spec.output_chars, timeout_s))
         run = parse_output(result.output)
-        output = clip_tail(run.output, self._spec.output_chars) or SCRIPT_NO_OUTPUT
+        limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
         if run.failed:
+            output = clip_tail(run.output, limit) or SCRIPT_NO_OUTPUT
             skipped = f"\n{SCRIPT_ACTIONS_SKIPPED}" if run.actions else ""
             return ToolOutcome(f"{SCRIPT_FAILED_HEAD}\n{output}{skipped}")
+        output = clip_head(run.output, limit, SCRIPT_CLIPPED_HINT) or SCRIPT_NO_OUTPUT
         lines = [output]
         mutating = False
         green: bool | None = None
