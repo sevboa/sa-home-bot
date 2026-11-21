@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pytest
 
 from sa_home_bot.config import RealityAltConfig, RealityTransportConfig, RealityXhttpConfig
@@ -10,6 +13,7 @@ from sa_home_bot.reality.client_config import (
     render_singbox_config,
     render_singbox_multi,
     render_vless_url,
+    short_domain,
 )
 
 UUID = "11111111-2222-3333-4444-555555555555"
@@ -119,13 +123,64 @@ def test_parse_vless_url_without_type_is_tcp() -> None:
     assert params.xhttp_path == ""
 
 
-def test_singbox_rejects_xhttp_params() -> None:
+def _xhttp_params(mode: str) -> RealityParams:
     params = RealityParams.xhttp_from_config(CFG)
     assert params is not None
-    with pytest.raises(ValueError, match="sing-box не поддерживает XHTTP"):
-        render_singbox_config(params, UUID)
-    with pytest.raises(ValueError, match="sing-box не поддерживает XHTTP"):
-        render_singbox_multi([("🇺🇸 США", params, UUID)])
+    return replace(params, xhttp_mode=mode)
+
+
+def _tcp_params() -> RealityParams:
+    return RealityParams.from_config(CFG)
+
+
+@pytest.mark.parametrize("mode", ["auto", "stream-up", "packet-up"])
+@pytest.mark.parametrize("multi", [False, True])
+def test_singbox_xhttp_outbound_is_packet_up_without_flow(mode: str, multi: bool) -> None:
+    params = _xhttp_params(mode)
+    if multi:
+        config = json.loads(render_singbox_multi([("🇺🇸 XHTTP", params, UUID)]))
+        outbound = next(o for o in config["outbounds"] if o.get("tag") == "🇺🇸 XHTTP")
+    else:
+        config = json.loads(render_singbox_config(params, UUID))
+        outbound = config["outbounds"][0]
+    assert "flow" not in outbound
+    assert outbound["server_port"] == 2087
+    assert outbound["tls"]["reality"]["enabled"] is True
+    assert outbound["transport"] == {
+        "type": "xhttp",
+        "path": "/long-path",
+        "mode": "packet-up",
+        "x_padding_bytes": "100-1000",
+    }
+
+
+def test_singbox_tcp_outbound_keeps_flow_without_transport() -> None:
+    config = json.loads(render_singbox_multi([("tcp", _tcp_params(), UUID)]))
+    outbound = config["outbounds"][0]
+    assert outbound["flow"] == DEFAULT_FLOW
+    assert "transport" not in outbound
+
+
+@pytest.mark.parametrize("group", ["auto", "proxy"])
+def test_singbox_multi_groups_include_xhttp_tag(group: str) -> None:
+    servers = [("🇺🇸 Reality", _tcp_params(), UUID), ("🇺🇸 XHTTP", _xhttp_params("auto"), UUID)]
+    config = json.loads(render_singbox_multi(servers))
+    members = next(o for o in config["outbounds"] if o.get("tag") == group)["outbounds"]
+    assert "🇺🇸 XHTTP" in members
+
+
+@pytest.mark.parametrize(
+    ("sni", "expected"),
+    [
+        ("www.google.com", "google"),
+        ("azgez.com", "azgez"),
+        ("feedwonk.com", "feedwonk"),
+        ("localhost", "localhost"),
+        ("", ""),
+    ],
+)
+def test_short_domain(sni: str, expected: str) -> None:
+    assert short_domain(sni) == expected
 
 
 def test_reality_artifacts_with_xhttp_adds_xhttp_share_url() -> None:

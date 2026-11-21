@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from sa_home_bot.config import AwgAltConfig, RealityTransportConfig, VpnConfig
 from sa_home_bot.reality.client_config import RealityParams
 from sa_home_bot.vpn import subscription as subs
@@ -186,9 +188,10 @@ def test_render_without_alt_equals_old_behavior():
 
 def test_sub_links_with_alt_returns_entries_and_entry():
     from sa_home_bot.config import RealityAltConfig
+    from sa_home_bot.vpn.client_configs import ClientConfigsMixin
     from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 
-    class FakeMixin(SubscriptionLinksMixin):
+    class FakeMixin(SubscriptionLinksMixin, ClientConfigsMixin):
         _node_id = "jeeves"
         _cfg = type("obj", (), {"location": "🇳🇱 Нидерланды", "sub_port": 0})()
         _reality_cfg = RealityTransportConfig(
@@ -247,16 +250,17 @@ def test_sub_links_with_alt_returns_entries_and_entry():
     assert "entry" in result
     assert "entries" in result
     assert len(result["entries"]) == 2
-    assert result["entry"]["name"] == "🇳🇱 Нидерланды"
-    assert result["entries"][0]["name"] == "🇳🇱 Нидерланды"
-    assert result["entries"][1]["name"] == "🇳🇱 Нидерланды · 2"
+    assert result["entry"]["name"] == "🇳🇱 Reality google"
+    assert result["entries"][0]["name"] == "🇳🇱 Reality google"
+    assert result["entries"][1]["name"] == "🇳🇱 Reality cloudflare"
     assert result["entries"][1]["is_alt"] is True
 
 
 def test_sub_links_without_alt_has_no_entries_key():
+    from sa_home_bot.vpn.client_configs import ClientConfigsMixin
     from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 
-    class FakeMixin(SubscriptionLinksMixin):
+    class FakeMixin(SubscriptionLinksMixin, ClientConfigsMixin):
         _node_id = "jeeves"
         _cfg = type("obj", (), {"location": "🇳🇱 Нидерланды", "sub_port": 0})()
         _reality_cfg = RealityTransportConfig(
@@ -317,9 +321,10 @@ def test_sub_links_without_alt_has_no_entries_key():
 
 
 def _resolve_with_reply(extra: dict):
+    from sa_home_bot.vpn.client_configs import ClientConfigsMixin
     from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 
-    class FakeMixin(SubscriptionLinksMixin):
+    class FakeMixin(SubscriptionLinksMixin, ClientConfigsMixin):
         _node_id = "jeeves"
         _cfg = type("obj", (), {"location": "🇳🇱 Нидерланды", "sub_port": 0})()
         _reality_cfg = RealityTransportConfig(
@@ -549,3 +554,42 @@ def test_awg2_key_name_marks_alt_subnet_only():
     assert old_name == "🇳🇱 📱 iPhone"
     plain = SubscriptionWeb(VpnConfig(sub_port=0), lambda _t: None)
     assert plain._awg_key_name(_awg_conf("10.9.1.5/32"), found, node) == "🇳🇱 📱 iPhone"
+
+
+def _names_mixin(location: str):
+    from sa_home_bot.vpn.client_configs import ClientConfigsMixin
+
+    class NamesMixin(ClientConfigsMixin):
+        _node_id = "jeeves"
+        _cfg = type("obj", (), {"location": location})()
+
+    return NamesMixin()
+
+
+@pytest.mark.parametrize(
+    ("location", "variants", "expected"),
+    [
+        (
+            "🇳🇱 Нидерланды",
+            [(8443, "www.google.com", "tcp"), (2083, "www.cloudflare.com", "tcp")],
+            ["🇳🇱 Reality google", "🇳🇱 Reality cloudflare"],
+        ),
+        (
+            "🇺🇸 США",
+            [(8443, "www.google.com", "tcp"), (2087, "azgez.com", "xhttp")],
+            ["🇺🇸 Reality google", "🇺🇸 XHTTP azgez"],
+        ),
+        (
+            "🇳🇱 Нидерланды",
+            [(8443, "www.google.com", "tcp"), (2083, "google.com", "tcp")],
+            ["🇳🇱 Reality google 8443", "🇳🇱 Reality google 2083"],
+        ),
+        ("", [(8443, "", "tcp")], ["jeeves Reality 8443"]),
+    ],
+)
+def test_sub_entry_names(location, variants, expected):
+    params = [
+        RealityParams("198.51.100.1", port, "PUB1", "ab", sni, network=network)
+        for port, sni, network in variants
+    ]
+    assert _names_mixin(location)._sub_entry_names(params) == expected

@@ -17,6 +17,8 @@ _TAG_INSIDE = "ru-inside"
 
 DEFAULT_FLOW = "xtls-rprx-vision"
 CLIENT_FINGERPRINT = "chrome"
+XHTTP_SINGBOX_MODE = "packet-up"
+XHTTP_SINGBOX_PADDING = "100-1000"
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,12 @@ class RealityParams:
         )
 
 
+def short_domain(sni: str) -> str:
+    host = sni.strip().lower().removeprefix("www.")
+    labels = host.split(".")
+    return ".".join(labels[:-1]) if len(labels) > 1 else host
+
+
 def _remote_ruleset(tag: str) -> dict:
     return {
         "type": "remote",
@@ -103,7 +111,6 @@ def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool)
         "server": params.endpoint_host,
         "server_port": int(params.port),
         "uuid": client_uuid,
-        "flow": params.flow,
         "tls": {
             "enabled": True,
             "server_name": params.sni,
@@ -115,6 +122,16 @@ def _singbox_config(params: RealityParams, client_uuid: str, *, all_proxy: bool)
             },
         },
     }
+
+    if params.network == "xhttp":
+        proxy_out["transport"] = {
+            "type": "xhttp",
+            "path": params.xhttp_path,
+            "mode": XHTTP_SINGBOX_MODE,
+            "x_padding_bytes": XHTTP_SINGBOX_PADDING,
+        }
+    else:
+        proxy_out["flow"] = params.flow
 
     rule_sets: list[dict] = [_inline_direct_ruleset()]
     if not all_proxy:
@@ -193,8 +210,6 @@ def render_singbox_config(
     *,
     all_proxy: bool = False,
 ) -> str:
-    if params.network != "tcp":
-        raise ValueError("sing-box не поддерживает XHTTP")
     return _dump_singbox(_singbox_config(params, client_uuid, all_proxy=all_proxy))
 
 
@@ -267,9 +282,6 @@ def render_singbox_multi(
 ) -> str:
     if not servers:
         raise ValueError("нужна хотя бы одна страна")
-    for _name, params, _uuid in servers:
-        if params.network != "tcp":
-            raise ValueError("sing-box не поддерживает XHTTP")
     _first_name, first_params, first_uuid = servers[0]
     config = _singbox_config(first_params, first_uuid, all_proxy=all_proxy)
     outbounds: list[dict] = []

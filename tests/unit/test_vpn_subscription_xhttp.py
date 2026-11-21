@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sa_home_bot.reality.client_config import RealityParams
 from sa_home_bot.vpn import subscription as subs
 
@@ -90,12 +92,15 @@ def test_expand_spares_does_not_multiply_xhttp():
     ]
 
 
-def test_render_body_singbox_skips_xhttp():
-    sub = _sub([_entry(), _xhttp_entry()])
+def test_render_body_singbox_includes_xhttp():
+    sub = _sub([_entry(), _xhttp_entry("🇳🇱 XHTTP 2087")])
     body, mime = subs.render_body(sub, subs.FORMAT_SINGBOX)
     assert mime == "application/json; charset=utf-8"
-    assert "type=xhttp" not in body
-    assert "2087" not in body
+    outbounds = {o["tag"]: o for o in json.loads(body)["outbounds"]}
+    assert outbounds["🇳🇱 XHTTP 2087"]["transport"]["mode"] == "packet-up"
+    assert "flow" not in outbounds["🇳🇱 XHTTP 2087"]
+    assert "🇳🇱 XHTTP 2087" in outbounds["auto"]["outbounds"]
+    assert "🇳🇱 XHTTP 2087" in outbounds["proxy"]["outbounds"]
 
 
 def test_render_body_plain_xhttp_last():

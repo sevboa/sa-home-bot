@@ -8,6 +8,7 @@ from sa_home_bot.proto.messages import (
 )
 from sa_home_bot.reality.client_config import (
     RealityParams,
+    short_domain,
 )
 from sa_home_bot.vpn import subscription as subs
 from sa_home_bot.vpn.protocol import (
@@ -70,3 +71,16 @@ class ClientConfigsMixin:
 
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id
+
+    def _sub_entry_names(self, entries_params: list[RealityParams]) -> list[str]:
+        location = self._cfg.location.strip()
+        flag = location.split(maxsplit=1)[0] if location else self._node_id
+        names = [
+            f"{flag} {'XHTTP' if p.network == 'xhttp' else 'Reality'} "
+            f"{short_domain(p.sni) or p.port}"
+            for p in entries_params
+        ]
+        return [
+            f"{name} {p.port}" if names.count(name) > 1 else name
+            for name, p in zip(names, entries_params, strict=True)
+        ]

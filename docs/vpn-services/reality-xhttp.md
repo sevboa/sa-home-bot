@@ -42,9 +42,9 @@ XHTTP прячет долгий туннель за отдельными HTTP-з
 
 ## Подписка
 (2026-11-20) Подписка устройства с Reality отдаёт ещё одну запись «<страна> · XHTTP» на вход
-XHTTP — только в текстовых форматах (`vless://`, plain и base64, xhttp-ссылки последними,
-после alt). `format=singbox` (`render_singbox_multi`) xhttp-записи пропускает: официальный
-sing-box XHTTP не умеет. Записи помечены флагом `is_xhttp` в `SubEntry` (в проводке —
+XHTTP в `vless://` (plain и base64, xhttp-ссылки последними, после alt). С 2026-11-21
+`format=singbox` тоже отдаёт XHTTP-записи (см. `client-configs.md`, режим там всегда
+`packet-up`). Записи помечены флагом `is_xhttp` в `SubEntry` (в проводке —
 `network`/`xhttp_path`/`xhttp_mode` только при `network != "tcp"`), сортировка ставит их
 после alt, `expand_spares` их не размножает, карточка «Страны» их не показывает, на странице
 подписки рядом со ссылками — подсказка про v2RayTun/Happ (Hiddify и AmneziaVPN не
@@ -59,8 +59,7 @@ path>&mode=<mode>#<метка устройства + " · XHTTP">` на вход
 пустой, `flow` при `type=xhttp` по умолчанию пустой). Параметры собираются в
 `RealityParams.xhttp_from_config` (port/sni из секции, `network="xhttp"`, path/mode из
 секции), выдача — `peers.py::_reality_artifacts` (и для обычных чатов, и для пробника),
-sing-box конфиги XHTTP не поддерживают и на такие параметры бросают
-`ValueError("sing-box не поддерживает XHTTP")`. Без секции ответ и все ссылки прежние
+sing-box с 2026-11-21 принимает XHTTP-параметры (`transport.type = xhttp`, без `flow`). Без секции ответ и все ссылки прежние
 байт в байт.
 
 ## Пробник

@@ -272,9 +272,7 @@ def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:
     if fmt == FORMAT_SINGBOX:
-        text = render_singbox_multi(
-            [(e.name, e.params, e.uuid) for e in sub.entries if not e.is_xhttp]
-        )
+        text = render_singbox_multi([(e.name, e.params, e.uuid) for e in sub.entries])
         return text, "application/json; charset=utf-8"
     plain = "\n".join(e.url for e in sub.entries) + "\n"
     if fmt == FORMAT_PLAIN:

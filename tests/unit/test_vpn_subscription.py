@@ -396,7 +396,7 @@ async def test_token_resolves_on_any_node_with_all_countries(swarm):
     for svc in (a, b):
         sub = await svc.resolve_subscription(token)
         assert sub is not None
-        assert [e.name for e in sub.entries] == ["🇳🇱 Нидерланды", "🇺🇸 США"]
+        assert [e.name for e in sub.entries] == ["🇳🇱 Reality google", "🇺🇸 Reality google"]
         assert sub.device_label == "📱 iPhone"
         assert sub.total_bytes == 2 * 10**9
 
@@ -408,7 +408,7 @@ async def test_peer_down_keeps_last_known_country(swarm):
     a._sub_cache.clear()
     link.down.add("wooster")
     sub = await a.resolve_subscription(token)
-    assert [e.name for e in sub.entries] == ["🇳🇱 Нидерланды", "🇺🇸 США"]
+    assert [e.name for e in sub.entries] == ["🇳🇱 Reality google", "🇺🇸 Reality google"]
     peer = next(n for n in sub.nodes if n.node == "wooster")
     assert peer.ip == "198.51.100.2" and peer.health == "" and not peer.awg
     assert subs.detect_exit("198.51.100.2", sub.nodes, a._cfg.subnet) == "🇺🇸 США"
@@ -436,7 +436,7 @@ async def test_revoked_on_one_node_leaves_the_other(swarm):
         {"chat_id": CHAT, "device_label": "📱 iPhone", "transport": TRANSPORT_REALITY},
     )
     sub = await a.resolve_subscription(token)
-    assert [e.name for e in sub.entries] == ["🇳🇱 Нидерланды"]
+    assert [e.name for e in sub.entries] == ["🇳🇱 Reality google"]
 
 
 async def test_unknown_and_malformed_tokens(swarm):
