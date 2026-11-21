@@ -130,6 +130,104 @@ class SubEntry:
         )
 
 
+_AWG_INT_KEYS = frozenset({"jc", "jmin", "jmax", "s1", "s2", "s3", "s4"})
+
+
+@dataclass(frozen=True)
+class AwgSubEntry:
+    node: str
+    name: str
+    version: str
+    private_key: str
+    address: str
+    server_public_key: str
+    endpoint_host: str
+    port: int
+    dns: str
+    mtu: int
+    obfuscation: tuple[tuple[str, str], ...]
+
+    def _query(self, keepalive_key: str, tail: str) -> str:
+        parts = [
+            f"publickey={quote(self.server_public_key, safe='')}",
+            f"address={quote(self.address + '/32', safe='')}",
+            f"dns={quote(self.dns, safe=',')}",
+            f"mtu={self.mtu}",
+            "allowedips=0.0.0.0%2F0",
+            f"{keepalive_key}=25",
+            *(f"{k}={quote(v, safe='')}" for k, v in self.obfuscation),
+        ]
+        if tail:
+            parts.append(tail)
+        return "&".join(parts)
+
+    def _url(self, scheme: str, keepalive_key: str, tail: str) -> str:
+        return (
+            f"{scheme}://{quote(self.private_key, safe='')}@{self.endpoint_host}:{self.port}"
+            f"?{self._query(keepalive_key, tail)}#{quote(self.name, safe='')}"
+        )
+
+    @property
+    def urls(self) -> tuple[str, str]:
+        return (
+            self._url("amneziawg", "persistentkeepalive", ""),
+            self._url("awg", "keepalive", f"privatekey={quote(self.private_key, safe='')}"),
+        )
+
+    def singbox_endpoint(self) -> dict:
+        awg: dict = {}
+        for key, value in self.obfuscation:
+            awg[key] = int(value) if key in _AWG_INT_KEYS else value
+        return {
+            "type": "awg",
+            "tag": self.name,
+            "private_key": self.private_key,
+            "address": [f"{self.address}/32"],
+            "mtu": self.mtu,
+            "awg": awg,
+            "peers": [
+                {
+                    "address": self.endpoint_host,
+                    "port": self.port,
+                    "public_key": self.server_public_key,
+                    "allowed_ips": ["0.0.0.0/0", "::/0"],
+                    "persistent_keepalive_interval": 25,
+                }
+            ],
+        }
+
+    def to_wire(self) -> dict:
+        return {
+            "node": self.node,
+            "name": self.name,
+            "version": self.version,
+            "private_key": self.private_key,
+            "address": self.address,
+            "server_public_key": self.server_public_key,
+            "endpoint_host": self.endpoint_host,
+            "port": self.port,
+            "dns": self.dns,
+            "mtu": self.mtu,
+            "obfuscation": [[k, v] for k, v in self.obfuscation],
+        }
+
+    @classmethod
+    def from_wire(cls, raw: dict) -> AwgSubEntry:
+        return cls(
+            node=str(raw["node"]),
+            name=str(raw["name"]),
+            version=str(raw["version"]),
+            private_key=str(raw["private_key"]),
+            address=str(raw["address"]),
+            server_public_key=str(raw["server_public_key"]),
+            endpoint_host=str(raw["endpoint_host"]),
+            port=int(raw["port"]),
+            dns=str(raw["dns"]),
+            mtu=int(raw["mtu"]),
+            obfuscation=tuple((str(k), str(v)) for k, v in raw["obfuscation"]),
+        )
+
+
 @dataclass(frozen=True)
 class NodeInfo:
     node: str
@@ -178,6 +276,7 @@ class Subscription:
     expire_ts: int = 0
     chat_id: int = 0
     nodes: tuple[NodeInfo, ...] = ()
+    awg_entries: tuple[AwgSubEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,9 +371,15 @@ def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:
     if fmt == FORMAT_SINGBOX:
-        text = render_singbox_multi([(e.name, e.params, e.uuid) for e in sub.entries])
+        text = render_singbox_multi(
+            [(e.name, e.params, e.uuid) for e in sub.entries],
+            endpoints=[e.singbox_endpoint() for e in sub.awg_entries],
+        )
         return text, "application/json; charset=utf-8"
-    plain = "\n".join(e.url for e in sub.entries) + "\n"
+    lines = [e.url for e in sub.entries]
+    for awg_entry in sub.awg_entries:
+        lines.extend(awg_entry.urls)
+    plain = "\n".join(lines) + "\n"
     if fmt == FORMAT_PLAIN:
         return plain, "text/plain; charset=utf-8"
     return base64.b64encode(plain.encode()).decode() + "\n", "text/plain; charset=utf-8"

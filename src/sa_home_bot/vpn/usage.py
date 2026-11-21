@@ -11,6 +11,7 @@ from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn import service_common
 from sa_home_bot.vpn.protocol import (
     GB,
+    PURPOSE_APP,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
 )
@@ -48,8 +49,9 @@ class UsageMixin:
             "SELECT p.transport, p.public_key, p.address, p.last_handshake_at, "
             "c.last_rx, c.last_tx FROM vpn_peers p "
             "LEFT JOIN vpn_counters c ON c.public_key = p.public_key "
-            "WHERE p.chat_id = ? AND p.device_label = ? AND p.status = 'active'",
-            (chat_id, label),
+            "WHERE p.chat_id = ? AND p.device_label = ? AND p.status = 'active' "
+            "AND p.purpose = ?",
+            (chat_id, label, PURPOSE_APP),
         )
         rows = await cur.fetchall()
         handshakes = (
@@ -96,12 +98,18 @@ class UsageMixin:
     ) -> list[dict[str, Any]]:
         cur = await self._db.conn.execute(
             "SELECT p.device_label AS label, COALESCE(p.transport, 'awg') AS transport, "
-            "COALESCE(SUM(u.used_bytes), 0) AS used "
+            "p.purpose AS purpose, COALESCE(SUM(u.used_bytes), 0) AS used "
             "FROM vpn_peers p JOIN vpn_peer_usage u ON u.peer_id = p.id "
-            "WHERE p.chat_id = ? AND u.month = ? GROUP BY p.device_label, 2",
+            "WHERE p.chat_id = ? AND u.month = ? GROUP BY p.device_label, 2, 3",
             (chat_id, month),
         )
-        by_pair = {(r["label"], r["transport"]): int(r["used"]) for r in await cur.fetchall()}
+        by_pair: dict[tuple[str, str], int] = {}
+        by_label: dict[str, int] = {}
+        for r in await cur.fetchall():
+            by_label[r["label"]] = by_label.get(r["label"], 0) + int(r["used"])
+            if r["purpose"] == PURPOSE_APP:
+                key = (r["label"], r["transport"])
+                by_pair[key] = by_pair.get(key, 0) + int(r["used"])
         result: dict[str, dict[str, Any]] = {}
         for dev in devices:
             label = dev["device_label"]
@@ -119,7 +127,7 @@ class UsageMixin:
                 }
             )
         for label, entry in result.items():
-            entry["used_bytes"] = sum(v for (lbl, _t), v in by_pair.items() if lbl == label)
+            entry["used_bytes"] = by_label.get(label, 0)
         return list(result.values())
 
     async def _usage(self, args: dict[str, Any]) -> dict[str, Any]:

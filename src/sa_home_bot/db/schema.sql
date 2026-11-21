@@ -415,7 +415,11 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
     server             TEXT,
     -- awg: публичный ключ сервера на момент выдачи (39.0.8(e)): ушедший
     -- ключ значит, что гостевой конфиг протух. NULL — старый пир, не судим.
-    server_pubkey      TEXT
+    server_pubkey      TEXT,
+    -- 'app' — пир приложения AmneziaVPN, 'sub' — пир подписки (ключ хранится
+    -- в private_key, выдаётся лениво при запросе подписки, 67.2)
+    purpose            TEXT NOT NULL DEFAULT 'app',
+    private_key        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_peers_chat ON vpn_peers(chat_id);
 
