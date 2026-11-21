@@ -258,7 +258,7 @@ def test_singbox_endpoints_and_selector():
     assert ep["peers"][0]["port"] == 51821 and ep["peers"][0]["public_key"] == "srv/pub+key="
     outs = {o["tag"]: o for o in cfg["outbounds"]}
     assert "🇳🇱 AWG 1.0" in outs["proxy"]["outbounds"]
-    assert not any("AWG" in t for t in outs["auto"]["outbounds"])
+    assert any("AWG" in t for t in outs["auto"]["outbounds"])
 
 
 def test_singbox_without_awg_has_no_endpoints_key():

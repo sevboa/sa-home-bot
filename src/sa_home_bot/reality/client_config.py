@@ -289,7 +289,7 @@ def render_singbox_multi(
     for name, params, client_uuid in servers:
         single = _singbox_config(params, client_uuid, all_proxy=all_proxy)
         outbounds.append({**single["outbounds"][0], "tag": name})
-    names = [o["tag"] for o in outbounds]
+    names = [o["tag"] for o in outbounds] + [e["tag"] for e in endpoints or []]
     outbounds.append(
         {
             "type": "urltest",
@@ -304,7 +304,7 @@ def render_singbox_multi(
         {
             "type": "selector",
             "tag": "proxy",
-            "outbounds": ["auto", *names, *(e["tag"] for e in endpoints or [])],
+            "outbounds": ["auto", *names],
             "default": "auto",
         }
     )
