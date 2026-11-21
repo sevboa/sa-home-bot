@@ -244,31 +244,6 @@ def test_probe_slots_from_targets_with_xhttp():
         assert len({getattr(s, field) for s in slots}) == 2
 
 
-def test_probe_slots_from_targets_alt_index_stable():
-    targets_wooster_only = [
-        vpn_nodes.ProbeTarget(server="jeeves", transport="reality"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="reality"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="reality_alt"),
-    ]
-    slots_wooster_only = probe_net.probe_slots_from_targets(targets_wooster_only)
-    alt_wooster = [s for s in slots_wooster_only if s.transport == "reality_alt"][0]
-
-    targets_both = [
-        vpn_nodes.ProbeTarget(server="jeeves", transport="reality"),
-        vpn_nodes.ProbeTarget(server="jeeves", transport="reality_alt"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="reality"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="reality_alt"),
-    ]
-    slots_both = probe_net.probe_slots_from_targets(targets_both)
-    alt_wooster_both = [
-        s for s in slots_both if s.transport == "reality_alt" and s.server == "wooster"
-    ][0]
-
-    assert alt_wooster.netns == alt_wooster_both.netns
-    assert alt_wooster.socks_port == alt_wooster_both.socks_port
-    assert alt_wooster.subnet == alt_wooster_both.subnet
-
-
 def test_fetch_probe_config_reality_alt_uses_alt_share_url(root, monkeypatch):
     slot = make_reality_slot()
     slot.transport = "reality_alt"

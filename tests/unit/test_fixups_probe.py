@@ -56,7 +56,8 @@ def _reality_conf(socks_port: int) -> str:
 
 
 def _with_slots(monkeypatch, slots):
-    monkeypatch.setattr(probe_net, "discover_probe_slots", lambda settings: slots)
+    plan = probe_net.ProbePlan(slots=slots, indices=vpn_probe_state.slot_indices(slots))
+    monkeypatch.setattr(probe_net, "discover_probe_plan", lambda settings: plan)
 
 
 def test_probe_slots_get_unique_names_and_transport_specific_fields():
@@ -79,12 +80,17 @@ def test_probe_slots_get_unique_names_and_transport_specific_fields():
     assert all(len(s.veth_host) <= 15 and len(s.veth_ns) <= 15 for s in slots)
 
 
-def test_discover_probe_slots_returns_empty_and_warns_on_network_failure(monkeypatch, caplog):
+def test_discover_probe_plan_keeps_known_indices_and_warns_on_network_failure(
+    root, monkeypatch, caplog
+):
     async def boom(settings):
         raise ConnectionRefusedError("рой недоступен")
 
-    monkeypatch.setattr(probe_net, "_fetch_probe_slots", boom)
-    assert probe_net.discover_probe_slots(make_settings(["vpn_check"])) == []
+    root.files[str(vpn_probe_state.STATE_PATH)] = vpn_probe_state.render([make_slot()])
+    monkeypatch.setattr(probe_net, "_fetch_probe_targets", boom)
+    plan = probe_net.discover_probe_plan(make_settings(["vpn_check"]))
+    assert plan.slots == []
+    assert plan.indices == {"jeeves/awg": 0}
     assert "не удалось обнаружить VPN-серверы" in caplog.text
 
 
@@ -141,7 +147,11 @@ def test_build_fixups_creates_probe_fixups_per_supported_slot(
 
 def test_build_fixups_without_vpn_check_never_asks_swarm_for_probe_targets(root, monkeypatch):
     discovered = []
-    monkeypatch.setattr(probe_net, "discover_probe_slots", lambda s: discovered.append(1) or [])
+    monkeypatch.setattr(
+        probe_net,
+        "discover_probe_plan",
+        lambda s: discovered.append(1) or probe_net.ProbePlan(slots=[], indices={}),
+    )
     ids = {f.id for f in build_fixups(make_settings(["vpn"]))}
     assert not any(i.startswith(("vpn-probe-", "vpn-check-")) for i in ids)
     assert discovered == []
@@ -170,6 +180,8 @@ def test_scaffold_unit_has_no_permanent_tunnel_and_idempotent_pre_steps():
     assert "ExecStart=/bin/true\n" in content
     assert "RemainAfterExit=yes" in content
     assert "ExecStartPre=-/usr/sbin/ip netns add vpn-probe-jeeves-awg\n" in content
+    assert content.index("ip link del vprobe0h0\n") < content.index("ip link add vprobe0h0 ")
+    assert "ExecStartPre=-/usr/sbin/ip link del vprobe0h0\n" in content
     assert (
         "ExecStartPre=-/usr/sbin/ip link add vprobe0h0 type veth peer name vprobe0n0\n" in content
     )

@@ -176,31 +176,6 @@ def test_probe_slots_from_targets_with_awg_alt():
     assert len(set(subnets)) == 5
 
 
-def test_probe_slots_from_targets_awg_alt_index_stable():
-    targets_wooster_only = [
-        vpn_nodes.ProbeTarget(server="jeeves", transport="awg"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="awg"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="awg_alt"),
-    ]
-    slots_wooster_only = probe_net.probe_slots_from_targets(targets_wooster_only)
-    alt_wooster = [s for s in slots_wooster_only if s.transport == "awg_alt"][0]
-
-    targets_both = [
-        vpn_nodes.ProbeTarget(server="jeeves", transport="awg"),
-        vpn_nodes.ProbeTarget(server="jeeves", transport="awg_alt"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="awg"),
-        vpn_nodes.ProbeTarget(server="wooster", transport="awg_alt"),
-    ]
-    slots_both = probe_net.probe_slots_from_targets(targets_both)
-    alt_wooster_both = [
-        s for s in slots_both if s.transport == "awg_alt" and s.server == "wooster"
-    ][0]
-
-    assert alt_wooster.netns == alt_wooster_both.netns
-    assert alt_wooster.socks_port == alt_wooster_both.socks_port
-    assert alt_wooster.subnet == alt_wooster_both.subnet
-
-
 def test_fetch_probe_config_awg_alt_sends_awg_alt_flag(root, monkeypatch):
     slot = ProbeSlot(
         server="jeeves",

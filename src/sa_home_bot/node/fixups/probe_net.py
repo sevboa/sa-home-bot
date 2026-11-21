@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from sa_home_bot.bot import vpn_nodes
@@ -38,7 +40,9 @@ from sa_home_bot.vpn import protocol as vpn_protocol
 log = logging.getLogger(__name__)
 
 VPN_PROBE_SCAFFOLD_UNIT_DIR = Path("/etc/systemd/system")
-VPN_PROBE_SUBNET_BASE = "10.200.200"
+VPN_PROBE_SUBNET_BASE = "10.200"
+VPN_PROBE_FIRST_THIRD_OCTET = 200
+SLOT_INDEX_LIMIT = 128
 VPN_PROBE_NFT_TABLE = "sa_vpn_probe"
 VPN_PROBE_FORWARD_SCRIPT_PATH = Path("/usr/local/lib/sa-home-bot/vpn-probe-forward-reapply.sh")
 VPN_PROBE_FORWARD_UNIT_FILE = Path("/etc/systemd/system/sa-home-vpn-probe-forward.service")
@@ -56,6 +60,10 @@ ALT_SLOT_INDEX_BASES = {
     vpn_protocol.PROBE_TRANSPORT_REALITY_XHTTP: XHTTP_SLOT_INDEX_BASE,
 }
 
+SCAFFOLD_UNIT_GLOB = "sa-home-vpn-probe-scaffold-*.service"
+PROBE_NETNS_PREFIX = "vpn-probe-"
+PROBE_VETH_HOST_LINE = re.compile(r"^\d+:\s+(vprobe\d+h0)[@:]")
+
 WAIT_TABLE_FUNCTION = [
     "wait_table() {",
     "  i=0",
@@ -72,7 +80,10 @@ NAT_CHAIN_DEFINITION = "{ type nat hook postrouting priority srcnat ; policy acc
 
 
 def probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_probe_state.ProbeSlot:
-    base = index * SLOT_SUBNET_SIZE
+    offset = index * SLOT_SUBNET_SIZE
+    third_octet = VPN_PROBE_FIRST_THIRD_OCTET + offset // 256
+    prefix = f"{VPN_PROBE_SUBNET_BASE}.{third_octet}"
+    base = offset % 256
     is_awg = target.transport in vpn_protocol.AWG_PROBE_TRANSPORTS
     return vpn_probe_state.ProbeSlot(
         server=target.server,
@@ -80,44 +91,72 @@ def probe_slot_from_target(index: int, target: vpn_nodes.ProbeTarget) -> vpn_pro
         netns=f"vpn-probe-{target.server}-{target.transport}",
         veth_host=f"vprobe{index}h0",
         veth_ns=f"vprobe{index}n0",
-        veth_host_addr=f"{VPN_PROBE_SUBNET_BASE}.{base + 1}/30",
-        veth_ns_addr=f"{VPN_PROBE_SUBNET_BASE}.{base + 2}/30",
-        subnet=f"{VPN_PROBE_SUBNET_BASE}.{base}/30",
+        veth_host_addr=f"{prefix}.{base + 1}/30",
+        veth_ns_addr=f"{prefix}.{base + 2}/30",
+        subnet=f"{prefix}.{base}/30",
         iface=f"awg-probe{index}" if is_awg else None,
         socks_port=None if is_awg else REALITY_SOCKS_PORT_BASE + index,
     )
 
 
+@dataclass(frozen=True)
+class ProbePlan:
+    slots: list[vpn_probe_state.ProbeSlot]
+    indices: dict[str, int]
+
+
+def _first_free_index(transport: str, taken: set[int]) -> int:
+    start = ALT_SLOT_INDEX_BASES.get(transport, 0)
+    for index in [*range(start, SLOT_INDEX_LIMIT), *range(start)]:
+        if index not in taken:
+            return index
+    raise FixupError(f"закончились номера слотов пробников (предел {SLOT_INDEX_LIMIT})")
+
+
+def assign_indices(targets: list[vpn_nodes.ProbeTarget], known: dict[str, int]) -> dict[str, int]:
+    indices = dict(known)
+    taken = set(indices.values())
+    for target in sorted(targets):
+        key = vpn_probe_state.slot_key(target.server, target.transport)
+        if key not in indices:
+            indices[key] = _first_free_index(target.transport, taken)
+            taken.add(indices[key])
+    return indices
+
+
 def probe_slots_from_targets(
-    targets: list[vpn_nodes.ProbeTarget],
+    targets: list[vpn_nodes.ProbeTarget], known: dict[str, int] | None = None
 ) -> list[vpn_probe_state.ProbeSlot]:
-    normal_targets = [t for t in targets if t.transport not in ALT_SLOT_INDEX_BASES]
-    alt_targets = [t for t in targets if t.transport in ALT_SLOT_INDEX_BASES]
-    servers = sorted({t.server for t in targets})
-    slots = [probe_slot_from_target(i, t) for i, t in enumerate(normal_targets)]
-    for alt_target in alt_targets:
-        server_index = servers.index(alt_target.server)
-        index = ALT_SLOT_INDEX_BASES[alt_target.transport] + server_index
-        slots.append(probe_slot_from_target(index, alt_target))
-    return slots
+    indices = assign_indices(targets, known or {})
+    ordered = [t for t in targets if t.transport not in ALT_SLOT_INDEX_BASES] + [
+        t for t in targets if t.transport in ALT_SLOT_INDEX_BASES
+    ]
+    return [
+        probe_slot_from_target(indices[vpn_probe_state.slot_key(t.server, t.transport)], t)
+        for t in ordered
+    ]
 
 
-async def _fetch_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:
+async def _fetch_probe_targets(settings: Settings) -> list[vpn_nodes.ProbeTarget]:
     client = ProtoClient(resolve_endpoint(settings.node.socket), token=settings.swarm.token)
     try:
         await client.connect()
-        targets = await vpn_nodes.probe_targets(client, exclude=socket.gethostname())
+        return await vpn_nodes.probe_targets(client, exclude=socket.gethostname())
     finally:
         await client.close()
-    return probe_slots_from_targets(targets)
 
 
-def discover_probe_slots(settings: Settings) -> list[vpn_probe_state.ProbeSlot]:
+def discover_probe_plan(settings: Settings) -> ProbePlan:
+    known = vpn_probe_state.load_indices()
     try:
-        return asyncio.run(_fetch_probe_slots(settings))
+        targets = asyncio.run(_fetch_probe_targets(settings))
     except Exception as exc:
         log.warning("nodectl fix: не удалось обнаружить VPN-серверы для пробника: %s", exc)
-        return []
+        return ProbePlan(slots=[], indices=known)
+    return ProbePlan(
+        slots=probe_slots_from_targets(targets, known),
+        indices=assign_indices(targets, known),
+    )
 
 
 def scaffold_unit_path(slot: vpn_probe_state.ProbeSlot) -> Path:
@@ -129,6 +168,7 @@ def vpn_probe_scaffold_unit_content(slot: vpn_probe_state.ProbeSlot, ip_path: st
     host_addr_only = slot.veth_host_addr.split("/")[0]
     pre_steps = [
         f"-{ip_path} netns add {slot.netns}",
+        f"-{ip_path} link del {slot.veth_host}",
         f"-{ip_path} link add {slot.veth_host} type veth peer name {slot.veth_ns}",
         f"-{ip_path} link set {slot.veth_ns} netns {slot.netns}",
         f"-{ip_path} addr add {slot.veth_host_addr} dev {slot.veth_host}",
@@ -222,6 +262,89 @@ def make_vpn_probe_legacy_cleanup_fixup() -> Fixup:
         needed=needs.vpn_check,
         check=lambda: not _legacy_present(),
         apply=_legacy_cleanup,
+    )
+
+
+@dataclass(frozen=True)
+class StaleProbeArtifacts:
+    units: list[str]
+    netns: list[str]
+    veths: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.units or self.netns or self.veths)
+
+
+def _split_key(key: str) -> tuple[str, str]:
+    server, _, transport = key.partition("/")
+    return server, transport
+
+
+def _expected_artifacts(indices: dict[str, int]) -> tuple[set[str], set[str], set[str]]:
+    units, netns, veths = set(), set(), set()
+    for key, index in indices.items():
+        server, transport = _split_key(key)
+        units.add(f"sa-home-vpn-probe-scaffold-{server}-{transport}.service")
+        netns.add(f"{PROBE_NETNS_PREFIX}{server}-{transport}")
+        veths.add(f"vprobe{index}h0")
+    return units, netns, veths
+
+
+def _command_lines(argv: list[str]) -> list[str]:
+    result = subprocess.run(argv, capture_output=True, text=True)
+    return result.stdout.splitlines() if result.returncode == 0 else []
+
+
+def _installed_scaffold_units() -> list[str]:
+    lines = _command_lines(
+        ["systemctl", "list-unit-files", SCAFFOLD_UNIT_GLOB, "--no-legend", "--plain"]
+    )
+    return [line.split()[0] for line in lines if line.strip()]
+
+
+def _host_probe_netns() -> list[str]:
+    lines = _command_lines(["sudo", "-n", "ip", "netns", "list"])
+    names = [line.split()[0] for line in lines if line.strip()]
+    return [name for name in names if name.startswith(PROBE_NETNS_PREFIX)]
+
+
+def _host_probe_veths() -> list[str]:
+    lines = _command_lines(["ip", "-o", "link", "show", "type", "veth"])
+    matches = (PROBE_VETH_HOST_LINE.match(line) for line in lines)
+    return [m.group(1) for m in matches if m]
+
+
+def find_stale_probe_artifacts(indices: dict[str, int]) -> StaleProbeArtifacts:
+    units, netns, veths = _expected_artifacts(indices)
+    return StaleProbeArtifacts(
+        units=sorted(set(_installed_scaffold_units()) - units),
+        netns=sorted(set(_host_probe_netns()) - netns),
+        veths=sorted(set(_host_probe_veths()) - veths),
+    )
+
+
+def _stale_cleanup_apply(indices: dict[str, int]) -> None:
+    stale = find_stale_probe_artifacts(indices)
+    for unit in stale.units:
+        run_sudo(["systemctl", "disable", "--now", unit])
+        run_sudo(["rm", "-f", str(VPN_PROBE_SCAFFOLD_UNIT_DIR / unit)])
+    if stale.units:
+        run_sudo(["systemctl", "daemon-reload"])
+    for netns in stale.netns:
+        subprocess.run(["sudo", "ip", "netns", "del", netns], capture_output=True)
+    for veth in stale.veths:
+        subprocess.run(["sudo", "ip", "link", "del", veth], capture_output=True)
+    if find_stale_probe_artifacts(indices):
+        raise FixupError("остатки слотов пробников, которых нет в рое, не убрались")
+
+
+def make_vpn_probe_stale_cleanup_fixup(plan: ProbePlan) -> Fixup:
+    return Fixup(
+        id="vpn-probe-stale-cleanup",
+        title="Снести юниты, netns и veth слотов пробников, которых нет в рое и в состоянии",
+        needed=needs.vpn_check,
+        check=lambda: not plan.slots or not find_stale_probe_artifacts(plan.indices),
+        apply=lambda: _stale_cleanup_apply(plan.indices),
     )
 
 
@@ -428,24 +551,27 @@ def _slots_with_sni(slots: list[vpn_probe_state.ProbeSlot]) -> list[vpn_probe_st
     return result
 
 
-def _state_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
-    return file_matches(vpn_probe_state.STATE_PATH, vpn_probe_state.render(_slots_with_sni(slots)))
+def _state_check(slots: list[vpn_probe_state.ProbeSlot], indices: dict[str, int] | None) -> bool:
+    expected = vpn_probe_state.render(_slots_with_sni(slots), indices)
+    return file_matches(vpn_probe_state.STATE_PATH, expected)
 
 
-def _state_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
+def _state_apply(slots: list[vpn_probe_state.ProbeSlot], indices: dict[str, int] | None) -> None:
     install_root_file(
         vpn_probe_state.STATE_PATH,
-        vpn_probe_state.render(_slots_with_sni(slots)),
+        vpn_probe_state.render(_slots_with_sni(slots), indices),
         mode="0644",
         make_parents=True,
     )
 
 
-def make_vpn_probe_state_fixup(slots: list[vpn_probe_state.ProbeSlot]) -> Fixup:
+def make_vpn_probe_state_fixup(
+    slots: list[vpn_probe_state.ProbeSlot], indices: dict[str, int] | None = None
+) -> Fixup:
     return Fixup(
         id="vpn-check-probe-state",
         title="Записать список настроенных пробников (что реально проверяется с этой ноды)",
         needed=needs.vpn_check,
-        check=lambda: _state_check(slots),
-        apply=lambda: _state_apply(slots),
+        check=lambda: _state_check(slots, indices),
+        apply=lambda: _state_apply(slots, indices),
     )

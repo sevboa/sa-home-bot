@@ -15,16 +15,18 @@ from sa_home_bot.node.fixups.core import Fixup
 
 
 def _probe_fixups(settings: Settings) -> list[Fixup]:
-    slots = probe_net.discover_probe_slots(settings)
+    plan = probe_net.discover_probe_plan(settings)
+    slots = plan.slots
     supported = [s for s in slots if s.transport in probe_tunnel.SUPPORTED_PROBE_TRANSPORTS]
     return [
         probe_net.make_vpn_probe_legacy_cleanup_fixup(),
+        probe_net.make_vpn_probe_stale_cleanup_fixup(plan),
         probe_net.make_vpn_probe_forwarding_fixup(supported),
         probe_net.make_vpn_probe_forwarding_persist_fixup(supported),
         *(probe_net.make_vpn_probe_scaffold_fixup(slot) for slot in supported),
         *(probe_tunnel.make_vpn_probe_tunnel_conf_fixup(settings, slot) for slot in supported),
         probe_tunnel.make_vpn_probe_sudoers_fixup(supported),
-        probe_net.make_vpn_probe_state_fixup(slots),
+        probe_net.make_vpn_probe_state_fixup(slots, plan.indices),
     ]
 
 
