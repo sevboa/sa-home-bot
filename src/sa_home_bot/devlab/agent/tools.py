@@ -16,15 +16,10 @@ from sa_home_bot.devlab.agent.sandbox import (
     safe_relative,
 )
 from sa_home_bot.devlab.agent.script import (
-    ACTION_EDIT,
-    ACTION_FINISH,
-    ACTION_RUN,
-    ACTION_RUN_TESTS,
-    ACTION_STEP_DONE,
-    ACTION_WRITE,
     SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
     SCRIPT_OUTPUT_CHARS,
+    api_stubs,
     parse_output,
     script_argv,
     script_help,
@@ -41,11 +36,15 @@ TOOL_RUN_TESTS = "run_tests"
 TOOL_FINISH = "finish"
 TOOL_ASK_OWNER = "ask_owner"
 TOOL_STEP_DONE = "step_done"
-TOOL_RUN_SCRIPT = "run_script"
-READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP})
+TOOL_SEARCH = "search"
+TOOL_EXECUTE = "execute"
+READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP, TOOL_SEARCH})
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
-SCRIPT_CONTROL_TOOLS = (TOOL_STEP_DONE, TOOL_ASK_OWNER, TOOL_FINISH)
-SCRIPT_ONLY_TEXT = "в режиме скрипта этот инструмент доступен функцией внутри run_script"
+SCRIPT_ONLY_TEXT = (
+    f"в режиме скрипта этого инструмента нет: пиши код в {TOOL_EXECUTE}, "
+    f"а нужные функции ищи через {TOOL_SEARCH}"
+)
+SEARCH_EMPTY = 'функций с таким словом нет; search("") покажет все'
 
 LIST_MAX_ENTRIES = 200
 READ_MIN_LINES = 200
@@ -55,24 +54,12 @@ GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
 NEWLINE_ADDED = "; в конец файла дописан перевод строки"
-SCRIPT_ACTION_TOOLS = {
-    ACTION_EDIT: TOOL_EDIT_FILE,
-    ACTION_WRITE: TOOL_WRITE_FILE,
-    ACTION_RUN: TOOL_RUN_COMMAND,
-    ACTION_RUN_TESTS: TOOL_RUN_TESTS,
-}
-SCRIPT_CONTROL_ACTIONS = {ACTION_STEP_DONE: TOOL_STEP_DONE, ACTION_FINISH: TOOL_FINISH}
-SCRIPT_CONTROL_NOT_LAST = (
-    "не выполнено: после него в скрипте есть другие действия; {tool}() должен быть последним"
-)
-SCRIPT_CONTROL_AFTER_ERROR = "не выполнено: предыдущее действие скрипта упало"
 SCRIPT_NO_OUTPUT = "(скрипт ничего не напечатал)"
-SCRIPT_ACTIONS_SKIPPED = "действия скрипта не исполнены"
-SCRIPT_DIRECT_WRITES = (
-    "скрипт сам изменил файлы: {paths}; действия не исполнены. Файлы меняй только через "
-    f"edit()/write() в скрипте; изменённое верни через {TOOL_EDIT_FILE}/{TOOL_WRITE_FILE}"
+SCRIPT_BUDGET_MARGIN_S = 20.0
+PLAIN_TOOLS = frozenset(
+    {TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP, TOOL_EDIT_FILE, TOOL_WRITE_FILE}
+    | {TOOL_RUN_COMMAND, TOOL_RUN_TESTS, TOOL_STEP_DONE, TOOL_ASK_OWNER, TOOL_FINISH}
 )
-
 
 def read_max_lines(window_tokens: int) -> int:
     return max(READ_MIN_LINES, min(READ_MAX_LINES_CAP, window_tokens // READ_TOKENS_PER_LINE))
@@ -198,14 +185,21 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
 ]
 
-RUN_SCRIPT_DEFINITION = _schema(
-    TOOL_RUN_SCRIPT,
+SEARCH_DEFINITION = _schema(
+    TOOL_SEARCH,
+    "Сигнатуры функций API, которые есть внутри кода execute: те, у которых query в имени или "
+    "описании; пустой query — все функции.",
+    query=_text("Слово из имени или описания функции; пустая строка — все функции"),
+)
+EXECUTE_DEFINITION = _schema(
+    TOOL_EXECUTE,
     "Исполняет код Python. Корень проекта — текущий каталог, src в sys.path: пакеты проекта "
-    f"импортируются. Нужное печатай через print, вывод длиннее {SCRIPT_OUTPUT_CHARS} симв. "
-    "обрезается с конца. edit/write/run/run_tests исполняются после "
-    "скрипта по порядку; процессы из скрипта запрещены. Один скрипт — весь шаг: читай все нужные "
-    "файлы сразу через read_many, ищи grep с context, затем ставь edit/write и run_tests в том же "
-    "скрипте. Функции:\n" + script_help(),
+    "импортируются. Функции API уже определены, import не нужен. Всё исполняется сразу, как "
+    "обычный Python: edit() и write() меняют файлы немедленно, следующий read() видит правку, "
+    "run() и run_tests() возвращают Result, по нему можно ветвиться. Процессы — только через "
+    "run() и run_tests(). step_done(), finish() и ask_owner() завершают скрипт. Нужное печатай "
+    f"через print, вывод длиннее {SCRIPT_OUTPUT_CHARS} симв. обрезается. Один вызов — весь шаг: "
+    "читай, правь, проверяй и закрывай шаг одним кодом. Функции:\n" + script_help(),
     code=_text("Код Python"),
 )
 
@@ -251,13 +245,12 @@ class ToolBox:
             TOOL_RUN_TESTS: self._run_tests,
         }
         if spec.code_mode:
-            self._handlers[TOOL_RUN_SCRIPT] = self._run_script
+            self._handlers = {TOOL_SEARCH: self._search, TOOL_EXECUTE: self._execute}
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
         if self._spec.code_mode:
-            control = [d for d in TOOL_DEFINITIONS if d["function"]["name"] in SCRIPT_CONTROL_TOOLS]
-            return [RUN_SCRIPT_DEFINITION, *control]
+            return [SEARCH_DEFINITION, EXECUTE_DEFINITION]
         return TOOL_DEFINITIONS
 
     async def tree_fingerprint(self) -> str:
@@ -265,7 +258,7 @@ class ToolBox:
         return hashlib.sha256(json.dumps(changed, sort_keys=True).encode()).hexdigest()
 
     async def call(self, name: str, args: dict[str, Any]) -> ToolOutcome:
-        if self._spec.code_mode and name in self._handlers and name != TOOL_RUN_SCRIPT:
+        if self._spec.code_mode and name in PLAIN_TOOLS:
             raise ToolError(SCRIPT_ONLY_TEXT)
         handler = self._handlers.get(name)
         if handler is None:
@@ -396,55 +389,42 @@ class ToolBox:
         text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)
 
-    async def _run_script(self, args: dict[str, Any]) -> ToolOutcome:
+    async def _search(self, args: dict[str, Any]) -> str:
+        return api_stubs(_argument(args, "query", str, "")) or SEARCH_EMPTY
+
+    def _script_config(self) -> dict[str, Any]:
+        spec = self._spec
+        return {
+            "closed": list(spec.forbidden_paths + spec.secret_paths),
+            "write_prefixes": list(spec.write_prefixes),
+            "allowed": self._allowed(),
+            "test_argv": without_xdist(list(spec.test_argv)),
+            "command_timeout": spec.command_timeout_s,
+            "test_timeout": spec.narrow_test_timeout_s,
+            "budget": spec.script_timeout_s - SCRIPT_BUDGET_MARGIN_S,
+            "output_chars": spec.output_chars,
+        }
+
+    async def _execute(self, args: dict[str, Any]) -> ToolOutcome:
         code = _argument(args, "code", str)
-        timeout_s = self._spec.command_timeout_s
+        timeout_s = self._spec.script_timeout_s
         before = await self._sandbox.changed_digests()
-        result = await self._sandbox.exec(script_argv(code), timeout_s)
-        after = await self._sandbox.changed_digests()
-        touched = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
-        if touched:
-            return ToolOutcome(SCRIPT_DIRECT_WRITES.format(paths=", ".join(touched)), mutating=True)
+        result = await self._sandbox.exec(script_argv(code, self._script_config()), timeout_s)
+        mutating = before != await self._sandbox.changed_digests()
         if result.timed_out:
-            return ToolOutcome(result.summary(self._spec.output_chars, timeout_s))
+            text = result.summary(self._spec.output_chars, timeout_s)
+            return ToolOutcome(text, mutating=mutating)
         run = parse_output(result.output)
         limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
         if run.failed:
             output = clip_tail(run.output, limit) or SCRIPT_NO_OUTPUT
-            skipped = f"\n{SCRIPT_ACTIONS_SKIPPED}" if run.actions else ""
-            return ToolOutcome(f"{SCRIPT_FAILED_HEAD}\n{output}{skipped}")
+            return ToolOutcome(
+                f"{SCRIPT_FAILED_HEAD}\n{output}", mutating=mutating, green=run.green
+            )
         output = clip_head(run.output, limit, SCRIPT_CLIPPED_HINT) or SCRIPT_NO_OUTPUT
-        lines = [output]
-        mutating = False
-        green: bool | None = None
-        failed = False
-        control: ControlRequest | None = None
-        for number, action in enumerate(run.actions, 1):
-            closing = SCRIPT_CONTROL_ACTIONS.get(action.tool)
-            tool = SCRIPT_ACTION_TOOLS.get(action.tool) or closing
-            label = f"действие {number} {tool or action.tool}"
-            if closing is not None:
-                if number != len(run.actions):
-                    lines.append(f"{label}: {SCRIPT_CONTROL_NOT_LAST.format(tool=closing)}")
-                elif failed:
-                    lines.append(f"{label}: {SCRIPT_CONTROL_AFTER_ERROR}")
-                else:
-                    control = ControlRequest(closing, action.args, label)
-                continue
-            if failed:
-                lines.append(f"{label}: пропущено после ошибки")
-                continue
-            try:
-                if tool is None:
-                    raise ToolError(f"неизвестное действие {action.tool!r}")
-                outcome = await self._handlers[tool](action.args)
-            except (ToolError, SandboxPathError) as exc:
-                lines.append(f"{label}: ошибка: {exc}")
-                failed = True
-                continue
-            if isinstance(outcome, ToolOutcome):
-                green = outcome.green if outcome.green is not None else green
-                outcome = outcome.text
-            mutating = mutating or tool in MUTATING_TOOLS
-            lines.append(f"{label}: {outcome}")
-        return ToolOutcome("\n".join(lines), mutating=mutating, green=green, control=control)
+        control = (
+            ControlRequest(run.control.tool, run.control.args, run.control.tool)
+            if run.control
+            else None
+        )
+        return ToolOutcome(output, mutating=mutating, green=run.green, control=control)

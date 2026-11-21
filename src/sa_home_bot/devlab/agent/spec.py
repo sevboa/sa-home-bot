@@ -11,6 +11,7 @@ from sa_home_bot.devlab.executor.spec import (
 )
 
 DEFAULT_TEST_TIMEOUT_S = 3600.0
+SCRIPT_TIMEOUT_EXTRA_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,10 @@ class AgentSpec:
     test_timeout_s: float = DEFAULT_TEST_TIMEOUT_S
     narrow_test_timeout_s: float = DEFAULT_NARROW_TEST_TIMEOUT_S
     output_chars: int = DEFAULT_OUTPUT_CHARS
+
+    @property
+    def script_timeout_s(self) -> float:
+        return self.command_timeout_s + self.narrow_test_timeout_s + SCRIPT_TIMEOUT_EXTRA_S
 
     @classmethod
     def from_project(cls, project: ProjectSpec) -> AgentSpec:

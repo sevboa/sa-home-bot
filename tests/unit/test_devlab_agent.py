@@ -38,11 +38,11 @@ from sa_home_bot.devlab.agent.script import script_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
     TOOL_EDIT_FILE,
+    TOOL_EXECUTE,
     TOOL_FINISH,
     TOOL_GREP,
     TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
-    TOOL_RUN_SCRIPT,
     TOOL_RUN_TESTS,
     TOOL_WRITE_FILE,
     ToolBox,
@@ -406,7 +406,7 @@ async def run_gateway(handler, timeout_s=5.0):
     return server, chat
 
 
-async def test_gateway_chat_uses_code_mode_reminder_when_run_script_offered():
+async def test_gateway_chat_uses_code_mode_reminder_when_execute_offered():
     seen = {}
 
     async def handler(request):
@@ -888,13 +888,15 @@ async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
 @pytest.mark.parametrize(
     ("code", "failed"), [("print('ok')", False), ("raise ValueError('нет')", True)]
 )
-async def test_trace_notes_run_script_code_size_and_failure(tmp_path, monkeypatch, code, failed):
+async def test_trace_notes_execute_code_size_and_failure(tmp_path, monkeypatch, code, failed):
     monkeypatch.setattr(
-        tools_module, "script_argv", lambda source: script_argv(source, python=sys.executable)
+        tools_module,
+        "script_argv",
+        lambda source, config: script_argv(source, config, python=sys.executable),
     )
     entries = []
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
-    model = ScriptedChatModel(tool_reply(TOOL_RUN_SCRIPT, "s1", code=code))
+    model = ScriptedChatModel(tool_reply(TOOL_EXECUTE, "s1", code=code))
     loop, _ = make_loop(
         tmp_path, model, spec=spec, limits=AgentLimits(max_steps=1), trace=entries.append
     )

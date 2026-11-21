@@ -29,8 +29,8 @@ from sa_home_bot.devlab.agent.script import SCRIPT_FAILED_HEAD
 from sa_home_bot.devlab.agent.tools import (
     READ_ONLY_TOOLS,
     TOOL_ASK_OWNER,
+    TOOL_EXECUTE,
     TOOL_FINISH,
-    TOOL_RUN_SCRIPT,
     TOOL_STEP_DONE,
     ControlRequest,
     ToolBox,
@@ -55,7 +55,7 @@ STEP_REJECTED = (
 )
 STEP_ACCEPTED = "шаг принят"
 SCRIPT_REJECTED = re.compile(
-    rf"^действие \d+ (?:{TOOL_STEP_DONE}|{TOOL_FINISH}): "
+    rf"^(?:{TOOL_STEP_DONE}|{TOOL_FINISH}): "
     rf"(?:{STEP_REJECTED_HEAD}|{FINISH_REJECTED_HEAD})",
     re.MULTILINE,
 )
@@ -159,7 +159,7 @@ def _repeat_hint(name: str, text: str) -> str:
 
 
 def _rejected(name: str, text: str) -> bool:
-    if name == TOOL_RUN_SCRIPT:
+    if name == TOOL_EXECUTE:
         return SCRIPT_REJECTED.search(text) is not None
     return text.startswith((FINISH_REJECTED, STEP_REJECTED))
 
@@ -392,7 +392,7 @@ class AgentLoop:
             "result_chars": len(text),
             "rejected": _rejected(call.name, text),
         }
-        if call.name == TOOL_RUN_SCRIPT:
+        if call.name == TOOL_EXECUTE:
             entry["code_chars"] = len(_script_code(call.arguments))
             entry["script_failed"] = text.startswith(SCRIPT_FAILED_HEAD)
         seg.calls.append(entry)
@@ -451,11 +451,14 @@ class AgentLoop:
     async def _close_from_script(
         self, text: str, control: ControlRequest, seg: Segment
     ) -> tuple[str, str | None]:
+        summary = None
         if control.tool == TOOL_FINISH:
             result, summary = await self._finish(control.args)
+        elif control.tool == TOOL_ASK_OWNER:
+            result = self._ask(control.args, seg)
         else:
-            result, summary = await self._step_done(control.args, seg), None
-        return f"{text}\n{control.label}: {result}", summary
+            result = await self._step_done(control.args, seg)
+        return (f"{text}\n{control.label}: {result}" if result else text), summary
 
     def _ask(self, args: dict[str, Any], seg: Segment) -> str:
         question = args.get("question")
