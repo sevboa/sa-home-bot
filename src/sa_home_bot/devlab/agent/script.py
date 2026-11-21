@@ -10,20 +10,66 @@ ACTIONS_MARKER = "DEVLAB_ACTIONS "
 ACTION_EDIT = "edit"
 ACTION_WRITE = "write"
 ACTION_RUN_TESTS = "run_tests"
+ACTION_RUN = "run"
 SCRIPT_GREP_MAX_MATCHES = 200
 SCRIPT_GREP_MAX_FILE_BYTES = 200_000
 SCRIPT_FILENAME = "<script>"
 SCRIPT_FAILED_HEAD = "[скрипт упал]"
+PROCESS_FORBIDDEN = (
+    "процессы из скрипта запрещены: команды — через run(), тесты — через run_tests()"
+)
+SCRIPT_FUNCTIONS: dict[str, str] = {
+    'find(query="")': "функции скрипта, у которых query в имени или описании",
+    'ls(prefix="")': "пути файлов проекта с префиксом",
+    "read(path, start=1, end=None)": "строки файла с номерами",
+    "read_many(paths)": "словарь путь → текст файла с номерами строк",
+    'grep(pattern, prefix="", context=0)': "совпадения регулярного выражения: path:n:строка",
+    f"{ACTION_EDIT}(path, old, new)": "заменить единственный фрагмент old на new (после скрипта)",
+    f"{ACTION_WRITE}(path, content)": "создать или перезаписать файл (после скрипта)",
+    f"{ACTION_RUN}(command)": "разрешённая команда без оболочки (после скрипта)",
+    f"{ACTION_RUN_TESTS}(paths)": "узкий прогон тестов, список путей (после скрипта)",
+}
+SCRIPT_EXAMPLE = """files = read_many(["src/pkg/a.py", "tests/test_a.py"])
+print("\\n".join(files.values()))
+print("\\n".join(grep(r"def load", "src/", context=2)))
+edit("src/pkg/a.py", "return 1", "return 2")
+run_tests(["tests/test_a.py"])"""
 
 _PROLOGUE_TEMPLATE = Template(
     '''import json
 import os
 import re
+import subprocess
 import sys
 import traceback
 
 _IGNORED = frozenset($ignored)
 _ACTIONS = []
+_FUNCTIONS = $functions
+_ROOT = os.getcwd()
+for _path in (os.path.join(_ROOT, "src"), _ROOT):
+    if os.path.isdir(_path):
+        sys.path.insert(0, _path)
+
+
+def _forbidden(*args, **kwargs):
+    raise PermissionError($forbidden)
+
+
+subprocess.Popen.__init__ = _forbidden
+for _name in dir(os):
+    if _name in ("system", "popen", "fork", "forkpty") or _name.startswith(
+        ("exec", "spawn", "posix_spawn")
+    ):
+        setattr(os, _name, _forbidden)
+
+
+def find(query=""):
+    return [
+        f"{signature} — {about}"
+        for signature, about in _FUNCTIONS.items()
+        if query in signature.split("(")[0] or query in about
+    ]
 
 
 def ls(prefix=""):
@@ -100,6 +146,10 @@ def $write(path, content):
     _queue($write, path=path, content=content)
 
 
+def $run(command):
+    _queue($run, command=command)
+
+
 def $run_tests(paths):
     listed = [paths] if isinstance(paths, str) else list(paths)
     _queue($run_tests, paths=" ".join(listed))
@@ -113,15 +163,17 @@ PROLOGUE: str = _PROLOGUE_TEMPLATE.substitute(
     edit=ACTION_EDIT,
     write=ACTION_WRITE,
     run_tests=ACTION_RUN_TESTS,
+    run=ACTION_RUN,
+    functions=repr(SCRIPT_FUNCTIONS),
+    forbidden=repr(PROCESS_FORBIDDEN),
 )
+_SCRIPT_NAMES = tuple(signature.split("(")[0] for signature in SCRIPT_FUNCTIONS)
 
 _EPILOGUE = f'''
 _failed = False
 _namespace = {{
     "__name__": "__main__",
-    **{{name: globals()[name] for name in (
-        "ls", "read", "read_many", "grep", {ACTION_EDIT!r}, {ACTION_WRITE!r}, {ACTION_RUN_TESTS!r}
-    )}},
+    **{{name: globals()[name] for name in {_SCRIPT_NAMES!r}}},
 }}
 try:
     exec(compile(_code, {SCRIPT_FILENAME!r}, "exec"), _namespace)
@@ -148,6 +200,11 @@ class ScriptRun:
     output: str
     actions: tuple[ScriptAction, ...]
     failed: bool
+
+
+def script_help() -> str:
+    listed = "\n".join(f"{signature} — {about}" for signature, about in SCRIPT_FUNCTIONS.items())
+    return f"{listed}\nПример:\n{SCRIPT_EXAMPLE}"
 
 
 def script_argv(code: str, python: str = "python") -> list[str]:

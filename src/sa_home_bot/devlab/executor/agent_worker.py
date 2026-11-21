@@ -562,6 +562,10 @@ class AgentWorker(WorkerLoops):
             limits = replace(limits, max_steps=profile.max_steps)
         if profile is not None and profile.max_wall_s is not None:
             limits = replace(limits, max_wall_s=profile.max_wall_s)
+        if profile is not None:
+            limits = replace(
+                limits, quick_steps=profile.quick_steps, quick_params=dict(profile.quick_params)
+            )
         return replace(
             limits,
             context_tokens=window_tokens(entries, limits.context_tokens),

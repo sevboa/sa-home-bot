@@ -434,6 +434,54 @@ async def test_gateway_chat_request_and_parse():
     assert reply.as_message()["tool_calls"][0]["function"]["name"] == "grep"
 
 
+async def test_gateway_chat_extra_goes_into_body():
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response(reply_body("ok"))
+
+    server, chat = await run_gateway(handler)
+    extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    try:
+        await chat.complete([{"role": "user", "content": "x"}], [], extra=extra)
+    finally:
+        await chat.close()
+        await server.close()
+    assert seen["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+class ExtraRecordingModel(ScriptedChatModel):
+    def __init__(self, *script):
+        super().__init__(*script)
+        self.extras = []
+
+    async def complete(self, messages, tools, **kwargs):
+        self.extras.append(kwargs.get("extra"))
+        return await super().complete(messages, tools)
+
+
+@pytest.mark.parametrize(
+    ("quick_steps", "quick_params", "expected"),
+    [
+        (2, {"think": False}, [{"think": False}, {"think": False}, None]),
+        (2, {}, [None, None, None]),
+        (0, {"think": False}, [None, None, None]),
+    ],
+)
+async def test_quick_params_only_on_first_steps(tmp_path, quick_steps, quick_params, expected):
+    entries = []
+    model = ExtraRecordingModel(
+        *(tool_reply(TOOL_GREP, f"g{n}", pattern=f"p{n}") for n in range(3))
+    )
+    limits = AgentLimits(max_steps=3, quick_steps=quick_steps, quick_params=quick_params)
+    loop, _ = make_loop(tmp_path, model, limits=limits, trace=entries.append)
+    await loop.run("правила", "задача")
+    assert model.extras == expected
+    quick = [entry.get("quick", False) for entry in entries if "step" in entry]
+    assert quick == [extra is not None for extra in expected]
+
+
 @pytest.mark.parametrize(
     "extra",
     [

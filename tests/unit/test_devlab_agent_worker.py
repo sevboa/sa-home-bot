@@ -411,6 +411,20 @@ async def test_profile_limits_override_general(
     assert LimitsProbe.seen[0].max_wall_s == max_wall_s
 
 
+async def test_profile_quick_settings_reach_limits(env, monkeypatch):
+    monkeypatch.setattr(agent_worker_module, "AgentLoop", LimitsProbe)
+    LimitsProbe.seen = []
+    await submit_profile(env, "custom")
+    params = {"chat_template_kwargs": {"enable_thinking": False}}
+    profiles = {"custom": DevlabProfileConfig(quick_steps=2, quick_params=params)}
+    worker = make_worker(env, ScriptedChatModel(WRITE_DONE, FINISH), profiles=profiles)
+
+    assert await worker.claim_once()
+
+    assert LimitsProbe.seen[0].quick_steps == 2
+    assert LimitsProbe.seen[0].quick_params == params
+
+
 async def test_profile_role_text_joins_system_prompt(env):
     path = env.tmp_path / "role.md"
     path.write_text("роль-текст\n", encoding="utf-8")

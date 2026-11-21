@@ -173,6 +173,8 @@ class DevlabProfileConfig(BaseModel):
     allow_no_changes: bool = False
     require_verdict: bool = False
     code_mode: bool = False
+    quick_steps: int = Field(default=0, ge=0)
+    quick_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class DevlabConfig(BaseModel):

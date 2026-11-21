@@ -78,9 +78,17 @@ class MeteredChat:
         self._spend = spend
 
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        extra: dict[str, Any] | None = None,
     ) -> ModelReply:
-        reply = await self._inner.complete(messages, tools)
+        reply = await (
+            self._inner.complete(messages, tools, extra=extra)
+            if extra
+            else self._inner.complete(messages, tools)
+        )
         self._spend.record(reply)
         if reply.paid_free:
             raise PaidFreeModelError(PAID_FREE_TEXT.format(cost=reply.cost_usd or 0.0))
