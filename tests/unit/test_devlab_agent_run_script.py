@@ -49,6 +49,19 @@ async def test_without_code_mode_run_script_is_absent(project):
         await box.call(TOOL_RUN_SCRIPT, {"code": "print(1)"})
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("print('\\n'.join(read('src/a.py')))", "1\tvalue = 1"),
+        ("print(len(list(read('src/a.py'))))", "1"),
+        ("print(read('src/a.py') == '\\n'.join(read('src/a.py')))", "True"),
+    ],
+)
+async def test_read_iterates_lines_not_characters(project, code, expected):
+    outcome = await toolbox(project).call(TOOL_RUN_SCRIPT, {"code": code})
+    assert expected in outcome.text
+
+
 async def test_edit_in_script_applies_after_script(project):
     box = toolbox(project)
     assert TOOL_RUN_SCRIPT in [d["function"]["name"] for d in box.definitions]

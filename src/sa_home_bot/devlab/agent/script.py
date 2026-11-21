@@ -90,10 +90,15 @@ def _lines(path):
         return handle.read().splitlines()
 
 
+class _Lines(str):
+    def __iter__(self):
+        return iter(self.splitlines())
+
+
 def read(path, start=1, end=None):
     lines = _lines(path)
     last = len(lines) if end is None else min(end, len(lines))
-    return "\\n".join(f"{n}\\t{lines[n - 1]}" for n in range(max(1, start), last + 1))
+    return _Lines("\\n".join(f"{n}\\t{lines[n - 1]}" for n in range(max(1, start), last + 1)))
 
 
 def read_many(paths):
