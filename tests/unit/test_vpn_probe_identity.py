@@ -131,10 +131,10 @@ async def test_prune_removes_only_unnamed_probe_peers(env_both):
     assert again["count"] == 0
 
 
-async def test_prune_action_is_not_offered_in_menus_but_still_runs(env_both):
+async def test_prune_action_is_callable_but_not_a_capability(env_both):
     svc, _awg, _xray, _events = env_both
     description = svc.describe()
-    assert vpn_protocol.ACTION_PRUNE_PROBE_PEERS not in {a.id for a in description.actions}
+    assert vpn_protocol.ACTION_PRUNE_PROBE_PEERS in {a.id for a in description.actions}
     assert vpn_protocol.ACTION_PRUNE_PROBE_PEERS not in description.capabilities
     result = await svc.run_command(vpn_protocol.ACTION_PRUNE_PROBE_PEERS, {})
     assert result["dry_run"] is True

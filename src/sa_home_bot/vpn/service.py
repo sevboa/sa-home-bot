@@ -191,6 +191,18 @@ class VpnService(
                 params=(chat_id_param, device_param, transport_param),
             ),
             ActionSpec(
+                id=ACTION_PRUNE_PROBE_PEERS,
+                title="🧹 Снять лишние пробники",
+                params=(
+                    ActionParam(
+                        name="dry_run",
+                        type="bool",
+                        required=False,
+                        title="Только показать (по умолчанию да)",
+                    ),
+                ),
+            ),
+            ActionSpec(
                 id=ACTION_USAGE,
                 title="📊 Расход",
                 params=(ActionParam(name="chat_id", type="int", required=False, title="Чей"),),
