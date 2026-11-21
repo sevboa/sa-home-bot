@@ -650,3 +650,27 @@ def test_reality_xhttp_in_supported_probe_transports():
 def test_fixups_package_keeps_external_api():
     assert fixups.build_fixups is build_fixups
     assert fixups.SMARTCTL_WRAPPER_PATH.name == "smartctl"
+
+
+def test_state_fixup_writes_sni_from_existing_conf_without_reissue(root, monkeypatch):
+    slot = make_reality_slot()
+    root.files[str(vpn_probe_state.STATE_PATH)] = vpn_probe_state.render([slot])
+    root.files[str(vpn_probe_state.reality_conf_path(slot))] = _reality_conf(11081)
+
+    async def must_not_fetch(settings, slot):
+        raise AssertionError("конфиг перевыпускать нельзя")
+
+    monkeypatch.setattr(probe_tunnel, "_fetch_probe_config", must_not_fetch)
+    fixup = probe_net.make_vpn_probe_state_fixup([slot])
+    assert fixup.check() is False
+    fixup.apply()
+    written = vpn_probe_state.parse(root.installed[str(vpn_probe_state.STATE_PATH)])
+    assert written[0].sni == "www.google.com"
+    assert fixup.check() is True
+
+
+def test_state_fixup_without_conf_keeps_sni_empty(root):
+    fixup = probe_net.make_vpn_probe_state_fixup([make_reality_slot()])
+    fixup.apply()
+    written = vpn_probe_state.parse(root.installed[str(vpn_probe_state.STATE_PATH)])
+    assert written[0].sni is None

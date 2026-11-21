@@ -791,3 +791,24 @@ async def test_unreadable_slot_config_is_silent(monkeypatch, caplog):
         )
     assert _result_for(node_link, "https://1.1.1.1")["entry"] == "Reality"
     assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [("reality", "Reality azgez"), ("reality_xhttp", "XHTTP azgez")],
+)
+async def test_entry_name_prefers_sni_from_slot_state(monkeypatch, transport, expected):
+    from sa_home_bot.node import vpn_probe_state
+
+    class Denied:
+        def read_text(self):
+            raise PermissionError(13, "Permission denied")
+
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    monkeypatch.setattr(vpn_probe_state, "reality_conf_path", lambda slot: Denied())
+    node_link = _FakeNodeLink()
+    slot = _reality_slot(transport=transport, sni="www.azgez.com")
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == expected

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +21,7 @@ class ProbeSlot(BaseModel):
     subnet: str
     iface: str | None = None
     socks_port: int | None = None
+    sni: str | None = None
 
 
 class ProbeState(BaseModel):
@@ -41,3 +44,12 @@ def load(path: Path = STATE_PATH) -> list[ProbeSlot]:
     if not path.exists():
         return []
     return parse(path.read_text())
+
+
+def reality_conf_sni(conf_text: str) -> str | None:
+    try:
+        doc: Any = json.loads(conf_text)
+        sni = doc["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+    return str(sni) if sni else None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from sa_home_bot.node import vpn_probe_state as state
 
 
@@ -47,3 +49,19 @@ def test_load_reads_file_written_via_render(tmp_path):
     path = tmp_path / "vpn-probe-state.json"
     path.write_text(state.render([_slot()]))
     assert state.load(path) == [_slot()]
+
+
+@pytest.mark.parametrize("sni", [None, "www.azgez.com"])
+def test_sni_round_trips_through_state(sni):
+    slots = [_slot(transport="reality", iface=None, socks_port=11081, sni=sni)]
+    assert state.parse(state.render(slots)) == slots
+    assert state.parse(state.render(slots))[0].sni == sni
+
+
+def test_old_state_without_sni_is_read():
+    old = (
+        '{"slots": [{"server": "jeeves", "transport": "reality", "netns": "n", '
+        '"veth_host": "a", "veth_ns": "b", "veth_host_addr": "10.0.0.1/30", '
+        '"veth_ns_addr": "10.0.0.2/30", "subnet": "10.0.0.0/30"}]}'
+    )
+    assert state.parse(old)[0].sni is None
