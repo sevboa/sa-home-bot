@@ -26,8 +26,19 @@ CHECK_STALE_FACTOR = 3
 
 
 def _random_device_label(used: set[str]) -> str:
-    pool = [name for name in FLOWER_NAMES if name not in used] or list(FLOWER_NAMES)
-    return random.choice(pool)
+    pool = [name for name in FLOWER_NAMES if name not in used]
+    if pool:
+        return random.choice(pool)
+    suffix = 2
+    while True:
+        pool = [
+            f"{name}{suffix}"
+            for name in FLOWER_NAMES
+            if f"{name}{suffix}" not in used and len(f"{name}{suffix}") <= MAX_DEVICE_LABEL_LEN
+        ]
+        if pool:
+            return random.choice(pool)
+        suffix += 1
 
 
 APK_INFO_MEMO_S = 60.0
