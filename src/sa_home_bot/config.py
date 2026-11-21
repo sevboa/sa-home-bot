@@ -624,6 +624,10 @@ WARP_DEFAULT_DOMAINS = (
 class VpnWarpConfig(BaseModel):
     keys: int = Field(default=2, ge=1, le=4)
     domains: list[str] = Field(default_factory=lambda: list(WARP_DEFAULT_DOMAINS))
+    probe_port: int = Field(default=10886, ge=1, le=65535)
+    probe_interval_s: float = Field(default=300.0, gt=0)
+    probe_timeout_s: float = Field(default=15.0, gt=0)
+    probe_fail_threshold: int = Field(default=2, ge=1)
 
 
 class VpnConfig(BaseModel):

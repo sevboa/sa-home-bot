@@ -103,6 +103,8 @@ async def run_vpn(settings: Settings) -> None:
 
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
     tasks = [usage_task]
+    if settings.vpn.warp is not None:
+        tasks.append(asyncio.create_task(service.warp_probe_loop(), name="vpn-warp-probe-loop"))
     if awg_on:
         tasks.append(asyncio.create_task(service.check_loop(), name="vpn-check-loop"))
     log.info(

@@ -155,5 +155,7 @@ EVENT_VPN_DAILY_REPORT = "vpn_daily_report"
 EVENT_VPN_SERIES_FAILED = "vpn_series_failed"
 EVENT_VPN_SERIES_RECOVERED = "vpn_series_recovered"
 EVENT_VPN_SERVER_RESTORED = "vpn_server_restored"
+EVENT_VPN_WARP_DOWN = "warp_down"
+EVENT_VPN_WARP_RECOVERED = "warp_recovered"
 
 ERR_QUOTA_CEILING = "vpn_quota_ceiling"

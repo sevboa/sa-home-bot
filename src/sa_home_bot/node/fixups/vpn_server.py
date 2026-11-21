@@ -407,6 +407,7 @@ def make_reality_xhttp_inbound_fixup(settings: Settings) -> Fixup:
 
 
 XRAY_API_INBOUND_TAG = "api-in"
+XRAY_WARP_PROBE_INBOUND_TAG = "warp-probe"
 XRAY_BLOCK_OUTBOUND_TAG = "block"
 XRAY_ROUTING_DOMAIN_STRATEGY = "IPIfNonMatch"
 XRAY_BLOCKED_DEST_IPS = (
@@ -439,7 +440,8 @@ def xray_client_inbound_tags(config: dict) -> list[str]:
     return [
         inbound["tag"]
         for inbound in config.get("inbounds", [])
-        if inbound.get("tag") and inbound.get("tag") != XRAY_API_INBOUND_TAG
+        if inbound.get("tag")
+        and inbound.get("tag") not in (XRAY_API_INBOUND_TAG, XRAY_WARP_PROBE_INBOUND_TAG)
     ]
 
 

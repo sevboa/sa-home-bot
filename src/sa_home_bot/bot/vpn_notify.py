@@ -116,6 +116,17 @@ def node_quota_text(country: vd.Country, used_bytes: int, limit_bytes: int) -> s
     )
 
 
+def warp_down_text(country: vd.Country) -> str:
+    return (
+        f"🌐 {tag(country)}: ключи WARP молчат, YouTube и Google у гостей пока не заиграют. "
+        "Слежу, как оживёт — доложу."
+    )
+
+
+def warp_recovered_text(country: vd.Country) -> str:
+    return f"✅ {tag(country)}: WARP снова отвечает, YouTube и Google на месте."
+
+
 def peer_issued_text(country: vd.Country, chat_id: int, device_label: str) -> str:
     return (
         f"🔐 {tag(country)}: выдан доступ гостю <code>{chat_id}</code> "
