@@ -363,7 +363,6 @@ class ToolBox:
         text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)
 
-
     async def _run_script(self, args: dict[str, Any]) -> ToolOutcome:
         code = _argument(args, "code", str)
         timeout_s = self._spec.command_timeout_s
