@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from sa_home_bot.bot import vpn_check_view
+from sa_home_bot.config import RealityAltConfig, RealityTransportConfig, RealityXhttpConfig
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.domain.vpn_history import Sample, aggregate
@@ -120,3 +121,53 @@ async def test_migration_adds_entry_columns_to_old_tables(tmp_path):
     cur = await db.conn.execute("SELECT entry FROM vpn_check_samples")
     assert [row["entry"] for row in await cur.fetchall()] == [None]
     await db.close()
+
+
+def _reality_cfg(*, alt: bool = True, xhttp: bool = True) -> RealityTransportConfig:
+    return RealityTransportConfig(
+        sni="www.azgez.com",
+        alt=RealityAltConfig(port=2083, sni="www.feedwonk.com") if alt else None,
+        xhttp=RealityXhttpConfig(port=2087, sni="www.mtg.org", path="/p") if xhttp else None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [
+        ("reality", "Reality azgez"),
+        ("reality_alt", "Reality feedwonk"),
+        ("reality_xhttp", "XHTTP mtg"),
+    ],
+)
+async def test_server_sni_overrides_observer_entry(env, transport, expected):
+    svc, _, _ = env
+    svc._node = "jeeves"
+    svc._cfg.reality = _reality_cfg()
+    await _report(svc, "alfred", "Reality", transport=transport)
+    assert (await _status(svc))["states"][0]["entry"] == expected
+
+
+@pytest.mark.parametrize("transport", ["reality", "reality_alt", "reality_xhttp"])
+async def test_observer_entry_kept_without_server_section(env, transport):
+    svc, _, _ = env
+    svc._node = "jeeves"
+    svc._cfg.reality = _reality_cfg(alt=False, xhttp=False) if transport != "reality" else None
+    await _report(svc, "alfred", "Reality", transport=transport)
+    assert (await _status(svc))["states"][0]["entry"] == "Reality"
+
+
+@pytest.mark.parametrize("transport", ["awg", "awg_alt"])
+async def test_awg_entry_unchanged_by_server_sni(env, transport):
+    svc, _, _ = env
+    svc._node = "jeeves"
+    svc._cfg.reality = _reality_cfg()
+    await _report(svc, "alfred", "AWG X", transport=transport)
+    assert (await _status(svc))["states"][0]["entry"] == "AWG X"
+
+
+async def test_other_server_keeps_observer_entry(env):
+    svc, _, _ = env
+    svc._node = "wooster"
+    svc._cfg.reality = _reality_cfg()
+    await _report(svc, "alfred", "Reality")
+    assert (await _status(svc))["states"][0]["entry"] == "Reality"
