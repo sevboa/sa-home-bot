@@ -14,4 +14,5 @@
 | [reality-alt.md](reality-alt.md) | Второй вход Reality `reality-alt` (63.2.7): сервер без перезапуска xray, подписка, слоты пробника |
 | [awg-alt.md](awg-alt.md) | Второй интерфейс AmneziaWG 2.0 `awg1` (63.4): сервер, выдача, переход `retiring`, слот пробника, бэкап |
 | [reality-xhttp.md](reality-xhttp.md) | Третий вход Reality с транспортом XHTTP `reality-xhttp` (63.3.3а): сервер без перезапуска xray |
+| [warp.md](warp.md) | Выбранные домены (YouTube/Google) через Cloudflare WARP: случай ion 2026-11-21, фикс-ап `vpn-warp`, ключи, balancer, риски |
 | [server-isolation.md](server-isolation.md) | Клиенты VPN не видят внутренних адресов сервера и Tailscale: находка 2026-11-21, фикс-ап `xray-private-block`, ручная проверка |

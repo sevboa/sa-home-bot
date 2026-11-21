@@ -599,6 +599,33 @@ class RealityTransportConfig(BaseModel):
         return self
 
 
+WARP_DEFAULT_DOMAINS = (
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+    "ggpht.com",
+    "youtube-nocookie.com",
+    "youtubei.googleapis.com",
+    "youtube.googleapis.com",
+    "yt.be",
+    "youtubekids.com",
+    "withyoutube.com",
+    "googleapis.com",
+    "gstatic.com",
+    "google.com",
+    "googleusercontent.com",
+    "gvt1.com",
+    "gvt2.com",
+    "1e100.net",
+)
+
+
+class VpnWarpConfig(BaseModel):
+    keys: int = Field(default=2, ge=1, le=4)
+    domains: list[str] = Field(default_factory=lambda: list(WARP_DEFAULT_DOMAINS))
+
+
 class VpnConfig(BaseModel):
     socket: str = "./data/vpn.sock"
     db_path: Path = Path("./data/vpn.sqlite")
@@ -626,6 +653,7 @@ class VpnConfig(BaseModel):
     i5: str = ""
     awg2: bool = False
     awg_alt: AwgAltConfig | None = None
+    warp: VpnWarpConfig | None = None
     base_quota_gb: int = Field(default=500, ge=0)
     extra_step_gb: int = Field(default=100, gt=0)
     self_ceiling_gb: int = Field(default=1000, ge=0)

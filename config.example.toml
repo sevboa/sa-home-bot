@@ -548,6 +548,13 @@ transports = ["awg"]
 # inbound_tag = "reality-in"
 # spare_fingerprints = []      # напр. ["firefox", "edge"] — запасные профили в подписке
 
+# [vpn.warp] — выбранные домены клиентов VPN выходят через Cloudflare WARP (нужен Reality
+# на ноде): антибот YouTube режет IP дата-центров. Ключи регистрирует `nodectl fix`
+# (fixup vpn-warp) прямо на ноде в ~/.config/xray/warp-<n>.json. Без секции WARP не трогается.
+# [vpn.warp]
+# keys = 2                     # 1..4 ключей; мёртвый выпадает из balancer сам
+# domains = ["youtube.com", "googlevideo.com"]   # по умолчанию — полный список YouTube/Google
+
 # Сервис ноды (супервизор: `sa-home-bot --service node`, консоль — nodectl).
 # Нода запускает назначенные службы дочерними процессами и рестартит упавшие.
 # id — имя ноды в рое (пусто = hostname). Умения питания (poweroff/reboot/
