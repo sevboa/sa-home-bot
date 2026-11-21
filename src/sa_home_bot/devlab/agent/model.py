@@ -11,7 +11,7 @@ import aiohttp
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELDS
 from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
-from sa_home_bot.devlab.agent.tools import TOOL_RUN_SCRIPT
+from sa_home_bot.devlab.agent.tools import TOOL_EXECUTE
 from sa_home_bot.devlab.usage import usage_cost
 from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
 
@@ -23,8 +23,8 @@ FINISH_ERROR = "error"
 log = logging.getLogger(__name__)
 
 
-def _has_run_script(tools: list[dict[str, Any]]) -> bool:
-    return any(tool.get("function", {}).get("name") == TOOL_RUN_SCRIPT for tool in tools)
+def _has_execute(tools: list[dict[str, Any]]) -> bool:
+    return any(tool.get("function", {}).get("name") == TOOL_EXECUTE for tool in tools)
 
 
 class ModelError(Exception):
@@ -114,7 +114,7 @@ class GatewayChat:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": with_flow_reminder(
-                messages, reminder_for(self._model, _has_run_script(tools))
+                messages, reminder_for(self._model, _has_execute(tools))
             ),
             "tools": tools,
             "user": f"devlab {self._job_id}",

@@ -22,12 +22,13 @@ from sa_home_bot.devlab.agent.prompt import (
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_EDIT_FILE,
+    TOOL_EXECUTE,
     TOOL_FINISH,
     TOOL_GREP,
     TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
-    TOOL_RUN_SCRIPT,
     TOOL_RUN_TESTS,
+    TOOL_SEARCH,
     TOOL_STEP_DONE,
 )
 
@@ -144,8 +145,14 @@ def test_code_mode_texts_name_no_hidden_tools(text):
     assert "обдумай" not in text
 
 
+@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_REMINDER])
+def test_code_mode_texts_have_no_queue_after_script(text):
+    assert "очеред" not in text
+    assert "после скрипта" not in text
+
+
 def test_code_mode_intro_names_script_and_control_calls():
-    for name in (TOOL_RUN_SCRIPT, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
+    for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
         assert name in CODE_MODE_INTRO
     assert 'step_done("a.py возвращает 2")' in CODE_MODE_INTRO
 

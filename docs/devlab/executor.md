@@ -123,7 +123,7 @@
 
 По умолчанию оба `false` — поведение как раньше.
 
-С 2026-11-21 есть и `code_mode = false` — инструмент `run_script` для роли, см. `docs/devlab/agent.md`,
+С 2026-11-21 есть и `code_mode = false` — инструмент `execute` для роли, см. `docs/devlab/agent.md`,
 «Code Mode: скрипт модели».
 
 С 2026-11-21 там же `quick_steps = 0` и `quick_params = {}` — поля запроса к модели на первых `quick_steps`
