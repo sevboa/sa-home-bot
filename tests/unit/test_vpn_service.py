@@ -13,6 +13,7 @@ from sa_home_bot.proto.messages import ERR_BAD_REQUEST, ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn.protocol import FLOWER_NAMES, GB, TRANSPORT_AWG, TRANSPORT_REALITY
 from sa_home_bot.vpn.service import VpnService, _random_device_label
+from sa_home_bot.vpn.service_common import MAX_DEVICE_LABEL_LEN
 
 CHAT = 111
 OTHER_CHAT = 222
@@ -116,8 +117,16 @@ def test_random_device_label_avoids_active_names_when_possible():
     assert _random_device_label(used) == FLOWER_NAMES[-1]
 
 
-def test_random_device_label_falls_back_to_full_pool_when_exhausted():
-    assert _random_device_label(set(FLOWER_NAMES)) in FLOWER_NAMES
+@pytest.mark.parametrize("rounds", [0, 1, 2, 5])
+def test_random_device_label_is_unique_when_pool_exhausted(rounds):
+    used = set(FLOWER_NAMES)
+    for suffix in range(2, 2 + rounds):
+        used |= {f"{name}{suffix}" for name in FLOWER_NAMES}
+    for _ in range(len(FLOWER_NAMES) * 3):
+        label = _random_device_label(used)
+        assert label not in used
+        assert len(label) <= MAX_DEVICE_LABEL_LEN
+        used.add(label)
 
 
 async def test_issue_without_label_assigns_random_english_label(env):

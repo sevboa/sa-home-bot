@@ -47,6 +47,7 @@
 | `awg-interface`, `awg-alt-interface` | awg-interface: conf нет ИЛИ юнит активен (conf не создаётся — его кладёт другой путь); awg-alt-interface: conf есть и юнит активен |
 | `awg-forward-persist` | юнит есть и активен; содержимое НЕ сверяется (на wooster поставлен руками, скрипт чуть отличается); `apply` существующие файлы не перетирает |
 | `vpn-probe-legacy-cleanup` | нет юнита/netns/veth прежней схемы |
+| `vpn-probe-stale-cleanup` | обнаружение нашло слоты и среди юнитов/netns/veth пробников нет лишних (не из `indices` state) |
 | `vpn-check-probe-forwarding` | `ip_forward=1` и в ruleset есть veth и подсеть каждого слота |
 | `vpn-check-probe-forwarding-persist` | скрипт есть, юнит РАВЕН ожидаемому и активен |
 | `vpn-probe-scaffold-*` | юнит равен ожидаемому и активен |
