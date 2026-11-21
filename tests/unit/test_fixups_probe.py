@@ -272,6 +272,9 @@ def test_reality_conf_apply_rewrites_only_port_of_existing_file(
     if existing is not None:
         root.files[conf_path] = existing
     fetched = _reality_conf(slot.socks_port)
+    root.files[str(vpn_probe_state.label_path(slot))] = probe_tunnel.probe_device_label(
+        make_settings(["vpn_check"]), slot
+    )
     monkeypatch.setattr(probe_tunnel, "ensure_xray_binary", lambda: None)
     fetch_calls = []
 
@@ -318,6 +321,9 @@ def test_awg_conf_apply_strips_dns_and_table_from_fetched_config(root, monkeypat
 def test_awg_conf_apply_keeps_current_config_of_same_server_incarnation(root, monkeypatch):
     conf_path = probe_tunnel.awg_conf_path(make_slot())
     root.files[str(conf_path)] = AWG_PROBE_CONF.replace("Address", "Table = off\nAddress")
+    root.files[str(vpn_probe_state.label_path(make_slot()))] = probe_tunnel.probe_device_label(
+        make_settings(["vpn_check"]), make_slot()
+    )
     monkeypatch.setattr(probe_tunnel, "_fetch_server_public_key", _async_return(OLD_SERVER_KEY))
     monkeypatch.setattr(
         probe_tunnel, "_fetch_probe_config", _async_return("не должен запрашиваться")
@@ -787,3 +793,49 @@ def test_probe_device_label_fits_limit_for_long_hostname():
     label = probe_tunnel.probe_device_label(settings, make_slot(transport="reality_xhttp"))
     assert len(label) <= MAX_DEVICE_LABEL_LEN
     assert label.startswith("probe-") and label.endswith("-reality_xhttp")
+
+
+def _label_settings(node_id):
+    settings = make_settings(["vpn_check"])
+    settings.node.id = node_id
+    return settings
+
+
+@pytest.mark.parametrize("transport", ["awg", "reality"])
+def test_conf_is_reissued_once_when_recorded_label_is_missing_or_changed(
+    root, monkeypatch, transport
+):
+    slot = make_slot() if transport == "awg" else make_reality_slot()
+    is_awg = transport == "awg"
+    conf_path = str(
+        probe_tunnel.awg_conf_path(slot) if is_awg else vpn_probe_state.reality_conf_path(slot)
+    )
+    current = AWG_PROBE_CONF if is_awg else _reality_conf(slot.socks_port)
+    root.files[conf_path] = current
+    fetched = AWG_PROBE_CONF.replace("cHJpdmF0", "bmV3a2V5") if is_awg else current
+    fetch_calls = []
+
+    async def fake_fetch(settings, fetch_slot):
+        fetch_calls.append(settings.node.id)
+        return fetched
+
+    monkeypatch.setattr(probe_tunnel, "ensure_xray_binary", lambda: None)
+    monkeypatch.setattr(probe_tunnel, "_fetch_server_public_key", _async_return(OLD_SERVER_KEY))
+    monkeypatch.setattr(probe_tunnel, "_fetch_probe_config", fake_fetch)
+    label_file = str(vpn_probe_state.label_path(slot))
+
+    def fix(settings):
+        if not probe_tunnel._probe_conf_check_with_label(slot, settings):
+            probe_tunnel._probe_conf_apply(settings, slot)
+            root.files.update(root.installed)
+
+    fix(_label_settings("osip"))
+    assert fetch_calls == ["osip"]
+    assert root.files[label_file].strip() == probe_tunnel.probe_device_label(
+        _label_settings("osip"), slot
+    )
+    fix(_label_settings("osip"))
+    assert fetch_calls == ["osip"]
+    fix(_label_settings("vanka"))
+    assert fetch_calls == ["osip", "vanka"]
+    assert root.files[label_file].strip().startswith("probe-vanka-")

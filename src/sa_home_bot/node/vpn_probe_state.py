@@ -55,6 +55,10 @@ def reality_conf_path(slot: ProbeSlot) -> Path:
     return REALITY_CONF_DIR / f"{slot.netns}.json"
 
 
+def label_path(slot: ProbeSlot) -> Path:
+    return REALITY_CONF_DIR / f"{slot.netns}.label"
+
+
 def render(slots: list[ProbeSlot], indices: dict[str, int] | None = None) -> str:
     merged = {**slot_indices(slots), **(indices or {})}
     return ProbeState(slots=slots, indices=merged).model_dump_json(indent=2) + "\n"
