@@ -19,6 +19,7 @@ from sa_home_bot.vpn import awg_conf, qr
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_PEER_ISSUED,
     PROBE_CHAT_ID,
+    PURPOSE_APP,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
     TRANSPORTS,
@@ -70,8 +71,9 @@ class PeersMixin:
         cur = await self._db.conn.execute(
             "SELECT device_label, transport, status, created_at, "
             "last_handshake_at, server, address "
-            "FROM vpn_peers WHERE chat_id = ? AND status = 'active' ORDER BY created_at",
-            (chat_id,),
+            "FROM vpn_peers WHERE chat_id = ? AND status = 'active' AND purpose = ? "
+            "ORDER BY created_at",
+            (chat_id, PURPOSE_APP),
         )
         return [
             {
@@ -95,8 +97,8 @@ class PeersMixin:
             device["broken"] = False
         cur = await self._db.conn.execute(
             "SELECT device_label, transport, public_key, address, server_pubkey "
-            "FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
-            (chat_id,),
+            "FROM vpn_peers WHERE chat_id = ? AND status = 'active' AND purpose = ?",
+            (chat_id, PURPOSE_APP),
         )
         rows = {
             (row["device_label"], row["transport"] or TRANSPORT_AWG): row
@@ -136,17 +138,18 @@ class PeersMixin:
 
     async def _active_labels(self, chat_id: int) -> set[str]:
         cur = await self._db.conn.execute(
-            "SELECT device_label FROM vpn_peers WHERE chat_id = ? AND status = 'active'",
-            (chat_id,),
+            "SELECT device_label FROM vpn_peers "
+            "WHERE chat_id = ? AND status = 'active' AND purpose = ?",
+            (chat_id, PURPOSE_APP),
         )
         return {row["device_label"] for row in await cur.fetchall()}
 
     async def _active_row(self, chat_id: int, label: str, transport: str | None):
         sql = (
             "SELECT id, public_key, address, transport FROM vpn_peers "
-            "WHERE chat_id = ? AND device_label = ? AND status = 'active'"
+            "WHERE chat_id = ? AND device_label = ? AND status = 'active' AND purpose = ?"
         )
-        params: list[Any] = [chat_id, label]
+        params: list[Any] = [chat_id, label, PURPOSE_APP]
         if transport:
             sql += " AND COALESCE(transport, 'awg') = ?"
             params.append(transport)
@@ -410,6 +413,7 @@ class PeersMixin:
         await self._db.conn.commit()
         for old in retiring:
             await self._remove_from_backend(TRANSPORT_AWG, old["public_key"], old["address"])
+        await self._revoke_orphan_sub_peers(chat_id, device_label)
         return {
             "revoked": True,
             "device_label": device_label,
@@ -426,6 +430,7 @@ class PeersMixin:
             "    WHERE n.chat_id = vpn_peers.chat_id "
             "    AND n.device_label = vpn_peers.device_label "
             "    AND n.status = 'active' "
+            "    AND n.purpose = 'app' "
             "    AND n.transport = 'awg' "
             "    AND n.last_handshake_at IS NOT NULL"
             ")",
@@ -450,7 +455,7 @@ class PeersMixin:
     async def _peers(self, _args: dict[str, Any]) -> dict[str, Any]:
         cur = await self._db.conn.execute(
             "SELECT chat_id, device_label, transport, address, status, created_at, "
-            "last_handshake_at, server FROM vpn_peers ORDER BY chat_id, created_at"
+            "last_handshake_at, server, purpose FROM vpn_peers ORDER BY chat_id, created_at"
         )
         peers = [
             {
@@ -462,6 +467,7 @@ class PeersMixin:
                 "created_at": row["created_at"],
                 "last_handshake_at": row["last_handshake_at"],
                 "server": row["server"] or self._node,
+                "purpose": row["purpose"],
             }
             for row in await cur.fetchall()
         ]

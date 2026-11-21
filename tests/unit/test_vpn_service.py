@@ -105,9 +105,9 @@ async def test_private_key_never_stored_in_db(env):
     cur = await svc._db.conn.execute("SELECT * FROM vpn_peers")
     rows = await cur.fetchall()
     assert len(rows) == 1
-    row_keys = rows[0].keys()
-    assert "public_key" in row_keys
-    assert "private_key" not in row_keys
+    assert "public_key" in rows[0].keys()
+    assert rows[0]["purpose"] == "app"
+    assert rows[0]["private_key"] is None
     assert "private" not in rows[0]["public_key"]
 
 

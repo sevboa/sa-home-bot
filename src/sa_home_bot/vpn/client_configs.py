@@ -72,9 +72,15 @@ class ClientConfigsMixin:
     def _sub_entry_name(self) -> str:
         return self._cfg.location or self._node_id
 
-    def _sub_entry_names(self, entries_params: list[RealityParams]) -> list[str]:
+    def _sub_flag(self) -> str:
         location = self._cfg.location.strip()
-        flag = location.split(maxsplit=1)[0] if location else self._node_id
+        return location.split(maxsplit=1)[0] if location else self._node_id
+
+    def _sub_awg_name(self, version: str) -> str:
+        return f"{self._sub_flag()} AWG {version}"
+
+    def _sub_entry_names(self, entries_params: list[RealityParams]) -> list[str]:
+        flag = self._sub_flag()
         names = [
             f"{flag} {'XHTTP' if p.network == 'xhttp' else 'Reality'} "
             f"{short_domain(p.sni) or p.port}"

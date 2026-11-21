@@ -61,6 +61,7 @@ from sa_home_bot.vpn.protocol import (
     PROBE_TRANSPORT_AWG_ALT,
     PROBE_TRANSPORT_REALITY_ALT,
     PROBE_TRANSPORT_REALITY_XHTTP,
+    PURPOSE_APP,
     SERVICE_NAME,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
@@ -75,6 +76,7 @@ from sa_home_bot.vpn.service_common import (
     _random_device_label,
     log,
 )
+from sa_home_bot.vpn.sub_peers import SubPeersMixin
 from sa_home_bot.vpn.subscription_links import SubscriptionLinksMixin
 from sa_home_bot.vpn.usage import UsageMixin
 
@@ -93,6 +95,7 @@ class VpnService(
     QuotaMixin,
     ClientConfigsMixin,
     SubscriptionLinksMixin,
+    SubPeersMixin,
     UsageMixin,
     ProxyMixin,
     ChecksMixin,
@@ -133,7 +136,7 @@ class VpnService(
         self._sub_secret = subs.derive_secret(self._cfg.sub_secret, settings.swarm.token)
         self.sub_web: Any = None
         self._sub_cache: dict[str, tuple[float, subs.Subscription | None]] = {}
-        self._sub_stale: dict[tuple[str, str], list[subs.SubEntry]] = {}
+        self._sub_stale: dict[tuple[str, str], list[subs.SubEntry | subs.AwgSubEntry]] = {}
         self._sub_stale_info: dict[tuple[str, str], subs.NodeInfo] = {}
         self._peer_nodes_cache: tuple[float, list[str]] | None = None
 
@@ -339,7 +342,8 @@ class VpnService(
 
     async def get_state(self) -> dict[str, Any]:
         cur = await self._db.conn.execute(
-            "SELECT COUNT(*) AS n FROM vpn_peers WHERE status = 'active'"
+            "SELECT COUNT(*) AS n FROM vpn_peers WHERE status = 'active' AND purpose = ?",
+            (PURPOSE_APP,),
         )
         row = await cur.fetchone()
         server_pubkey: str | None = None

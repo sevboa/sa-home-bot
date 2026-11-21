@@ -31,6 +31,8 @@ async def apply_migrations(db: Database) -> None:
     await _add_column_if_missing(db, "vpn_peers", "server", "TEXT")
     await _add_column_if_missing(db, "vpn_peers", "transport", "TEXT NOT NULL DEFAULT 'awg'")
     await _add_column_if_missing(db, "vpn_peers", "server_pubkey", "TEXT")
+    await _add_column_if_missing(db, "vpn_peers", "purpose", "TEXT NOT NULL DEFAULT 'app'")
+    await _add_column_if_missing(db, "vpn_peers", "private_key", "TEXT")
     cur = await db.conn.execute("PRAGMA table_info(vpn_check_states)")
     existing = {row["name"] for row in await cur.fetchall()}
     if existing and "server" not in existing:

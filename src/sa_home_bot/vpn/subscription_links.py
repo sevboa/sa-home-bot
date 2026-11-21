@@ -149,6 +149,10 @@ class SubscriptionLinksMixin:
         }
         if len(entries) > 1:
             resp["entries"] = [e.to_wire() for e in entries]
+        if self._has(TRANSPORT_AWG):
+            awg_entries = await self._sub_awg_entries(chat_id, label)
+            if awg_entries:
+                resp["awg_entries"] = [e.to_wire() for e in awg_entries]
         return resp
 
     async def _sub_device_info(
@@ -211,6 +215,7 @@ class SubscriptionLinksMixin:
         if cached is not None and now - cached[0] < (20 if cached[1] else 30):
             return cached[1]
         entries: list[subs.SubEntry] = []
+        awg_entries: list[subs.AwgSubEntry] = []
         nodes: list[subs.NodeInfo] = []
         label = ""
         chat_id = 0
@@ -237,7 +242,11 @@ class SubscriptionLinksMixin:
             answers = [(n, redo[n] if (redo.get(n) or {}).get("info") else r) for n, r in answers]
         for node, reply in answers:
             if reply is None:
-                entries += self._sub_stale.get((token, node), [])
+                for stale_entry in self._sub_stale.get((token, node), []):
+                    if isinstance(stale_entry, subs.AwgSubEntry):
+                        awg_entries.append(stale_entry)
+                    else:
+                        entries.append(stale_entry)
                 stale = self._sub_stale_info.get((token, node))
                 if stale is not None:
                     nodes.append(dataclasses.replace(stale, health="", awg=False, awg_key=False))
@@ -261,8 +270,13 @@ class SubscriptionLinksMixin:
                     parsed.append(subs.SubEntry.from_wire(reply["entry"]))
             except (KeyError, TypeError, ValueError):
                 continue
+            try:
+                parsed_awg = [subs.AwgSubEntry.from_wire(e) for e in reply.get("awg_entries") or []]
+            except (KeyError, TypeError, ValueError):
+                parsed_awg = []
             entries += parsed
-            self._sub_stale[(token, node)] = parsed
+            awg_entries += parsed_awg
+            self._sub_stale[(token, node)] = [*parsed, *parsed_awg]
             label = label or str(reply.get("device_label") or "")
             chat_id = chat_id or int(reply.get("chat_id") or 0)
             newest_gen = max(newest_gen, int(reply.get("gen") or 0))
@@ -282,6 +296,7 @@ class SubscriptionLinksMixin:
             result = subs.Subscription(
                 device_label=label,
                 entries=tuple(subs.expand_spares(subs.sort_entries(entries), spare)),
+                awg_entries=tuple(sorted(awg_entries, key=lambda e: (e.name, e.node))),
                 used_bytes=used,
                 total_bytes=total,
                 expire_ts=int(nxt.timestamp()),

@@ -9,6 +9,7 @@ from sa_home_bot.vpn import service_common
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_SERVER_RESTORED,
     PROBE_CHAT_ID,
+    PURPOSE_APP,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
 )
@@ -139,9 +140,9 @@ class ReconcileMixin:
             key_changed = key_changed or recorded is not None
             cur = await self._db.conn.execute(
                 "SELECT chat_id, device_label, server_pubkey, address FROM vpn_peers "
-                "WHERE status = 'active' AND chat_id != ? "
+                "WHERE status = 'active' AND chat_id != ? AND purpose = ? "
                 "AND COALESCE(transport, 'awg') = ? ORDER BY chat_id, created_at",
-                (PROBE_CHAT_ID, transport),
+                (PROBE_CHAT_ID, PURPOSE_APP, transport),
             )
             for row in await cur.fetchall():
                 if transport == TRANSPORT_AWG and (
