@@ -9,6 +9,7 @@ from pathlib import Path
 from sa_home_bot.node.fixups.core import FixupError
 from sa_home_bot.node.fixups.privileged import (
     download,
+    file_capabilities,
     file_sha256,
     find_executable,
     install_executable,
@@ -135,7 +136,22 @@ def ensure_xray_binary() -> None:
         install_executable(build_dir / "xray", XRAY_BIN_PATH)
 
 
+def _mtg_setcap() -> None:
+    setcap = find_executable("setcap")
+    if setcap is None:
+        raise FixupError("setcap не найден (пакет libcap2-bin)")
+    run_sudo([setcap, "cap_net_bind_service=+ep", str(MTG_BIN_PATH)])
+
+
 def install_mtg() -> None:
+    if MTG_BIN_PATH.is_file():
+        if "cap_net_bind_service" not in file_capabilities(MTG_BIN_PATH):
+            _mtg_setcap()
+        return
+    _mtg_install()
+
+
+def _mtg_install() -> None:
     if MTG_BIN_PATH.is_file():
         return
     with tempfile.TemporaryDirectory(prefix="sa-home-mtg-") as build_dir_str:
@@ -153,7 +169,4 @@ def install_mtg() -> None:
         if not extracted.is_file():
             raise FixupError(f"после распаковки не нашёлся бинарь mtg ({extracted})")
         install_executable(extracted, MTG_BIN_PATH)
-    setcap = find_executable("setcap")
-    if setcap is None:
-        raise FixupError("setcap не найден (пакет libcap2-bin)")
-    run_sudo([setcap, "cap_net_bind_service=+ep", str(MTG_BIN_PATH)])
+    _mtg_setcap()

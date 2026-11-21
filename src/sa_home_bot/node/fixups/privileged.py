@@ -49,6 +49,19 @@ def run_user(argv: list[str], **kwargs: object) -> None:
         raise FixupError(f"{' '.join(argv)} завершился кодом {result.returncode}")
 
 
+def file_capabilities(path: Path) -> str:
+    getcap = find_executable("getcap")
+    if getcap is None:
+        raise FixupError("getcap не найден (пакет libcap2-bin)")
+    try:
+        result = subprocess.run([getcap, str(path)], capture_output=True, text=True)
+    except OSError as exc:
+        raise FixupError(f"не удалось запустить getcap {path}: {exc}") from exc
+    if result.returncode != 0:
+        raise FixupError(f"getcap {path} завершился кодом {result.returncode}")
+    return result.stdout.strip()
+
+
 def path_exists(path: Path) -> bool:
     try:
         return path.exists()

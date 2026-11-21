@@ -16,6 +16,7 @@ from sa_home_bot.node.fixups import (
     proxy,
     vpn_server,
 )
+from sa_home_bot.node.fixups.toolchain import install_mtg
 from tests.unit.fixups_world import FakeRoot, make_settings
 
 UFW_WOOSTER = (
@@ -31,6 +32,21 @@ APP = AppConfig(id="jellyfin", title="Jellyfin", unit="jellyfin.service")
 @pytest.fixture
 def root(monkeypatch):
     return FakeRoot(monkeypatch)
+
+
+_MTG_GETCAP = "/usr/bin/getcap /usr/local/bin/mtg"
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "setcap_runs"), [("", True), ("cap_net_bind_service=ep", False)]
+)
+def test_install_mtg_setcap_runs_only_when_capability_missing(
+    root, monkeypatch, capabilities, setcap_runs
+):
+    monkeypatch.setattr(Path, "is_file", lambda p: True)
+    root.outputs[_MTG_GETCAP] = capabilities
+    install_mtg()
+    assert (len(root.sudo_commands("/usr/bin/setcap")) == 1) is setcap_runs
 
 
 def _make_executable(path: Path) -> None:
@@ -548,3 +564,70 @@ def test_append_nftables_conf_counters_idempotent(root):
 def test_nftables_conf_with_counters_refuses_unexpected_structure():
     with pytest.raises(FixupError, match="структура файла не та"):
         proxy.nftables_conf_with_counters("table ip nat {\n}\n", make_settings(["vpn"]))
+
+
+@pytest.mark.parametrize(
+    ("mtg_port", "needed"), [(443, True), (0, False)]
+)
+def test_mtg_ufw_needed_with_active_ufw_and_positive_port(root, mtg_port, needed):
+    settings = make_settings(["vpn"])
+    settings.vpn.mtg_port = mtg_port
+    root.outputs[UFW_STATUS] = UFW_WOOSTER
+    fixup = proxy.make_mtg_ufw_fixup(settings)
+    assert fixup.needed(settings) is needed
+    if needed:
+        assert not fixup.check()
+        fixup.apply()
+        assert root.sudo_commands("/usr/bin/ufw")[-1] == [
+            "/usr/bin/ufw",
+            "allow",
+            "443/tcp",
+            "comment",
+            proxy.MTG_UFW_COMMENT,
+        ]
+
+
+def test_mtg_ufw_check_true_when_port_already_allowed(root):
+    root.outputs[UFW_STATUS] = UFW_WOOSTER + "443/tcp ALLOW Anywhere\n"
+    settings = make_settings(["vpn"])
+    fixup = proxy.make_mtg_ufw_fixup(settings)
+    assert fixup.check()
+
+
+AWG0_CONF = "/etc/amnezia/amneziawg/awg0.conf"
+
+
+@pytest.mark.parametrize(
+    ("conf_exists", "unit_active", "needed", "check"),
+    [(False, False, False, True), (True, True, False, True), (True, False, True, False)],
+)
+def test_awg_interface_fixup(root, conf_exists, unit_active, needed, check):
+    settings = make_settings(["vpn"])
+    if conf_exists:
+        root.files[AWG0_CONF] = "conf"
+    if unit_active:
+        root.active_units.add(f"awg-quick@{settings.vpn.interface}")
+    fixup = vpn_server.make_awg_interface_fixup(settings)
+    assert fixup.needed(settings) is needed
+    assert fixup.check() is check
+    if needed:
+        fixup.apply()
+        assert root.sudo_commands("systemctl")[-1] == [
+            "systemctl",
+            "enable",
+            "--now",
+            f"awg-quick@{settings.vpn.interface}",
+        ]
+
+
+def test_build_fixups_includes_awg_interface_when_conf_exists_and_unit_inactive(root):
+    settings = make_settings(["vpn"])
+    root.files[AWG0_CONF] = "conf"
+    ids = [f.id for f in build_fixups(settings)]
+    assert ids.count("awg-interface") == 1
+
+
+def test_build_fixups_includes_mtg_ufw_port_with_vpn(root):
+    root.outputs[UFW_STATUS] = UFW_WOOSTER
+    ids = [f.id for f in build_fixups(make_settings(["vpn"]))]
+    assert ids.count("mtg-ufw-port") == 1

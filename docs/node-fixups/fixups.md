@@ -23,11 +23,11 @@
 | `privileged.py` | примитивы: `find_executable`, `run_sudo`, `run_user`, `path_exists`, `read_text`, `install_root_file`, `install_sudoers_snippet`, `install_package`, `replace_unit`, `enable_now`, `unit_is_active`, `download`, `file_sha256` |
 | `netfilter.py` | nft-обёртки (`sudo -n nft`), `NftChain`, ufw-разбор, `ip_forward`, маршрут по умолчанию |
 | `host.py` | smartmontools, sudoers+обёртка smartctl, PATH юнита ноды, группа journal, sudoers приложений, polkit power, Wake-on-LAN |
-| `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, forward/NAT awg-сервера под ufw |
+| `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, forward/NAT awg-сервера под ufw, подключение интерфейсов (awg-interface, awg-alt-interface) |
 | `probe_net.py`, `probe_tunnel.py` | netns-пробники `vpn_check` (см. [vpn-probes.md](vpn-probes.md)) |
-| `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables |
+| `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables, ufw-порт mtg |
 | `devlab.py` | мастерская devlab (Этап 60.1): podman, пользователь `devlab`, subuid/subgid, linger, обёртка контейнеров + sudoers |
-| `toolchain.py` | сборка amneziawg-tools, xray-core, mtg |
+| `toolchain.py` | сборка amneziawg-tools, xray-core, mtg (setcap и для уже существующего бинаря) |
 | `build.py` | `build_fixups`: порядок фиксов |
 
 ## Семантика `check()` — менять нельзя
@@ -42,7 +42,8 @@
 | `node-unit-smartctl-path` | юнита нет — «применено» (PATH допишет `init`); иначе первый каталог `Environment=PATH=` — `~/.local/bin` |
 | `journalctl-group` | пользователь в группе `systemd-journal` |
 | `apps-unit-sudoers-<id>`, `awg-sudoers`, `power-control-polkit`, `wol-enable` | файл существует (содержимое не сверяется) |
-| `awg-ufw-port`, `sub-ufw-ports` | ufw активен и все порты разрешены |
+| `awg-ufw-port`, `mtg-ufw-port`, `sub-ufw-ports` | ufw активен и все порты разрешены |
+| `awg-interface`, `awg-alt-interface` | awg-interface: conf нет ИЛИ юнит активен (conf не создаётся — его кладёт другой путь); awg-alt-interface: conf есть и юнит активен |
 | `awg-forward-persist` | юнит есть и активен; содержимое НЕ сверяется (на wooster поставлен руками, скрипт чуть отличается); `apply` существующие файлы не перетирает |
 | `vpn-probe-legacy-cleanup` | нет юнита/netns/veth прежней схемы |
 | `vpn-check-probe-forwarding` | `ip_forward=1` и в ruleset есть veth и подсеть каждого слота |
@@ -63,6 +64,12 @@
 `FixupError` из `check()` останавливал все оставшиеся фиксы.
 
 ## Живые находки
+- **2026-11-21 (ion)**: на свежем VPN-сервере руками скопированный бинарь mtg не слушал 443 —
+  «bind: permission denied», 88 падений: `install_mtg` возвращался при уже существующем бинаре
+  ДО `setcap`, а capability `cap_net_bind_service` не была выставлена. Теперь `setcap` зовётся
+  и для существующего бинаря, если `getcap` не показывает capability. Тогда же вручную
+  открывали ufw-порт mtg (`mtg-ufw-port`) и подключали интерфейс awg0 (conf уже был, юнит
+  `awg-quick@awg0` не активен — `awg-interface`).
 - **2026-11-11 (osip, vanka)**: `journalctl-group` писал «применится после нового логина»,
   `nodectl fix` дальше отвечал «уже применено» (проверка смотрит `id -nG`, то есть `/etc/group`),
   а монитор продолжал писать «не хватает прав на journalctl»: user-менеджер с linger

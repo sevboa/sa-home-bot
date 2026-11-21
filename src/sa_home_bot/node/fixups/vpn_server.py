@@ -575,6 +575,29 @@ def make_awg_ufw_fixup(settings: Settings) -> Fixup:
     )
 
 
+def make_awg_interface_fixup(settings: Settings) -> Fixup:
+    iface = settings.vpn.interface
+    conf_path = AWG_CONF_DIR / f"{iface}.conf"
+    unit_name = f"awg-quick@{iface}"
+
+    def needed(s: Settings) -> bool:
+        return needs.vpn_awg(s) and path_exists(conf_path) and not unit_is_active(unit_name)
+
+    def check() -> bool:
+        return not path_exists(conf_path) or unit_is_active(unit_name)
+
+    def apply() -> None:
+        enable_now(unit_name)
+
+    return Fixup(
+        id="awg-interface",
+        title=f"Подключить интерфейс AmneziaWG ({iface})",
+        needed=needed,
+        check=check,
+        apply=apply,
+    )
+
+
 def make_awg_alt_interface_fixup(settings: Settings) -> Fixup:
     alt = settings.vpn.awg_alt
     if alt is None:
