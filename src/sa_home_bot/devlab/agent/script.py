@@ -15,8 +15,10 @@ SCRIPT_GREP_MAX_MATCHES = 200
 SCRIPT_GREP_MAX_FILE_BYTES = 200_000
 SCRIPT_FILENAME = "<script>"
 SCRIPT_FAILED_HEAD = "[скрипт упал]"
-SCRIPT_OUTPUT_CHARS = 20_000
-SCRIPT_CLIPPED_HINT = "; печатай только нужное"
+SCRIPT_OUTPUT_CHARS = 8_000
+SCRIPT_CLIPPED_HINT = (
+    "; печатай только нужное: grep() и ls() возвращают список строк, срез [:n] режет строки"
+)
 PROCESS_FORBIDDEN = (
     "процессы из скрипта запрещены: команды — через run(), тесты — через run_tests()"
 )
