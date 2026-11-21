@@ -43,6 +43,36 @@ async def test_read_many_and_print_reach_output(project):
     assert "['src/a.py', 'src/b.py']" in run.output
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("'привет'", "привет"),
+        ("['a', 'b']", "a\nb"),
+        ("{'x': 'один', 'y': 'два'}", "=== x ===\nодин\n=== y ===\nдва"),
+        ("{'x': 1}", "{'x': 1}"),
+        ("[1, 2]", "[1, 2]"),
+        ("ls()[:1]", "src/a.py"),
+        ("None", ""),
+        ("value = 5", ""),
+        ("'не последняя'\nvalue = 5", ""),
+        ("'первая'\nprint('вторая')", "вторая"),
+    ],
+)
+async def test_last_expression_is_printed_like_jupyter(project, code, expected):
+    run = await run_script(project, code)
+    assert not run.failed
+    assert run.output == expected
+
+
+async def test_last_expression_error_and_signal_keep_their_behaviour(project):
+    failed = await run_script(project, "1\nundefined_name")
+    assert failed.failed
+    assert "NameError" in failed.output
+    done = await run_script(project, "finish('готово')")
+    assert done.control is not None
+    assert done.output == ""
+
+
 async def test_read_is_plain_text_and_numbered_has_numbers(project):
     run = await run_script(
         project, "print(repr(read('src/a.py', 2, 3)))\nprint(read_numbered('src/a.py', 2, 3))"
@@ -74,7 +104,7 @@ def test_output_without_valid_marker_is_failed(text):
     assert run.output == text.rstrip()
 
 
-@pytest.mark.parametrize(("query", "count"), [("", len(SCRIPT_API)), ("тест", 1), ("grep", 1)])
+@pytest.mark.parametrize(("query", "count"), [("", len(SCRIPT_API)), ("тест", 3), ("grep", 1)])
 def test_search_lists_matching_stubs(query, count):
     assert len(api_stubs(query).splitlines()) == count
     assert "find" not in api_stubs()

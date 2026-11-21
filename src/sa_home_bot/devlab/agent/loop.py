@@ -53,6 +53,19 @@ STEP_REJECTED = (
     f"{STEP_REJECTED_HEAD}: исправь и вызови {TOOL_STEP_DONE} снова; шаг, который по заданию "
     "заканчивается красным тестом, закрывается вместе с правкой; полный вывод стража ниже:\n"
 )
+CODE_NUDGE_TEXT = (
+    "Ответ без вызова инструмента не принимается. Пиши код в execute; "
+    'закончив, вызови в нём finish("итог").'
+)
+CODE_FINISH_REJECTED = (
+    f"{FINISH_REJECTED_HEAD}: исправь и снова вызови finish() в execute; "
+    "полный вывод стража ниже:\n"
+)
+CODE_STEP_REJECTED = (
+    f"{STEP_REJECTED_HEAD}: исправь и снова вызови step_done() в execute. "
+    "Шаг «написать тест, который пока падает» закрывается вместе со следующим шагом, "
+    "где код его чинит; полный вывод стража ниже:\n"
+)
 STEP_ACCEPTED = "шаг принят"
 SCRIPT_REJECTED = re.compile(
     rf"^(?:{TOOL_STEP_DONE}|{TOOL_FINISH}): "
@@ -72,6 +85,14 @@ REPEAT_GREEN_HINT = (
 REPEAT_READ_HINT = (
     "\n\nэтот фрагмент ты уже читал, и он не менялся: не перечитывай его, используй то, что узнал, "
     f"и переходи к правке, проверке или {TOOL_FINISH}; ещё один такой же вызов остановит задание"
+)
+CODE_REPEAT_GREEN_HINT = (
+    "\n\nэтот вызов уже был, результат тот же и зелёный: не повторяй проверку; "
+    "если все шаги сделаны, вызови finish() в execute"
+)
+CODE_REPEAT_READ_HINT = (
+    "\n\nэтот фрагмент ты уже читал, и он не менялся: не перечитывай его, используй то, что "
+    "узнал, и переходи к правке, проверке или finish(); ещё один такой же вызов остановит задание"
 )
 REPEAT_REASON = "модель повторяет {call}"
 REPEAT_SKIPPED = "не выполнено: стоп-кран на повторах"
@@ -152,16 +173,20 @@ class Segment:
     tree_fingerprint: str | None = None
 
 
-def _repeat_hint(name: str, text: str) -> str:
+def _repeat_hint(name: str, text: str, code_mode: bool = False) -> str:
     if name in READ_ONLY_TOOLS:
-        return REPEAT_READ_HINT
-    return REPEAT_GREEN_HINT if text.startswith(OK_HEAD) else REPEAT_HINT
+        return CODE_REPEAT_READ_HINT if code_mode else REPEAT_READ_HINT
+    if not text.startswith(OK_HEAD):
+        return REPEAT_HINT
+    return CODE_REPEAT_GREEN_HINT if code_mode else REPEAT_GREEN_HINT
 
 
 def _rejected(name: str, text: str) -> bool:
     if name == TOOL_EXECUTE:
         return SCRIPT_REJECTED.search(text) is not None
-    return text.startswith((FINISH_REJECTED, STEP_REJECTED))
+    return text.startswith(
+        (FINISH_REJECTED, STEP_REJECTED, CODE_FINISH_REJECTED, CODE_STEP_REJECTED)
+    )
 
 
 def _script_code(arguments: str) -> str:
@@ -335,7 +360,8 @@ class AgentLoop:
                         seg,
                         reason=f"модель {seg.idle} раз ответила без инструментов",
                     )
-                messages.append({"role": "user", "content": NUDGE_TEXT})
+                nudge = CODE_NUDGE_TEXT if self._tools.code_mode else NUDGE_TEXT
+                messages.append({"role": "user", "content": nudge})
                 continue
             seg.idle = 0
             finished = await self._handle_calls(reply.tool_calls, seg)
@@ -418,7 +444,7 @@ class AgentLoop:
         if call.name not in READ_ONLY_TOOLS:
             seg.tree_fingerprint = None
         if repeats:
-            text += _repeat_hint(call.name, text)
+            text += _repeat_hint(call.name, text, self._tools.code_mode)
         return text, summary
 
     async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:
@@ -474,7 +500,8 @@ class AgentLoop:
         failures = await self._guard.verify_step()
         if failures:
             seg.red_runs += 1
-            return STEP_REJECTED + "\n".join(failures)
+            rejected = CODE_STEP_REJECTED if self._tools.code_mode else STEP_REJECTED
+            return rejected + "\n".join(failures)
         seg.red_runs = 0
         if self._on_step is not None:
             await self._on_step(title.strip())
@@ -486,5 +513,6 @@ class AgentLoop:
             return "ошибка: finish требует непустой summary", None
         failures = self._guard.verify_summary(summary) or await self._guard.verify()
         if failures:
-            return FINISH_REJECTED + "\n".join(failures), None
+            rejected = CODE_FINISH_REJECTED if self._tools.code_mode else FINISH_REJECTED
+            return rejected + "\n".join(failures), None
         return "принято", summary.strip()

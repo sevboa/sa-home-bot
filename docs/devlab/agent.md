@@ -694,3 +694,33 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 
 Тесты: `tests/unit/test_devlab_agent_script.py`, `test_devlab_agent_run_script.py`,
 `test_devlab_agent_prompt.py`.
+
+### 2026-11-22 (тексты Code Mode после разбора)
+
+Владелец разобрал промпт Code Mode. Что было не так:
+- пример шага правил текст, которого модель ещё не видела, а фраза «Один вызов — весь шаг» была
+  невыполнима: нужное для правки видно только после вывода;
+- тексты стражей (отказ `step_done`/`finish`, подталкивание, подсказки о повторе) звали `finish`/
+  `step_done` как инструменты, хотя в Code Mode это функции внутри `execute`;
+- не было сказано, что переменные между `execute` не сохраняются, что виден только вывод `print()` и
+  его начало, что тесты запускают через `run_tests()`, а не `run("python -m pytest …")`.
+
+Что поменяли:
+- `CODE_MODE_INTRO`, `CODE_MODE_SETTING`, `CODE_MODE_REMINDER` и описание `execute` переписаны: одна граница
+  вызова («код, которому нужен ещё не увиденный вывод, — в следующий вызов, остальное — в текущий»),
+  пример шага из двух вызовов (чтение, затем правки с тестами и `step_done`), пример финала, раздел
+  «Частые ошибки». Примеры живут в `script.py` (`SCRIPT_READ_EXAMPLE`, `SCRIPT_EDIT_EXAMPLE`,
+  `SCRIPT_FINAL_EXAMPLE`) и собираются в промпт; в описании `execute` примера больше нет.
+- Описания функций в `SCRIPT_API` уточнены (границы среза, префикс `grep`, `EditError` при отсутствии
+  файла, что завершает скрипт).
+- `loop.py`: в Code Mode свои `CODE_NUDGE_TEXT`, `CODE_FINISH_REJECTED`, `CODE_STEP_REJECTED`,
+  `CODE_REPEAT_GREEN_HINT`, `CODE_REPEAT_READ_HINT` («вызови finish() в execute»); признак берётся из
+  `ToolBox.code_mode`. Головы отказов прежние, `SCRIPT_REJECTED` их ловит. Без `code_mode` тексты не
+  менялись.
+- Живой прогон: модель писала `read("src/x.py")` последней строкой и ждала вывод, как в Jupyter; получала
+  «(скрипт ничего не напечатал)» и упиралась в стоп-кран. Теперь значение последнего оператора верхнего
+  уровня, если это выражение и оно не `None`, печатается: `str` как есть, список строк построчно, словарь
+  со строковыми значениями как «=== ключ ===», остальное через `repr`. Выражения не в последней строке не
+  выводятся, о чём сказано в `SCRIPT_NO_OUTPUT` и в промпте.
+
+Тесты: `tests/unit/test_devlab_agent_prompt.py`, `test_devlab_agent.py`, `test_devlab_agent_script.py`.
