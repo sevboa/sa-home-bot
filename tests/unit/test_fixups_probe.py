@@ -251,17 +251,44 @@ def test_reality_conf_check_requires_expected_socks_port(root, conf, expected):
     assert probe_tunnel._probe_conf_check(slot) is expected
 
 
-def test_reality_conf_apply_reuses_existing_file(root, monkeypatch):
+@pytest.mark.parametrize(
+    ("existing", "port_matches", "expect_fetch"),
+    [
+        (_reality_conf(11081), True, False),
+        (_reality_conf(9999), False, False),
+        (None, False, True),
+        ("{не json", False, True),
+        ('{"inbounds": []}', False, True),
+    ],
+)
+def test_reality_conf_apply_rewrites_only_port_of_existing_file(
+    root, monkeypatch, existing, port_matches, expect_fetch
+):
     slot = make_reality_slot()
-    root.files[str(vpn_probe_state.reality_conf_path(slot))] = _reality_conf(11081)
+    conf_path = str(vpn_probe_state.reality_conf_path(slot))
+    if existing is not None:
+        root.files[conf_path] = existing
+    fetched = _reality_conf(slot.socks_port)
     monkeypatch.setattr(probe_tunnel, "ensure_xray_binary", lambda: None)
+    fetch_calls = []
 
-    async def must_not_fetch(settings, slot):
-        raise AssertionError("файл уже есть — в сеть ходить не нужно")
+    async def fake_fetch(settings, slot):
+        fetch_calls.append(slot)
+        return fetched
 
-    monkeypatch.setattr(probe_tunnel, "_fetch_probe_config", must_not_fetch)
+    monkeypatch.setattr(probe_tunnel, "_fetch_probe_config", fake_fetch)
     probe_tunnel._probe_conf_apply(make_settings(["vpn_check"]), slot)
-    assert root.sudo_calls == []
+    assert bool(fetch_calls) is expect_fetch
+    if existing is not None and not expect_fetch and port_matches:
+        assert root.sudo_commands("install") == []
+    elif expect_fetch:
+        assert json.loads(root.installed[conf_path]) == json.loads(fetched)
+    else:
+        written = json.loads(root.installed[conf_path])
+        expected = json.loads(existing)
+        expected["inbounds"][0]["port"] = slot.socks_port
+        assert written == expected
+        assert "0600" in root.sudo_commands("install")[0]
 
 
 def test_reality_conf_apply_fetches_and_installs_private_file(root, monkeypatch):
