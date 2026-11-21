@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
 from getpass import getuser
 from pathlib import Path
 
 from sa_home_bot.config import Settings
 from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
-from sa_home_bot.node.fixups.netfilter import nft_json, nft_output
+from sa_home_bot.node.fixups.netfilter import (
+    NFTABLES_CONF_PATH,
+    filter_table_json,
+    indent,
+    line_index,
+    nft_check_file,
+    nft_output,
+)
 from sa_home_bot.node.fixups.privileged import (
     find_executable,
     install_from,
@@ -26,7 +32,6 @@ PROXY_UNITS_DIR = Path.home() / ".config" / "systemd" / "user"
 MTG_UNIT_PATH = PROXY_UNITS_DIR / "mtg.service"
 MICROSOCKS_UNIT_PATH = PROXY_UNITS_DIR / "microsocks.service"
 PROXY_FIREWALL_SUDOERS_FILE = "50-sa-home-node-proxy-nft"
-NFTABLES_CONF_PATH = Path("/etc/nftables.conf")
 PROXY_COUNTERS = ("mtg_bytes", "socks_bytes")
 
 
@@ -116,10 +121,6 @@ def make_proxy_units_fixup(settings: Settings) -> Fixup:
     )
 
 
-def _filter_table_json() -> dict:
-    return nft_json(["list", "table", "inet", "filter"])
-
-
 def _existing_counter_names(data: dict) -> set[str]:
     return {
         counter["name"]
@@ -144,40 +145,19 @@ def _rule_counter_names(data: dict) -> set[str]:
 
 
 def _proxy_firewall_check() -> bool:
-    return set(PROXY_COUNTERS) <= _rule_counter_names(_filter_table_json())
-
-
-def _nft_check_file(path: Path) -> None:
-    nft = find_executable("nft") or "nft"
-    try:
-        result = subprocess.run(["sudo", nft, "-c", "-f", str(path)])
-    except OSError as exc:
-        raise FixupError(f"не удалось запустить nft -c: {exc}") from exc
-    if result.returncode != 0:
-        raise FixupError(
-            f"сгенерированный {NFTABLES_CONF_PATH} не проходит `nft -c` "
-            "(ошибку см. выше) — файл НЕ изменён"
-        )
-
-
-def _line_index(lines: list[str], predicate: Callable[[str], bool], start: int = 0) -> int | None:
-    return next((i for i in range(start, len(lines)) if predicate(lines[i])), None)
-
-
-def _indent(line: str) -> str:
-    return line[: len(line) - len(line.lstrip())]
+    return set(PROXY_COUNTERS) <= _rule_counter_names(filter_table_json())
 
 
 def nftables_conf_with_counters(content: str, settings: Settings) -> str:
     lines = content.splitlines(keepends=True)
-    table_i = _line_index(lines, lambda s: s.strip() == "table inet filter {")
+    table_i = line_index(lines, lambda s: s.strip() == "table inet filter {")
     chain_i = (
-        _line_index(lines, lambda s: s.strip() == "chain input {", table_i + 1)
+        line_index(lines, lambda s: s.strip() == "chain input {", table_i + 1)
         if table_i is not None
         else None
     )
     hook_i = (
-        _line_index(lines, lambda s: s.lstrip().startswith("type filter hook input"), chain_i + 1)
+        line_index(lines, lambda s: s.lstrip().startswith("type filter hook input"), chain_i + 1)
         if chain_i is not None
         else None
     )
@@ -188,8 +168,8 @@ def nftables_conf_with_counters(content: str, settings: Settings) -> str:
             "допишите счётчики вручную (см. node/fixups.py::_append_nftables_conf_counters) "
             "и повторите nodectl fix"
         )
-    obj_indent = _indent(lines[chain_i])
-    rule_indent = _indent(lines[hook_i])
+    obj_indent = indent(lines[chain_i])
+    rule_indent = indent(lines[hook_i])
     counter_objs = f"{obj_indent}counter mtg_bytes {{ }}\n{obj_indent}counter socks_bytes {{ }}\n"
     counter_rules = (
         f"{rule_indent}tcp dport {settings.vpn.mtg_port} counter name mtg_bytes accept\n"
@@ -211,12 +191,12 @@ def _append_nftables_conf_counters(settings: Settings) -> None:
         return
     new_content = nftables_conf_with_counters(result.stdout, settings)
     with temp_file(new_content, ".conf") as tmp:
-        _nft_check_file(tmp)
+        nft_check_file(tmp)
         install_from(tmp, NFTABLES_CONF_PATH, mode="0755")
 
 
 def _apply_proxy_firewall_live(settings: Settings) -> None:
-    data = _filter_table_json()
+    data = filter_table_json()
     existing_counters = _existing_counter_names(data)
     for name in PROXY_COUNTERS:
         if name not in existing_counters:

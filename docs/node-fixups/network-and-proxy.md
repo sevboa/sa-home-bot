@@ -65,3 +65,23 @@ cap_net_bind_service=+ep`; microsocks — пакетом. `[vpn].socks_host` (ta
 - xray-core (клиент reality-пробника, 39.0.7(e)) ставится готовым бинарём версии `XRAY_VERSION` в
   `/usr/local/bin/xray`: архив + `.dgst` рядом, сверка sha256 до распаковки — тот же приём, что
   `deploy/setup-reality-server.sh` на серверной стороне; клиент ставится на ЛЮБУЮ ноду с `vpn_check`.
+
+## Порты VPN-сервера без ufw (`vpn-nft-ports`, 2026-11-21)
+На jeeves ufw нет, а фикс-апы `awg-ufw-port`, `awg-alt-ufw-port`, `reality-alt-ufw-port`,
+`reality-xhttp-ufw-port`, `sub-ufw-ports` работают только при `ufw_in_use()`. Каждый новый вход
+открывали руками (2026-11-21 так открыли XHTTP 2087). `vpn-nft-ports` закрывает дыру для хоста
+с собственным `/etc/nftables.conf` (`table inet filter`, `chain input` с policy drop).
+- Список портов: `vpn_server_port_specs` — UDP awg `endpoint_port`, UDP `awg_alt.port`, TCP порт
+  основного входа Reality, TCP alt и XHTTP, TCP `sub_port` и `80/tcp`. На jeeves это 51820/udp,
+  8443/udp, 8443/tcp, 2083/tcp, 2087/tcp, 8444/tcp, 80/tcp.
+- Файл: `nftables_conf_with_ports` дописывает `<proto> dport <port> accept` с комментарием
+  `# sa-home vpn (nodectl fix)` после строки `type filter hook input` только для портов, которых
+  в `chain input` ещё нет (правило с `counter name ...` считается открытым; правило с `iifname`
+  или в другой chain — нет). Идемпотентна; чужая структура файла даёт `FixupError`. Запись через
+  временный файл, `nft -c -f` и установку, как у счётчиков прокси.
+- Живой набор: по `nft -j list table inet filter` ищется accept на proto/dport в `input`;
+  недостающие вставляются `nft insert rule inet filter input <proto> dport <port> accept`.
+- Фикс-ап НИКОГДА не делает `nft -f` целого файла и не перезапускает nftables/tailscaled (см. ловушку
+  выше): живой набор правится только точечно.
+- Проверено на настоящем `/etc/nftables.conf` jeeves (копия `tests/unit/support/jeeves_nftables.conf`):
+  с текущими портами файл не меняется, с новым портом добавляется ровно одна строка.

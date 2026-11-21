@@ -39,6 +39,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_server.make_awg_forward_fixup(settings),
         vpn_server.make_awg_alt_interface_fixup(settings),
         vpn_server.make_awg_alt_ufw_fixup(settings),
+        vpn_server.make_vpn_nft_ports_fixup(settings),
         vpn_server.make_awg_alt_forward_fixup(settings),
     ]
     if needs.vpn_check(settings):

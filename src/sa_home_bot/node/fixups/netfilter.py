@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -17,6 +18,7 @@ from sa_home_bot.node.fixups.privileged import (
 IP_FORWARD_PROC_PATH = Path("/proc/sys/net/ipv4/ip_forward")
 IP_FORWARD_SYSCTL_PATH = Path("/etc/sysctl.d/99-sa-home-vpn-probe-forward.conf")
 IP_FORWARD_SYSCTL_CONTENT = "net.ipv4.ip_forward = 1\n"
+NFTABLES_CONF_PATH = Path("/etc/nftables.conf")
 
 
 class NftChain(NamedTuple):
@@ -147,3 +149,28 @@ def ufw_allows_all(specs: list[str]) -> bool:
     if text is None or ufw_active(text) is not True:
         return False
     return all(ufw_allows(text, spec) for spec in specs)
+
+
+def filter_table_json() -> dict:
+    return nft_json(["list", "table", "inet", "filter"])
+
+
+def nft_check_file(path: Path) -> None:
+    nft = find_executable("nft") or "nft"
+    try:
+        result = subprocess.run(["sudo", nft, "-c", "-f", str(path)])
+    except OSError as exc:
+        raise FixupError(f"не удалось запустить nft -c: {exc}") from exc
+    if result.returncode != 0:
+        raise FixupError(
+            f"сгенерированный {NFTABLES_CONF_PATH} не проходит `nft -c` "
+            "(ошибку см. выше) — файл НЕ изменён"
+        )
+
+
+def line_index(lines: list[str], predicate: Callable[[str], bool], start: int = 0) -> int | None:
+    return next((i for i in range(start, len(lines)) if predicate(lines[i])), None)
+
+
+def indent(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]

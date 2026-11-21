@@ -15,8 +15,13 @@ from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
 from sa_home_bot.node.fixups.host import NODE_UNIT_NAME
 from sa_home_bot.node.fixups.netfilter import (
+    NFTABLES_CONF_PATH,
     default_route_iface,
     ensure_ip_forward,
+    filter_table_json,
+    indent,
+    line_index,
+    nft_check_file,
     ufw_allow_all,
     ufw_allows_all,
     ufw_in_use,
@@ -28,13 +33,18 @@ from sa_home_bot.node.fixups.privileged import (
     enable_now,
     file_matches,
     find_executable,
+    install_from,
     install_root_file,
     install_sudoers_snippet,
     path_exists,
+    read_text,
+    run_sudo,
+    temp_file,
     unit_is_active,
 )
 
 AWG_SUDOERS_FILE = "50-sa-home-node-awg"
+NFT_PORT_COMMENT = "# sa-home vpn (nodectl fix)"
 SUB_UFW_COMMENT = "sa-home vpn: подписка Hiddify / http-01"
 TCP_IP_HEADER_BYTES = 40
 AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
@@ -785,4 +795,157 @@ def make_awg_alt_forward_fixup(settings: Settings) -> Fixup:
         needed=lambda s: (
             needs.vpn_awg(s) and s.vpn.awg_alt is not None and ufw_state() == "active"
         ),
+    )
+
+
+def vpn_server_port_specs(settings: Settings) -> list[str]:
+    vpn = settings.vpn
+    specs = [f"{vpn.endpoint_port}/udp"]
+    if vpn.awg_alt is not None:
+        specs.append(f"{vpn.awg_alt.port}/udp")
+    if vpn.reality is not None:
+        specs.append(f"{vpn.reality.port}/tcp")
+    specs += reality_alt_ufw_specs(settings)
+    specs += reality_xhttp_ufw_specs(settings)
+    specs += sub_ufw_specs(settings)
+    return list(dict.fromkeys(specs))
+
+
+def _split_port_spec(spec: str) -> tuple[str, int]:
+    port, _, proto = spec.partition("/")
+    return proto, int(port)
+
+
+def _input_chain_bounds(lines: list[str]) -> tuple[int, int]:
+    table_i = line_index(lines, lambda s: s.strip() == "table inet filter {")
+    chain_i = (
+        line_index(lines, lambda s: s.strip() == "chain input {", table_i + 1)
+        if table_i is not None
+        else None
+    )
+    hook_i = (
+        line_index(lines, lambda s: s.lstrip().startswith("type filter hook input"), chain_i + 1)
+        if chain_i is not None
+        else None
+    )
+    if chain_i is None or hook_i is None:
+        raise FixupError(
+            f"{NFTABLES_CONF_PATH}: не нашёл 'table inet filter {{' / 'chain input {{' / "
+            "строку 'type filter hook input' — структура файла не та, что ожидалась; "
+            "допишите порты вручную и повторите nodectl fix"
+        )
+    chain_indent = indent(lines[chain_i])
+    end_i = line_index(lines, lambda s: s.strip() == "}" and indent(s) == chain_indent, hook_i + 1)
+    return hook_i, len(lines) if end_i is None else end_i
+
+
+def _conf_opens(lines: list[str], proto: str, port: int) -> bool:
+    prefix = [proto, "dport", str(port)]
+    for line in lines:
+        words = line.split("#", 1)[0].split()
+        if words[:3] != prefix:
+            continue
+        rest = words[3:]
+        if rest[:2] == ["counter", "name"]:
+            rest = rest[3:]
+        if rest == ["accept"]:
+            return True
+    return False
+
+
+def nftables_conf_with_ports(content: str, specs: list[str]) -> str:
+    lines = content.splitlines(keepends=True)
+    hook_i, end_i = _input_chain_bounds(lines)
+    chain_lines = lines[hook_i + 1 : end_i]
+    rule_indent = indent(lines[hook_i])
+    new_rules = []
+    for spec in specs:
+        proto, port = _split_port_spec(spec)
+        if not _conf_opens(chain_lines, proto, port):
+            new_rules.append(f"{rule_indent}{proto} dport {port} accept\t{NFT_PORT_COMMENT}\n")
+    if not new_rules:
+        return content
+    lines[hook_i + 1 : hook_i + 1] = new_rules
+    return "".join(lines)
+
+
+def _live_open_ports(data: dict) -> set[tuple[str, int]]:
+    opened: set[tuple[str, int]] = set()
+    for item in data.get("nftables", []):
+        rule = item.get("rule")
+        if rule is None or rule.get("chain") != "input":
+            continue
+        matches = []
+        accepted = False
+        other = False
+        for expr in rule.get("expr", []):
+            if "match" in expr:
+                matches.append(expr["match"])
+            elif "accept" in expr:
+                accepted = True
+            elif "counter" not in expr:
+                other = True
+        if len(matches) != 1 or not accepted or other:
+            continue
+        match = matches[0]
+        payload = (match.get("left") or {}).get("payload") or {}
+        right = match.get("right")
+        if (
+            match.get("op") == "=="
+            and payload.get("field") == "dport"
+            and payload.get("protocol") in ("tcp", "udp")
+            and isinstance(right, int)
+        ):
+            opened.add((payload["protocol"], right))
+    return opened
+
+
+def _nft_ports_live_missing(specs: list[str]) -> list[str]:
+    opened = _live_open_ports(filter_table_json())
+    return [spec for spec in specs if _split_port_spec(spec) not in opened]
+
+
+def _nft_ports_file_content() -> str | None:
+    try:
+        return read_text(NFTABLES_CONF_PATH)
+    except FixupError:
+        return None
+
+
+def _nft_ports_needed(settings: Settings) -> bool:
+    if not needs.vpn_awg(settings) or ufw_in_use():
+        return False
+    content = _nft_ports_file_content()
+    return content is not None and "table inet filter" in content
+
+
+def _nft_ports_check(settings: Settings) -> bool:
+    specs = vpn_server_port_specs(settings)
+    content = _nft_ports_file_content()
+    if content is None or _nft_ports_live_missing(specs):
+        return False
+    return nftables_conf_with_ports(content, specs) == content
+
+
+def _nft_ports_apply(settings: Settings) -> None:
+    specs = vpn_server_port_specs(settings)
+    content = read_text(NFTABLES_CONF_PATH)
+    new_content = nftables_conf_with_ports(content, specs)
+    if new_content != content:
+        with temp_file(new_content, ".conf") as tmp:
+            nft_check_file(tmp)
+            install_from(tmp, NFTABLES_CONF_PATH, mode="0755")
+    for spec in _nft_ports_live_missing(specs):
+        proto, port = _split_port_spec(spec)
+        rule = ["inet", "filter", "input", proto, "dport", str(port), "accept"]
+        run_sudo(["nft", "insert", "rule", *rule])
+
+
+def make_vpn_nft_ports_fixup(settings: Settings) -> Fixup:
+    return Fixup(
+        id="vpn-nft-ports",
+        title="nftables: открыть порты VPN-сервера в /etc/nftables.conf и живом наборе (без ufw)",
+        needed=_nft_ports_needed,
+        check=lambda: _nft_ports_check(settings),
+        apply=lambda: _nft_ports_apply(settings),
     )

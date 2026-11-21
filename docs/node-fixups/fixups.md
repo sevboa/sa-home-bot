@@ -21,9 +21,9 @@
 | `core.py` | `Fixup`, `FixupError`, `run_fixups` |
 | `needs.py` | предикаты `needed` по назначениям/типу ноды |
 | `privileged.py` | примитивы: `find_executable`, `run_sudo`, `run_user`, `path_exists`, `read_text`, `install_root_file`, `install_sudoers_snippet`, `install_package`, `replace_unit`, `enable_now`, `unit_is_active`, `download`, `file_sha256` |
-| `netfilter.py` | nft-обёртки (`sudo -n nft`), `NftChain`, ufw-разбор, `ip_forward`, маршрут по умолчанию |
+| `netfilter.py` | nft-обёртки (`sudo -n nft`), `NftChain`, `nft_check_file`, `filter_table_json`, ufw-разбор, `ip_forward`, маршрут по умолчанию |
 | `host.py` | smartmontools, sudoers+обёртка smartctl, PATH юнита ноды, группа journal, sudoers приложений, polkit power, Wake-on-LAN |
-| `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, forward/NAT awg-сервера под ufw |
+| `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, `vpn-nft-ports` (порты без ufw), forward/NAT awg-сервера под ufw |
 | `probe_net.py`, `probe_tunnel.py` | netns-пробники `vpn_check` (см. [vpn-probes.md](vpn-probes.md)) |
 | `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables |
 | `devlab.py` | мастерская devlab (Этап 60.1): podman, пользователь `devlab`, subuid/subgid, linger, обёртка контейнеров + sudoers |
@@ -43,6 +43,7 @@
 | `journalctl-group` | пользователь в группе `systemd-journal` |
 | `apps-unit-sudoers-<id>`, `awg-sudoers`, `power-control-polkit`, `wol-enable` | файл существует (содержимое не сверяется) |
 | `awg-ufw-port`, `sub-ufw-ports` | ufw активен и все порты разрешены |
+| `vpn-nft-ports` | хост без ufw, `/etc/nftables.conf` с `table inet filter`; все порты VPN-сервера есть и в живом `chain input`, и в файле |
 | `awg-forward-persist` | юнит есть и активен; содержимое НЕ сверяется (на wooster поставлен руками, скрипт чуть отличается); `apply` существующие файлы не перетирает |
 | `vpn-probe-legacy-cleanup` | нет юнита/netns/veth прежней схемы |
 | `vpn-check-probe-forwarding` | `ip_forward=1` и в ruleset есть veth и подсеть каждого слота |
