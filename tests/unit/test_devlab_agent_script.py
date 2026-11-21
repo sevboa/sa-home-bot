@@ -74,7 +74,7 @@ def test_output_without_valid_marker_is_failed(text):
     assert run.output == text.rstrip()
 
 
-@pytest.mark.parametrize(("query", "count"), [("", len(SCRIPT_API)), ("тест", 1), ("grep", 1)])
+@pytest.mark.parametrize(("query", "count"), [("", len(SCRIPT_API)), ("тест", 3), ("grep", 1)])
 def test_search_lists_matching_stubs(query, count):
     assert len(api_stubs(query).splitlines()) == count
     assert "find" not in api_stubs()

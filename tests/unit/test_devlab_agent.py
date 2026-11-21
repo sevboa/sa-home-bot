@@ -15,6 +15,10 @@ from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT, FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import (
+    CODE_FINISH_REJECTED,
+    CODE_NUDGE_TEXT,
+    FINISH_REJECTED,
+    NUDGE_TEXT,
     REPEAT_GREEN_HINT,
     REPEAT_HINT,
     REPEAT_READ_HINT,
@@ -228,6 +232,20 @@ async def test_plain_text_replies_nudged_then_stuck(tmp_path):
     assert result.status is AgentStatus.STUCK
     assert result.steps == 4
     assert model.seen[1][-1]["role"] == "user"
+
+
+@pytest.mark.parametrize(
+    ("code_mode", "nudge", "rejected"),
+    [(False, NUDGE_TEXT, FINISH_REJECTED), (True, CODE_NUDGE_TEXT, CODE_FINISH_REJECTED)],
+)
+async def test_nudge_and_finish_rejection_follow_code_mode(tmp_path, code_mode, nudge, rejected):
+    spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=code_mode)
+    model = ScriptedChatModel(ModelReply("готово!"), tool_reply(TOOL_FINISH, summary="x"))
+    loop, _ = make_loop(tmp_path, model, spec=spec, limits=AgentLimits(max_steps=2))
+    result = await loop.run("s", "t")
+    assert model.seen[1][-1] == {"role": "user", "content": nudge}
+    assert result.dialog.messages[-1]["content"].startswith(rejected)
+    assert ("в execute" in nudge) is code_mode
 
 
 async def test_model_error_ends_with_reason(tmp_path):
@@ -821,7 +839,7 @@ async def test_run_tests_paths_reject_flags(tmp_path):
 
 
 def test_guard_rejection_texts_ask_to_fix_and_retry():
-    from sa_home_bot.devlab.agent.loop import FINISH_REJECTED, STEP_REJECTED
+    from sa_home_bot.devlab.agent.loop import STEP_REJECTED
 
     assert "исправь и вызови" in FINISH_REJECTED
     assert "исправь и вызови" in STEP_REJECTED

@@ -22,7 +22,6 @@ from sa_home_bot.devlab.agent.script import (
     api_stubs,
     parse_output,
     script_argv,
-    script_help,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 
@@ -193,13 +192,13 @@ SEARCH_DEFINITION = _schema(
 )
 EXECUTE_DEFINITION = _schema(
     TOOL_EXECUTE,
-    "Исполняет код Python. Корень проекта — текущий каталог, src в sys.path: пакеты проекта "
-    "импортируются. Функции API уже определены, import не нужен. Всё исполняется сразу, как "
-    "обычный Python: edit() и write() меняют файлы немедленно, следующий read() видит правку, "
-    "run() и run_tests() возвращают Result, по нему можно ветвиться. Процессы — только через "
-    "run() и run_tests(). step_done(), finish() и ask_owner() завершают скрипт. Нужное печатай "
-    f"через print, вывод длиннее {SCRIPT_OUTPUT_CHARS} симв. обрезается. Один вызов — весь шаг: "
-    "читай, правь, проверяй и закрывай шаг одним кодом. Функции:\n" + script_help(),
+    "Исполняет код Python в корне проекта (src в sys.path, пакеты проекта импортируются). "
+    "Функции ниже уже определены, import для них не нужен. Код исполняется сразу, по порядку, "
+    "как обычный Python. Виден только вывод print(), до "
+    f"{SCRIPT_OUTPUT_CHARS} симв. (начало). Каждый вызов — новый процесс: переменные прошлых "
+    "вызовов не сохраняются. Код, которому нужен ещё не увиденный вывод, — в следующий вызов, "
+    "всё остальное — в этот. step_done(), finish() и ask_owner() завершают скрипт. Функции:\n"
+    + api_stubs(""),
     code=_text("Код Python"),
 )
 
@@ -246,6 +245,10 @@ class ToolBox:
         }
         if spec.code_mode:
             self._handlers = {TOOL_SEARCH: self._search, TOOL_EXECUTE: self._execute}
+
+    @property
+    def code_mode(self) -> bool:
+        return self._spec.code_mode
 
     @property
     def definitions(self) -> list[dict[str, Any]]:

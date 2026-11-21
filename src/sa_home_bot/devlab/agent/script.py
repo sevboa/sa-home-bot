@@ -19,88 +19,97 @@ SCRIPT_CLIPPED_HINT = (
 )
 PROCESS_FORBIDDEN = "процессы запускай через run()/run_tests(): subprocess и os.system запрещены"
 SCRIPT_API: tuple[tuple[str, str, str], ...] = (
-    ("ls", 'def ls(prefix: str = "") -> list[str]: ...', "пути файлов проекта с префиксом"),
+    (
+        "ls",
+        'def ls(prefix: str = "") -> list[str]: ...',
+        "пути файлов проекта, начинающиеся с prefix",
+    ),
     (
         "read",
         "def read(path: str, start: int = 1, end: int | None = None) -> str: ...",
-        "чистый текст файла (срез строк start..end), его можно подставлять в old для edit()",
+        "текст файла, строки start..end (с 1, end включительно); годится для old в edit(); "
+        "нет файла — EditError",
     ),
     (
         "read_numbered",
         "def read_numbered(path: str, start: int = 1, end: int | None = None) -> str: ...",
-        "строки с номерами «n<TAB>текст», только для просмотра",
+        "то же с номерами «n<TAB>строка», для просмотра; для old в edit() не годится",
     ),
     (
         "read_many",
         "def read_many(paths: list[str]) -> dict[str, str]: ...",
-        "словарь путь → чистый текст файла",
+        "словарь путь → текст файла, как read()",
     ),
     (
         "grep",
         'def grep(pattern: str, prefix: str = "", context: int = 0) -> list[str]: ...',
-        "совпадения регулярного выражения: path:n:строка",
+        "регулярное выражение по файлам с префиксом пути prefix (файл или каталог): "
+        "совпадения «путь:n:строка», строки контекста «путь-n-строка»",
     ),
     (
         "edit",
         "def edit(path: str, old: str, new: str) -> None: ...",
-        "сразу заменить единственный фрагмент old на new; иначе исключение EditError",
+        "заменить в файле единственное вхождение old на new сразу; 0 или больше 1 вхождения, "
+        "закрытый путь — EditError",
     ),
     (
         "write",
         "def write(path: str, content: str) -> None: ...",
-        "сразу создать или перезаписать файл; запрещённый путь — EditError",
+        "создать или перезаписать файл сразу; закрытый путь — EditError",
     ),
     (
         "run",
         "def run(command: str) -> Result: ...",
-        "сразу выполнить разрешённую команду без оболочки",
+        "разрешённая команда без оболочки (pytest…, ruff…); вернёт Result",
     ),
     (
         "run_tests",
         "def run_tests(paths: list[str]) -> Result: ...",
-        "сразу выполнить узкий прогон тестов по путям",
+        "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result",
     ),
     (
         CONTROL_STEP_DONE,
         "def step_done(text: str) -> NoReturn: ...",
-        "закрыть шаг с итогом text и завершить скрипт; страж проверит шаг",
+        "закрыть пронумерованный шаг задания с итогом text; страж прогонит изменённые тесты; "
+        "завершает скрипт",
     ),
     (
         CONTROL_FINISH,
         "def finish(summary: str) -> NoReturn: ...",
-        "завершить задание с итогом summary и завершить скрипт; страж проверит дифф и проект",
+        "завершить задание с итогом summary; страж проверит дифф, тесты и правила проекта; "
+        "завершает скрипт",
     ),
     (
         CONTROL_ASK_OWNER,
         "def ask_owner(question: str) -> NoReturn: ...",
-        "задать вопрос владельцу и завершить скрипт",
+        "вопрос владельцу; ответ придёт следующим сообщением; завершает скрипт",
     ),
     (
         "Result",
         "class Result: ...",
-        "итог run()/run_tests(): поля code: int, output: str, ok: bool (code == 0); "
-        "str(r) = «[код N]» и вывод",
+        "итог run()/run_tests(): code: int, output: str (хвост вывода), ok: bool (code == "
+        "0); print(r) печатает «[код N]» и вывод",
     ),
     (
         "EditError",
         "class EditError(Exception): ...",
-        "правка отклонена: фрагмент не найден или найден не один раз, путь закрыт",
+        "правка или чтение не удались: фрагмент не найден или найден не один раз, файла нет, "
+        "путь закрыт",
     ),
 )
-SCRIPT_EXAMPLE = """text = read("src/pkg/a.py")
-print("\\n".join(grep(r"def load", "src/", context=2)))
-edit("src/pkg/a.py", "return 1", "return 2")
+SCRIPT_READ_EXAMPLE = """print(read("src/pkg/a.py", 40, 90))
+print("\\n".join(grep(r"def load", "src/pkg/", context=3)))
+print("\\n".join(grep(r"def test_load", "tests/", context=8)))"""
+SCRIPT_EDIT_EXAMPLE = """edit("src/pkg/a.py", "    return 1\\n", "    return 2\\n")
+edit("tests/test_a.py", "assert load() == 1", "assert load() == 2")
 r = run_tests(["tests/test_a.py"])
 print(r)
 if r.ok:
-    step_done("a.py возвращает 2")
-else:
-    print(r.output[-2000:])"""
+    step_done("1: load возвращает 2")"""
 SCRIPT_FINAL_EXAMPLE = """r = run("ruff check src/pkg/a.py tests/test_a.py")
+print(r)
 if r.ok:
-    finish("a.py возвращает 2, тесты и ruff зелёные")
-else:
-    print(r)"""
+    finish("load возвращает 2, тесты и ruff зелёные")"""
 
 PROLOGUE = r'''import builtins
 import fnmatch
@@ -509,10 +518,6 @@ def api_stubs(query: str = "") -> str:
         for name, stub, about in SCRIPT_API
         if needle in name.lower() or needle in about.lower()
     )
-
-
-def script_help() -> str:
-    return f"{api_stubs()}\nПример:\n{SCRIPT_EXAMPLE}"
 
 
 def script_argv(code: str, config: dict[str, object], python: str = "python") -> list[str]:
