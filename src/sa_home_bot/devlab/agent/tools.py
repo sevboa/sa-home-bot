@@ -11,11 +11,13 @@ from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.sandbox import Sandbox, SandboxPathError, clip_tail, safe_relative
 from sa_home_bot.devlab.agent.script import (
     ACTION_EDIT,
+    ACTION_RUN,
     ACTION_RUN_TESTS,
     ACTION_WRITE,
     SCRIPT_FAILED_HEAD,
     parse_output,
     script_argv,
+    script_help,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 
@@ -32,6 +34,8 @@ TOOL_STEP_DONE = "step_done"
 TOOL_RUN_SCRIPT = "run_script"
 READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP})
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
+SCRIPT_CONTROL_TOOLS = (TOOL_STEP_DONE, TOOL_ASK_OWNER, TOOL_FINISH)
+SCRIPT_ONLY_TEXT = "в режиме скрипта этот инструмент доступен функцией внутри run_script"
 
 LIST_MAX_ENTRIES = 200
 READ_MIN_LINES = 200
@@ -44,6 +48,7 @@ NEWLINE_ADDED = "; в конец файла дописан перевод стр
 SCRIPT_ACTION_TOOLS = {
     ACTION_EDIT: TOOL_EDIT_FILE,
     ACTION_WRITE: TOOL_WRITE_FILE,
+    ACTION_RUN: TOOL_RUN_COMMAND,
     ACTION_RUN_TESTS: TOOL_RUN_TESTS,
 }
 SCRIPT_NO_OUTPUT = "(скрипт ничего не напечатал)"
@@ -172,10 +177,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 RUN_SCRIPT_DEFINITION = _schema(
     TOOL_RUN_SCRIPT,
-    "Исполняет код Python в корне проекта. Доступны ls(prefix), read(path, start, end), "
-    "read_many(paths), grep(pattern, prefix, context), edit(path, old, new), write(path, content), "
-    "run_tests(paths). Нужное печатай через print. Собирай в одном скрипте всё нужное для шага: "
-    "читай сразу все связанные файлы. edit/write/run_tests исполняются после скрипта по порядку.",
+    "Исполняет код Python. Корень проекта — текущий каталог, src в sys.path: пакеты проекта "
+    "импортируются. Нужное печатай через print. edit/write/run/run_tests исполняются после "
+    "скрипта по порядку; процессы из скрипта запрещены. Один скрипт — весь шаг: читай все нужные "
+    "файлы сразу через read_many, ищи grep с context, затем ставь edit/write и run_tests в том же "
+    "скрипте. Функции:\n" + script_help(),
     code=_text("Код Python"),
 )
 
@@ -226,7 +232,8 @@ class ToolBox:
     @property
     def definitions(self) -> list[dict[str, Any]]:
         if self._spec.code_mode:
-            return [*TOOL_DEFINITIONS, RUN_SCRIPT_DEFINITION]
+            control = [d for d in TOOL_DEFINITIONS if d["function"]["name"] in SCRIPT_CONTROL_TOOLS]
+            return [RUN_SCRIPT_DEFINITION, *control]
         return TOOL_DEFINITIONS
 
     async def tree_fingerprint(self) -> str:
@@ -234,6 +241,8 @@ class ToolBox:
         return hashlib.sha256(json.dumps(changed, sort_keys=True).encode()).hexdigest()
 
     async def call(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        if self._spec.code_mode and name in self._handlers and name != TOOL_RUN_SCRIPT:
+            raise ToolError(SCRIPT_ONLY_TEXT)
         handler = self._handlers.get(name)
         if handler is None:
             raise ToolError(f"неизвестный инструмент {name!r}")

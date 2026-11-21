@@ -7,6 +7,7 @@ from sa_home_bot.devlab.agent.script import (
     ACTION_EDIT,
     ACTION_RUN_TESTS,
     ACTION_WRITE,
+    SCRIPT_FUNCTIONS,
     ScriptAction,
     parse_output,
     script_argv,
@@ -85,3 +86,12 @@ def test_output_without_valid_marker_is_failed(text):
     assert run.failed
     assert run.actions == ()
     assert run.output == text.rstrip()
+
+
+@pytest.mark.parametrize(
+    ("query", "count"), [("", len(SCRIPT_FUNCTIONS)), ("тест", 1), ("grep", 1)]
+)
+async def test_find_lists_matching_functions(project, query, count):
+    run = await run_script(project, f"print('\\n'.join(find({query!r})))")
+    assert not run.failed
+    assert len(run.output.splitlines()) == count

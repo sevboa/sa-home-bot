@@ -4,9 +4,18 @@ import pytest
 
 from sa_home_bot.devlab.agent import tools as tools_module
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
-from sa_home_bot.devlab.agent.script import script_argv
+from sa_home_bot.devlab.agent.script import PROCESS_FORBIDDEN, SCRIPT_FAILED_HEAD, script_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
-from sa_home_bot.devlab.agent.tools import TOOL_RUN_SCRIPT, ToolBox, ToolError
+from sa_home_bot.devlab.agent.tools import (
+    SCRIPT_ONLY_TEXT,
+    TOOL_ASK_OWNER,
+    TOOL_FINISH,
+    TOOL_READ_FILE,
+    TOOL_RUN_SCRIPT,
+    TOOL_STEP_DONE,
+    ToolBox,
+    ToolError,
+)
 
 PYTEST_ARGV = (sys.executable, "-m", "pytest", "-q")
 
@@ -80,3 +89,46 @@ async def test_green_comes_from_last_run_tests(project, runs, green):
     code = "\n".join(f"run_tests([{path!r}])" for path in runs) or "print('нет')"
     outcome = await box.call(TOOL_RUN_SCRIPT, {"code": code})
     assert outcome.green is green
+
+
+async def test_code_mode_hides_plain_tools(project):
+    box = toolbox(project)
+    names = [d["function"]["name"] for d in box.definitions]
+    assert names == [TOOL_RUN_SCRIPT, TOOL_STEP_DONE, TOOL_ASK_OWNER, TOOL_FINISH]
+    with pytest.raises(ToolError, match=SCRIPT_ONLY_TEXT):
+        await box.call(TOOL_READ_FILE, {"path": "src/a.py"})
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import subprocess\nsubprocess.run(['true'])",
+        "import os\nos.system('true')",
+        "import os\nos.execv('/bin/true', ['true'])",
+    ],
+)
+async def test_processes_from_script_are_forbidden(project, code):
+    outcome = await toolbox(project).call(TOOL_RUN_SCRIPT, {"code": code})
+    assert outcome.text.startswith(SCRIPT_FAILED_HEAD)
+    assert PROCESS_FORBIDDEN in outcome.text
+
+
+async def test_project_packages_import_from_src(project):
+    (project / "src" / "pkg").mkdir()
+    (project / "src" / "pkg" / "__init__.py").write_text("NAME = 'пакет'\n")
+    code = "import pkg\nprint(pkg.NAME)"
+    outcome = await toolbox(project).call(TOOL_RUN_SCRIPT, {"code": code})
+    assert outcome.text.splitlines()[0] == "пакет"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (f"{sys.executable} -c 'print(5)'", "действие 1 run_command: [код 0]"),
+        ("ls", "действие 1 run_command: ошибка: команда не разрешена"),
+    ],
+)
+async def test_run_action_goes_through_allowed_commands(project, command, expected):
+    box = toolbox(project, allowed_commands=(f"{sys.executable} -c",))
+    outcome = await box.call(TOOL_RUN_SCRIPT, {"code": f"run({command!r})"})
+    assert expected in outcome.text

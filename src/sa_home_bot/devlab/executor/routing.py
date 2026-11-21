@@ -158,7 +158,11 @@ class FailoverChat:
         self._preferred: str | None = None
 
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        extra: dict[str, Any] | None = None,
     ) -> ModelReply:
         last: ModelError | None = None
         attempt = 0
@@ -173,7 +177,12 @@ class FailoverChat:
             silent = False
             for entry in entries:
                 try:
-                    reply = await self._make_chat(entry).complete(messages, tools)
+                    chat = self._make_chat(entry)
+                    reply = await (
+                        chat.complete(messages, tools, extra=extra)
+                        if extra
+                        else chat.complete(messages, tools)
+                    )
                 except ModelError as exc:
                     if not exc.transient:
                         raise

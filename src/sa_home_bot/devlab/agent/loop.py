@@ -104,6 +104,8 @@ class AgentLimits:
     context_tokens: int = 16000
     reply_tokens: int = 2000
     keep_recent: int = 4
+    quick_steps: int = 0
+    quick_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -192,9 +194,16 @@ class AgentLoop:
             self._trace({"t": int(time.time()), **entry})
 
     def _emit_step(
-        self, seg: Segment, reply: ModelReply, window: int, folded: bool, model_s: float
+        self,
+        seg: Segment,
+        reply: ModelReply,
+        window: int,
+        folded: bool,
+        model_s: float,
+        quick: bool = False,
     ) -> None:
         self._emit(
+            **({"quick": True} if quick else {}),
             step=seg.steps,
             model_s=model_s,
             tokens_in=reply.tokens_in,
@@ -285,8 +294,15 @@ class AgentLoop:
             seg.skipped = 0
             seg.repeat_reason = None
             asked_at = self._clock()
+            quick = bool(limits.quick_params) and seg.steps <= limits.quick_steps
             try:
-                reply = await self._model.complete(messages, self._tools.definitions)
+                reply = await (
+                    self._model.complete(
+                        messages, self._tools.definitions, extra=limits.quick_params
+                    )
+                    if quick
+                    else self._model.complete(messages, self._tools.definitions)
+                )
             except PaidFreeModelError as exc:
                 return self._crane_result(seg, messages, Crane.PAID_FREE, str(exc))
             except ModelError as exc:
@@ -296,7 +312,7 @@ class AgentLoop:
             seg.tokens_out += reply.tokens_out
             messages.append(reply.as_message())
             if not reply.tool_calls:
-                self._emit_step(seg, reply, window, window < before, model_s)
+                self._emit_step(seg, reply, window, window < before, model_s, quick)
                 seg.idle += 1
                 if seg.idle > limits.max_idle_replies:
                     return self._result(
@@ -308,7 +324,7 @@ class AgentLoop:
                 continue
             seg.idle = 0
             finished = await self._handle_calls(reply.tool_calls, seg)
-            self._emit_step(seg, reply, window, window < before, model_s)
+            self._emit_step(seg, reply, window, window < before, model_s, quick)
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
             if seg.repeat_reason is not None:

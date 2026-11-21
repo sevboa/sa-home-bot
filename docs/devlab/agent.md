@@ -564,3 +564,38 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 первой строкой, когда скрипт упал или маркер действий не разобран. Таймаут скрипта сюда не попадает: у него свой
 заголовок `[таймаут N с]`. Тесты: `test_trace_has_one_entry_per_step_and_cuts_long_arguments`,
 `test_trace_notes_run_script_code_size_and_failure` в `tests/unit/test_devlab_agent.py`.
+
+### Итерация 2 (2026-11-21)
+
+Замер первой версии: модель звала `run_script` на одно действие и тут же, в том же ответе, обычные
+инструменты; скрипты падали на `import sa_home_bot` (`python -I`, `src` не в `sys.path`) и на
+угадывании текущего каталога; через `subprocess`/`os` скрипт обходил `allowed_commands`.
+
+- При `spec.code_mode` модель видит только `run_script`, `step_done`, `ask_owner`, `finish`
+  (`SCRIPT_CONTROL_TOOLS`). `list_files`/`read_file`/`grep`/`edit_file`/`write_file`/`run_command`/
+  `run_tests` убраны из `definitions`; `ToolBox.call` на их имена отвечает `ToolError` `SCRIPT_ONLY_TEXT`
+  («в режиме скрипта этот инструмент доступен функцией внутри run_script»). Обработчики остались: ими
+  исполняются действия скрипта.
+- Описания функций пролога лежат в одном месте — `SCRIPT_FUNCTIONS` в `script.py` (сигнатура → описание).
+  Из него строятся пространство имён скрипта, функция `find(query="")` (строки «сигнатура — описание»,
+  где `query` есть в имени или описании, пустой — все) и текст `RUN_SCRIPT_DEFINITION` (`script_help()` с
+  примером пачки `SCRIPT_EXAMPLE`). Описание задаёт правило: один скрипт — весь шаг, файлы разом через
+  `read_many`, поиск `grep` с `context`, затем `edit`/`write` и `run_tests` в том же скрипте.
+- Новое отложенное действие `run(command)` (`ACTION_RUN`) → обработчик `run_command`: те же
+  `allowed_commands`, что у инструмента.
+- `sys.path`: пролог вставляет в начало абсолютные пути корня проекта (текущий каталог) и `src` (если есть),
+  поэтому `import sa_home_bot` и `import tests` работают. `subprocess` импортируется до этого, чтобы файл
+  проекта с таким именем его не подменил.
+- Запуск процессов запрещён: `subprocess.Popen.__init__` (сам модуль и импорт модулей проекта не ломаются),
+  `os.system`, `os.popen`, `os.fork`, `os.forkpty`, `os.exec*`, `os.spawn*`, `os.posix_spawn*` поднимают
+  `PermissionError` `PROCESS_FORBIDDEN` («процессы из скрипта запрещены: команды — через run(), тесты — через
+  run_tests()»). Это закрывает случайный обход `allowed_commands`, но не изоляция: `_posixsubprocess`,
+  `ctypes` и подмена обратно остаются. Граница — контейнер задания без сети.
+- Размышления выключены на первых шагах. Профиль роли: `quick_steps` (по умолчанию 0) и `quick_params` —
+  поля тела запроса к модели, например `{"chat_template_kwargs": {"enable_thinking": false}}`. Работник
+  переносит их в `AgentLimits` (`_limits_for`). Цикл при `seg.steps <= quick_steps` (сквозной номер шага
+  текущего отрезка; после возобновления счёт с нуля) и непустом `quick_params` зовёт
+  `complete(..., extra=quick_params)`, иначе без `extra`. `ChatModel`, `MeteredChat`, `ModelRouter` и
+  `GatewayChat` принимают keyword `extra`; `GatewayChat` кладёт его поверх тела (`body.update`), обёртки
+  передают `extra` дальше, только если он непуст. В журнале у такого шага `quick: true`. Зачем: первые
+  шаги — чтение и поиск, рассуждать до того, как файлы прочитаны, незачем, а размышления на GPU стоят минут.

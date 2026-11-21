@@ -67,7 +67,11 @@ class ModelReply:
 
 class ChatModel(Protocol):
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        extra: dict[str, Any] | None = None,
     ) -> ModelReply: ...
 
 
@@ -96,9 +100,13 @@ class GatewayChat:
             await self._session.close()
 
     async def complete(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        extra: dict[str, Any] | None = None,
     ) -> ModelReply:
-        body = {
+        body: dict[str, Any] = {
             "model": self._model,
             "messages": with_flow_reminder(messages, reminder_for(self._model)),
             "tools": tools,
@@ -106,6 +114,8 @@ class GatewayChat:
         }
         if self._temperature is not None:
             body["temperature"] = self._temperature
+        if extra:
+            body.update(extra)
         try:
             async with self._session.post(
                 self._url, json=body, headers=self._headers, timeout=self._timeout
