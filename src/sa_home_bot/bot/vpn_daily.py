@@ -214,6 +214,14 @@ def _panel_title(server: str, scope: str, label_of: Callable[[str], str]) -> str
     return f"{code} · {server} · {title}" if code else f"{server} · {title}"
 
 
+def entry_names(history: dict) -> dict[tuple[str, str], str]:
+    return {
+        (str(series.get("server") or ""), str(series.get("transport") or "")): str(series["entry"])
+        for series in history.get("series") or []
+        if series.get("entry")
+    }
+
+
 def build_panels(
     history: dict,
     scopes: dict,
@@ -228,6 +236,7 @@ def build_panels(
     period = _period(grid)
     labels = _x_labels(grid, int(history.get("hours") or DEFAULT_HOURS))
     episodes = find_episodes(history, scopes, grid)
+    names = entry_names(history)
     panels = []
     for scope in vpn_link.SCOPES:
         group = by_scope.get(scope, {})
@@ -245,6 +254,7 @@ def build_panels(
                     period=period,
                     x_labels=labels,
                     lines=lines,
+                    names={t: names[(server, t)] for t in lines if (server, t) in names},
                     bands=tuple(
                         ChartBand(start=episode.first, end=episode.last, label=episode.cause)
                         for episode in episodes

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from sa_home_bot.bot import vpn_check_view
 from sa_home_bot.bot.node_events import render_vpn_check
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -125,3 +126,30 @@ def test_failed_never_shows_active_block():
     data = {**BASE, "targets": targets, "total": 6, "all_failed": False}
     active = [_problem("zakhar", ["https://a.example"])]
     assert render_vpn_check(FAILED, {**data, "active": active}) == render_vpn_check(FAILED, data)
+
+
+def _server(**row) -> dict:
+    return {"check": [{"transport": "reality", "status": "ok", **row}]}
+
+
+def test_health_line_without_entry_keeps_technical_name():
+    assert vpn_check_view.health_line(_server()) == "🛰 VLESS (Reality) 🟢"
+
+
+def test_health_line_prefers_entry_name():
+    assert vpn_check_view.health_line(_server(entry="Reality azgez")) == "🛰 Reality azgez 🟢"
+
+
+def test_status_text_prefers_entry_name_and_falls_back():
+    state = {
+        "node": "alfred",
+        "server": "jeeves",
+        "transport": "reality",
+        "target": "https://1.1.1.1",
+        "status": "ok",
+    }
+    plain = vpn_check_view.status_text([state])
+    named = vpn_check_view.status_text([{**state, "entry": "XHTTP feedwonk"}])
+    assert "VLESS (Reality)" in plain
+    assert "XHTTP feedwonk" in named
+    assert "VLESS (Reality)" not in named

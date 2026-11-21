@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
@@ -29,6 +29,7 @@ TRANSPORT_COLORS = {
     "awg_alt": (30, 160, 170),
     "reality": (230, 140, 40),
     "reality_alt": (150, 80, 190),
+    "reality_xhttp": (200, 70, 90),
 }
 FALLBACK_COLORS = ((90, 90, 90), (200, 60, 120), (100, 140, 40))
 
@@ -96,6 +97,7 @@ class ChartPanel:
     x_labels: tuple[str, ...]
     lines: dict[str, tuple[int | None, ...]]
     bands: tuple[ChartBand, ...] = ()
+    names: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -251,8 +253,9 @@ def _draw_legend(image: Image.Image, panel: ChartPanel) -> None:
     for transport in panel.lines:
         color = colors[transport]
         draw.line((x, LEGEND_Y, x + LEGEND_SWATCH, LEGEND_Y), fill=color, width=LEGEND_WIDTH)
-        draw.text((x + LEGEND_TEXT_X, LEGEND_TEXT_Y), transport, font=font, fill=INK)
-        x += draw.textlength(transport, font=font) + LEGEND_STEP
+        name = panel.names.get(transport) or transport
+        draw.text((x + LEGEND_TEXT_X, LEGEND_TEXT_Y), name, font=font, fill=INK)
+        x += draw.textlength(name, font=font) + LEGEND_STEP
 
 
 def render_panel(panel: ChartPanel) -> bytes:

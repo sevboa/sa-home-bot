@@ -10,6 +10,7 @@ from sa_home_bot.reality.client_config import (
     DEFAULT_FLOW,
     RealityParams,
     parse_vless_url,
+    probe_entry_name,
     render_singbox_config,
     render_singbox_multi,
     render_vless_url,
@@ -254,3 +255,19 @@ def _fake_mixin(xhttp: bool) -> PeersMixin:
             return RealityParams.xhttp_from_config(self._reality_cfg)
 
     return FakeMixin()
+
+
+@pytest.mark.parametrize(
+    ("transport", "sni", "expected"),
+    [
+        ("awg", None, "AWG 1.0"),
+        ("awg_alt", "ignored.com", "AWG 2.0"),
+        ("reality", "www.google.com", "Reality google"),
+        ("reality_alt", "azgez.com", "Reality azgez"),
+        ("reality_xhttp", "feedwonk.com", "XHTTP feedwonk"),
+        ("reality", None, "Reality"),
+        ("reality_xhttp", "", "XHTTP"),
+    ],
+)
+def test_probe_entry_name(transport: str, sni: str | None, expected: str) -> None:
+    assert probe_entry_name(transport, sni) == expected

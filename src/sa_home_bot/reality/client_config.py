@@ -10,6 +10,11 @@ from sa_home_bot.reality.routing import (
     RULESET_UPDATE_INTERVAL,
     RULESET_URLS,
 )
+from sa_home_bot.vpn.protocol import (
+    PROBE_TRANSPORT_AWG_ALT,
+    PROBE_TRANSPORT_REALITY_XHTTP,
+    TRANSPORT_AWG,
+)
 
 _TAG_DIRECT_MANUAL = "ru-direct-manual"
 _TAG_BLOCKED = "ru-blocked"
@@ -83,6 +88,17 @@ def short_domain(sni: str) -> str:
     host = sni.strip().lower().removeprefix("www.")
     labels = host.split(".")
     return ".".join(labels[:-1]) if len(labels) > 1 else host
+
+
+AWG_ENTRY_NAMES = {TRANSPORT_AWG: "AWG 1.0", PROBE_TRANSPORT_AWG_ALT: "AWG 2.0"}
+
+
+def probe_entry_name(transport: str, sni: str | None = None) -> str:
+    if transport in AWG_ENTRY_NAMES:
+        return AWG_ENTRY_NAMES[transport]
+    kind = "XHTTP" if transport == PROBE_TRANSPORT_REALITY_XHTTP else "Reality"
+    domain = short_domain(sni) if sni else ""
+    return f"{kind} {domain}" if domain else kind
 
 
 def _remote_ruleset(tag: str) -> dict:
