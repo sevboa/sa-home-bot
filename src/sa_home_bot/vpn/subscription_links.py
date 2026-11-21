@@ -28,6 +28,7 @@ from sa_home_bot.vpn.protocol import (
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
 )
+from sa_home_bot.vpn.service_common import log
 from sa_home_bot.vpn.subweb import public_host as sub_public_host
 
 
@@ -109,6 +110,8 @@ class SubscriptionLinksMixin:
         }
         found = await self._sub_local(token)
         if found is None:
+            found = await self._sub_lazy_issue(token, args)
+        if found is None:
             return {"found": False, "info": await self._sub_device_info(token, args, base)}
         chat_id, label, client_uuid = found
         month = service_common.month_key(utc_now())
@@ -154,6 +157,42 @@ class SubscriptionLinksMixin:
             if awg_entries:
                 resp["awg_entries"] = [e.to_wire() for e in awg_entries]
         return resp
+
+    async def _sub_lazy_issue(
+        self, token: str, args: dict[str, Any]
+    ) -> tuple[int, str, str] | None:
+        if not self._reality_enabled:
+            return None
+        try:
+            chat_id = int(args.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        label = str(args.get("device_label") or "")
+        if (
+            not chat_id
+            or chat_id == PROBE_CHAT_ID
+            or not label
+            or not subs.token_matches(self._sub_secret, token, chat_id, label)
+        ):
+            return None
+        allowed, _base = await self._access(chat_id)
+        if not allowed:
+            return None
+        async with self._issue_lock:
+            found = await self._sub_local(token)
+            if found is not None:
+                return found
+            if (subs.token_gen(token) or 0) < await self._device_gen(chat_id, label):
+                return None
+            try:
+                await self._issue_locked(
+                    chat_id, label, TRANSPORT_REALITY, utc_now().isoformat()
+                )
+            except Exception:
+                log.warning("vpn: не удалось лениво выдать Reality-пир устройству")
+                return None
+            self._sub_cache.clear()
+            return await self._sub_local(token)
 
     async def _sub_device_info(
         self, token: str, args: dict[str, Any], base: dict[str, Any]
