@@ -733,3 +733,47 @@ async def test_report_without_reality_slot_has_no_net(monkeypatch):
     node_link = _FakeNodeLink()
     await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
     assert "net" not in node_link.calls[0]["args"]
+
+
+async def test_awg_result_carries_entry_name(monkeypatch):
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    node_link = _FakeNodeLink()
+    await _service(node_link)._run_and_report(PROBE_SERVER, [_slot()], ["https://1.1.1.1"])
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == "AWG 1.0"
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [("reality", "Reality google"), ("reality_xhttp", "XHTTP google")],
+)
+async def test_reality_result_entry_name_uses_sni_from_slot_config(
+    monkeypatch, tmp_path, transport, expected
+):
+    import json
+
+    from sa_home_bot.node import vpn_probe_state
+
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    conf = tmp_path / "slot.json"
+    doc = {"outbounds": [{"streamSettings": {"realitySettings": {"serverName": "www.google.com"}}}]}
+    conf.write_text(json.dumps(doc))
+    monkeypatch.setattr(vpn_probe_state, "reality_conf_path", lambda slot: conf)
+    node_link = _FakeNodeLink()
+    slot = _reality_slot(transport=transport)
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == expected
+
+
+async def test_reality_result_entry_name_without_config_is_bare(monkeypatch, tmp_path):
+    from sa_home_bot.node import vpn_probe_state
+
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    monkeypatch.setattr(vpn_probe_state, "reality_conf_path", lambda slot: tmp_path / "none.json")
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == "Reality"

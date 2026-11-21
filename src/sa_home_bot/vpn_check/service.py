@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import shutil
 import socket
@@ -24,6 +25,7 @@ from sa_home_bot.proto.messages import (
     ServiceInfo,
 )
 from sa_home_bot.proto.server import undeclared_action
+from sa_home_bot.reality.client_config import probe_entry_name
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.utils.process import run
 from sa_home_bot.utils.requirements import looks_like_sudo_denied, looks_like_sudo_message
@@ -48,6 +50,15 @@ from sa_home_bot.vpn_series.runner import run_burst, run_single
 from sa_home_bot.vpn_series.sni_probe import parse_domains, probe_many
 
 log = logging.getLogger(__name__)
+
+
+def _reality_sni(conf_text: str) -> str | None:
+    try:
+        doc: Any = json.loads(conf_text)
+        sni = doc["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+    return str(sni) if sni else None
 
 _ROUTE_SENTINEL = "1.1.1.1"
 
@@ -258,6 +269,7 @@ class VpnCheckService:
             try:
                 gate = up_err if up_err is not None else await self._egress_gate(slot)
                 results: list[dict[str, Any]] = []
+                entry = self._entry_name(slot)
                 for target in targets:
                     one = (
                         {"ok": False, "ms": None, "error": gate}
@@ -268,6 +280,7 @@ class VpnCheckService:
                         {
                             "server": slot.server,
                             "transport": slot.transport,
+                            "entry": entry,
                             "target": target,
                             **one,
                         }
@@ -285,6 +298,15 @@ class VpnCheckService:
                 return results
             finally:
                 await self._tunnel_down(slot)
+
+    def _entry_name(self, slot: ProbeSlot) -> str:
+        sni = None
+        if slot.transport in REALITY_PROBE_TRANSPORTS:
+            try:
+                sni = _reality_sni(vpn_probe_state.reality_conf_path(slot).read_text())
+            except OSError:
+                sni = None
+        return probe_entry_name(slot.transport, sni)
 
     def _reality_raw_target(self, slot: ProbeSlot) -> RawTarget | None:
         if slot.transport not in REALITY_PROBE_TRANSPORTS:

@@ -224,3 +224,26 @@ Reality-пробника (маршрут там прямой, права sudo у
 
 `check_scopes` отдаёт `scopes` уже с учётом внешних слоёв (сломанная сеть или нода делает сервер
 `down`) и `layers` — три слоя на каждый сервер по каждому охвату.
+
+## Имена подключений в отчётах и на графиках (2026-11-21)
+
+Владелец видит, какой именно способ обхода работает, теми же именами, что в подписке Hiddify:
+`Reality google`, `Reality azgez`, `XHTTP feedwonk`, `AWG 1.0`, `AWG 2.0`. Флаг страны рядом с
+сервером в отчётах уже есть и в имени не дублируется.
+
+- Имя строит `reality/client_config.py::probe_entry_name(transport, sni)`: awg → `AWG 1.0`,
+  awg_alt → `AWG 2.0`, reality и reality_alt → `Reality <short_domain>`, reality_xhttp →
+  `XHTTP <short_domain>`; без SNI остаётся `Reality` или `XHTTP`.
+- Наблюдатель (`vpn_check/service.py`) кладёт его в каждую строку результата пробы полем `entry`.
+  SNI берётся из `realitySettings.serverName` xray-конфига слота. Поле необязательное: старые ноды
+  его не шлют.
+- `bot/vpn_check_view.py::transport_label` и легенда графика (`ChartPanel.names`, заполняется в
+  `vpn_daily.build_panels` из поля `entry` рядов истории) показывают `entry`, если оно есть, иначе
+  прежнее имя. Строки без `entry` выводятся как раньше. У `reality_xhttp` есть свой цвет линии.
+- `vpn` (`vpn/checks.py::_report_check`) берёт необязательное `entry` из строки результата
+  (строка, обрезка до 40 символов, иначе None) и хранит его в колонках `entry` таблиц
+  `vpn_check_states` (последнее имя связки, report без `entry` старое имя не затирает) и
+  `vpn_check_samples`; старые БД получают колонки через `_add_column_if_missing`.
+- `check_status` отдаёт `entry` в строках `states` и `rollup` (имя из самой свежей строки пары),
+  `check_history` — в рядах `series` (последнее непустое имя за окно). Старые ноды поля не шлют:
+  в БД NULL, ключа в ответе нет, бот показывает прежнее имя.

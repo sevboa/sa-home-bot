@@ -41,6 +41,8 @@ async def apply_migrations(db: Database) -> None:
         log.info(
             "Миграция: vpn_check_states пересоздана под ключ (node, server, transport, target)"
         )
+    await _add_column_if_missing(db, "vpn_check_states", "entry", "TEXT")
+    await _add_column_if_missing(db, "vpn_check_samples", "entry", "TEXT")
     if await _add_column_if_missing(db, "pending_actions", "welcome_message_id", "INTEGER"):
         await db.conn.execute(
             "UPDATE pending_actions SET welcome_message_id=0 WHERE status='accepted'"

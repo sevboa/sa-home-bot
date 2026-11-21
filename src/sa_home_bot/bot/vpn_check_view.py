@@ -33,6 +33,19 @@ def transport_icons(server: dict) -> dict[str, str]:
     }
 
 
+def transport_label(transport: str, row: dict | None = None) -> str:
+    entry = (row or {}).get("entry")
+    return str(entry) if entry else vpn_devices.TECHNICAL_TRANSPORT_NAME.get(transport, transport)
+
+
+def transport_entries(server: dict) -> dict[str, dict]:
+    return {
+        row["transport"]: row
+        for row in (server.get("check") or [])
+        if row.get("status") in STATUS_ICON and row.get("transport")
+    }
+
+
 def location_icon(server: dict) -> str:
     statuses = [
         row["status"] for row in (server.get("check") or []) if row.get("status") in STATUS_ICON
@@ -47,8 +60,9 @@ def health_line(server: dict) -> str:
     if not icons:
         return ""
     transports = vpn_devices.sorted_transports(list(server.get("transports") or icons.keys()))
+    entries = transport_entries(server)
     parts = [
-        f"{vpn_devices.TECHNICAL_TRANSPORT_NAME.get(transport, transport)} {icons[transport]}"
+        f"{transport_label(transport, entries.get(transport))} {icons[transport]}"
         for transport in transports
         if transport in icons
     ]
@@ -93,7 +107,7 @@ def series_problem(verdict: str, at_bytes: object = None) -> str:
 def _series_lines(series: list[dict]) -> list[str]:
     lines = ["", "🇷🇺 <b>Из РФ</b> (серийная проверка)"]
     for row in series:
-        label = vpn_devices.TECHNICAL_TRANSPORT_NAME.get(row["transport"], row["transport"])
+        label = transport_label(row["transport"], row)
         head = (
             f"<code>{html.escape(row['node'])}</code> → <b>{html.escape(row['server'])}</b>"
             f" · {html.escape(label)}"
@@ -176,7 +190,7 @@ def status_text(
         for (server, transport), rows in sorted(grouped.items()):
             lines.append("")
             head_icon = STATUS_ICON.get(pair_status.get((server, transport), ""), "")
-            label = vpn_devices.TECHNICAL_TRANSPORT_NAME.get(transport, transport)
+            label = transport_label(transport, rows[0])
             lines.append(
                 f"<b>{html.escape(server)}</b> · {html.escape(label)}"
                 f"{vpn_keyboards.suffix_after_space(head_icon)}"

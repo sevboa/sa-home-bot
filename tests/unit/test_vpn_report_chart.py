@@ -116,3 +116,17 @@ def test_band_does_not_crash():
     )
     assert _open(png).size == (chart.WIDTH, chart.HEIGHT)
     assert chart.TRANSPORT_COLORS["awg"] in _colors(png)
+
+
+def test_xhttp_transport_has_own_color():
+    png = chart.render_panel(_panel(lines={"reality_xhttp": _values(500, 96)}))
+    assert chart.TRANSPORT_COLORS["reality_xhttp"] in _colors(png)
+    assert chart.FALLBACK_COLORS[0] not in _colors(png)
+
+
+def test_legend_uses_entry_names_when_given():
+    lines = {"reality": _values(500, 96)}
+    plain = chart.render_panel(_panel(lines=lines))
+    named = chart.render_panel(_panel(lines=lines, names={"reality": "Reality azgez"}))
+    assert plain != named
+    assert chart.render_panel(_panel(lines=lines, names={})) == plain

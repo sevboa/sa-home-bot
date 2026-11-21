@@ -18,6 +18,7 @@ class Sample:
     total: int
     bad: int
     median_ms: int | None
+    entry: str | None = None
 
 
 def bucket_start(at: datetime, bucket_s: int) -> datetime:
@@ -29,6 +30,16 @@ def median_ms(values: Iterable[int]) -> int | None:
     if not collected:
         return None
     return int(round(statistics.median(collected)))
+
+
+def _latest_entry(buckets: dict[datetime, list[Sample]]) -> str | None:
+    named = [
+        s
+        for start in sorted(buckets)
+        for s in sorted(buckets[start], key=lambda x: x.at)
+        if s.entry
+    ]
+    return named[-1].entry if named else None
 
 
 def aggregate(samples: Iterable[Sample], bucket_s: int) -> list[dict[str, Any]]:
@@ -56,5 +67,10 @@ def aggregate(samples: Iterable[Sample], bucket_s: int) -> list[dict[str, Any]]:
                     ),
                 }
             )
-        series.append({"node": node, "server": server, "transport": transport, "points": points})
+        row: dict[str, Any] = {"node": node, "server": server, "transport": transport}
+        entry = _latest_entry(buckets)
+        if entry:
+            row["entry"] = entry
+        row["points"] = points
+        series.append(row)
     return series

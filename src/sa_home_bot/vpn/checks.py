@@ -71,6 +71,15 @@ SERVER_MEMORY_H = 24
 RESOURCE_MEMORY_H = 24
 
 
+ENTRY_MAX_LEN = 40
+
+
+def _entry_name(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    return raw.strip()[:ENTRY_MAX_LEN] or None
+
+
 def _net_reports(raw: object) -> dict[str, bool]:
     if not isinstance(raw, dict):
         return {}
@@ -158,11 +167,14 @@ class ChecksMixin:
             ms = int(ms_raw) if isinstance(ms_raw, int | float) else None
             error_raw = raw.get("error")
             ok = bool(raw.get("ok"))
+            entry = _entry_name(raw.get("entry"))
             error = str(error_raw) if error_raw else None
             run = runs.setdefault((server, transport), {"failed": [], "recovered": [], "items": []})
             run["items"].append((str(target), ok, ms))
+            if entry:
+                run["entry"] = entry
             to_status = await self._apply_check_result(
-                node, server, transport, str(target), ok, ms, error, now
+                node, server, transport, str(target), ok, ms, error, now, entry
             )
             if to_status == CHECK_ALERTING:
                 run["failed"].append({"target": str(target), "error": error})
@@ -502,8 +514,9 @@ class ChecksMixin:
         now: datetime,
     ) -> None:
         await self._db.conn.execute(
-            "INSERT INTO vpn_check_samples (at, node, server, transport, total, bad, median_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO vpn_check_samples "
+            "(at, node, server, transport, total, bad, median_ms, entry) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 now.isoformat(),
                 node,
@@ -512,6 +525,7 @@ class ChecksMixin:
                 run["total"],
                 run["bad"],
                 median_ms(run["ok_ms"]),
+                run.get("entry"),
             ),
         )
         await self._db.conn.commit()
@@ -531,7 +545,8 @@ class ChecksMixin:
         bucket_min = min(max(bucket_min, 1), 1440)
         since = (utc_now() - timedelta(hours=hours)).isoformat()
         cur = await self._db.conn.execute(
-            "SELECT at, node, server, transport, total, bad, median_ms FROM vpn_check_samples "
+            "SELECT at, node, server, transport, total, bad, median_ms, entry "
+            "FROM vpn_check_samples "
             "WHERE at >= ?",
             (since,),
         )
@@ -545,6 +560,7 @@ class ChecksMixin:
                 total=row["total"],
                 bad=row["bad"],
                 median_ms=row["median_ms"],
+                entry=row["entry"],
             )
             for row in rows
         ]
@@ -707,6 +723,7 @@ class ChecksMixin:
         latency_ms: int | None,
         error: str | None,
         now: datetime,
+        entry: str | None = None,
     ) -> str | None:
         cur = await self._db.conn.execute(
             "SELECT status, consecutive_count, alerting_since, first_seen_at, "
@@ -757,15 +774,16 @@ class ChecksMixin:
             "INSERT INTO vpn_check_states ("
             "node, server, transport, target, status, last_ok, last_latency_ms, last_error, "
             "consecutive_count, alerting_since, first_seen_at, last_seen_at, "
-            "notified_alert_at, notified_cleared_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "notified_alert_at, notified_cleared_at, entry"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(node, server, transport, target) DO UPDATE SET "
             "status = excluded.status, last_ok = excluded.last_ok, "
             "last_latency_ms = excluded.last_latency_ms, last_error = excluded.last_error, "
             "consecutive_count = excluded.consecutive_count, "
             "alerting_since = excluded.alerting_since, last_seen_at = excluded.last_seen_at, "
             "notified_alert_at = excluded.notified_alert_at, "
-            "notified_cleared_at = excluded.notified_cleared_at",
+            "notified_cleared_at = excluded.notified_cleared_at, "
+            "entry = COALESCE(excluded.entry, entry)",
             (
                 node,
                 server,
@@ -781,6 +799,7 @@ class ChecksMixin:
                 now.isoformat(),
                 notified_alert_at,
                 notified_cleared_at,
+                entry,
             ),
         )
         await self._db.conn.commit()
@@ -789,7 +808,8 @@ class ChecksMixin:
     async def _check_status(self) -> dict[str, Any]:
         cur = await self._db.conn.execute(
             "SELECT node, server, transport, target, status, last_ok, last_latency_ms, "
-            "last_error, consecutive_count, alerting_since, last_seen_at FROM vpn_check_states "
+            "last_error, consecutive_count, alerting_since, last_seen_at, entry "
+            "FROM vpn_check_states "
             "ORDER BY server, transport, node, target"
         )
         rows = await cur.fetchall()
@@ -806,6 +826,7 @@ class ChecksMixin:
                 "consecutive_count": r["consecutive_count"],
                 "alerting_since": r["alerting_since"],
                 "last_seen_at": r["last_seen_at"],
+                **({"entry": r["entry"]} if r["entry"] else {}),
             }
             for r in rows
         ]
@@ -889,23 +910,33 @@ class ChecksMixin:
         stale_before = (
             utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
         ).isoformat()
-        sql = "SELECT node, server, transport, status FROM vpn_check_states WHERE last_seen_at >= ?"
+        sql = (
+            "SELECT node, server, transport, status, entry, last_seen_at "
+            "FROM vpn_check_states WHERE last_seen_at >= ?"
+        )
         params: list[Any] = [stale_before]
         if server is not None:
             sql += " AND server = ?"
             params.append(server)
         cur = await self._db.conn.execute(sql, params)
         by_pair: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        entries: dict[tuple[str, str], tuple[str, str]] = {}
         for row in await cur.fetchall():
-            by_pair.setdefault((row["server"], row["transport"]), []).append(
-                (row["node"], row["status"])
-            )
+            pair = (row["server"], row["transport"])
+            by_pair.setdefault(pair, []).append((row["node"], row["status"]))
+            if row["entry"] and row["last_seen_at"] >= entries.get(pair, ("", ""))[0]:
+                entries[pair] = (row["last_seen_at"], row["entry"])
         return [
             {
                 "server": pair_server,
                 "transport": transport,
                 "status": rollup_status([status for _node, status in rows]),
                 "observers": len({node for node, _status in rows}),
+                **(
+                    {"entry": entries[(pair_server, transport)][1]}
+                    if (pair_server, transport) in entries
+                    else {}
+                ),
             }
             for (pair_server, transport), rows in sorted(by_pair.items())
         ]
