@@ -13,6 +13,7 @@ from pathlib import Path
 from sa_home_bot.config import Settings
 from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
+from sa_home_bot.node.fixups.host import NODE_UNIT_NAME
 from sa_home_bot.node.fixups.netfilter import (
     default_route_iface,
     ensure_ip_forward,
@@ -390,6 +391,119 @@ def make_reality_xhttp_inbound_fixup(settings: Settings) -> Fixup:
         id="reality-xhttp-inbound",
         title="Вход Reality с транспортом XHTTP в xray через API без рестарта",
         needed=lambda s: needs.vpn(s) and getattr(s.vpn.reality, "xhttp", None) is not None,
+        check=check,
+        apply=apply,
+    )
+
+
+XRAY_API_INBOUND_TAG = "api-in"
+XRAY_BLOCK_OUTBOUND_TAG = "block"
+XRAY_ROUTING_DOMAIN_STRATEGY = "IPIfNonMatch"
+XRAY_BLOCKED_DEST_IPS = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
+XRAY_BLOCKED_DEST_DOMAINS = (
+    "full:localhost",
+    "domain:localhost",
+    "domain:ts.net",
+    "domain:local",
+    "domain:internal",
+    "domain:lan",
+)
+
+
+def xray_client_inbound_tags(config: dict) -> list[str]:
+    return [
+        inbound["tag"]
+        for inbound in config.get("inbounds", [])
+        if inbound.get("tag") and inbound.get("tag") != XRAY_API_INBOUND_TAG
+    ]
+
+
+def xray_private_block_rules(config: dict) -> list[dict]:
+    tags = xray_client_inbound_tags(config)
+    return [
+        {
+            "type": "field",
+            "inboundTag": tags,
+            "outboundTag": XRAY_BLOCK_OUTBOUND_TAG,
+            "domain": list(XRAY_BLOCKED_DEST_DOMAINS),
+        },
+        {
+            "type": "field",
+            "inboundTag": tags,
+            "outboundTag": XRAY_BLOCK_OUTBOUND_TAG,
+            "ip": list(XRAY_BLOCKED_DEST_IPS),
+        },
+    ]
+
+
+def _normalized_rule(rule: dict) -> dict:
+    out = dict(rule)
+    if "inboundTag" in out:
+        out["inboundTag"] = sorted(out["inboundTag"])
+    return out
+
+
+def xray_blocks_private(config: dict) -> bool:
+    routing = config.get("routing") or {}
+    if routing.get("domainStrategy") != XRAY_ROUTING_DOMAIN_STRATEGY:
+        return False
+    rules = [_normalized_rule(r) for r in routing.get("rules", [])]
+    return all(_normalized_rule(r) in rules for r in xray_private_block_rules(config))
+
+
+def with_private_block(config: dict) -> dict:
+    out = copy.deepcopy(config)
+    outbounds = out.setdefault("outbounds", [])
+    if not any(o.get("tag") == XRAY_BLOCK_OUTBOUND_TAG for o in outbounds):
+        outbounds.append({"tag": XRAY_BLOCK_OUTBOUND_TAG, "protocol": "blackhole"})
+    routing = out.setdefault("routing", {})
+    routing["domainStrategy"] = XRAY_ROUTING_DOMAIN_STRATEGY
+    kept = [r for r in routing.get("rules", []) if r.get("outboundTag") != XRAY_BLOCK_OUTBOUND_TAG]
+    api_rules = [r for r in kept if XRAY_API_INBOUND_TAG in r.get("inboundTag", [])]
+    other_rules = [r for r in kept if r not in api_rules]
+    routing["rules"] = api_rules + xray_private_block_rules(out) + other_rules
+    return out
+
+
+def make_xray_private_block_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        try:
+            config = json.loads(xray_config_path().read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return xray_blocks_private(config)
+
+    def apply() -> None:
+        config_path = xray_config_path()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        write_xray_config_with_test(config_path, with_private_block(config))
+        restart = subprocess.run(["systemctl", "--user", "restart", "xray"], check=False)
+        if restart.returncode != 0:
+            raise FixupError("конфиг записан, но systemctl --user restart xray не сработал")
+        subprocess.run(["systemctl", "--user", "restart", NODE_UNIT_NAME], check=False)
+
+    return Fixup(
+        id="xray-private-block",
+        title=(
+            "xray: клиентам VPN закрыты внутренние адреса сервера и Tailscale "
+            "(рестарт xray и ноды — клиенты вернутся сверкой)"
+        ),
+        needed=lambda s: needs.vpn(s) and s.vpn.reality is not None,
         check=check,
         apply=apply,
     )
