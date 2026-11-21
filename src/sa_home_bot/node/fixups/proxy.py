@@ -14,6 +14,9 @@ from sa_home_bot.node.fixups.netfilter import (
     line_index,
     nft_check_file,
     nft_output,
+    ufw_allow_all,
+    ufw_allows_all,
+    ufw_in_use,
 )
 from sa_home_bot.node.fixups.privileged import (
     find_executable,
@@ -275,4 +278,18 @@ def make_proxy_firewall_fixup(settings: Settings) -> Fixup:
         needed=_proxy_firewall_needed,
         check=_proxy_firewall_check,
         apply=lambda: _proxy_firewall_apply(settings),
+    )
+
+
+MTG_UFW_COMMENT = "sa-home vpn: mtg (MTProto) вход"
+
+
+def make_mtg_ufw_fixup(settings: Settings) -> Fixup:
+    spec = f"{settings.vpn.mtg_port}/tcp"
+    return Fixup(
+        id="mtg-ufw-port",
+        title=f"ufw: открыть TCP-порт mtg ({spec})",
+        needed=lambda s: needs.vpn_awg(s) and ufw_in_use() and settings.vpn.mtg_port > 0,
+        check=lambda: ufw_allows_all([spec]),
+        apply=lambda: ufw_allow_all([spec], MTG_UFW_COMMENT),
     )

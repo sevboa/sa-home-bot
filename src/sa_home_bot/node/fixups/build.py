@@ -48,6 +48,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_warp.make_vpn_warp_fixup(settings),
         vpn_server.make_awg_forward_fixup(settings),
         vpn_server.make_awg_alt_interface_fixup(settings),
+        vpn_server.make_awg_interface_fixup(settings),
         vpn_server.make_awg_alt_ufw_fixup(settings),
         vpn_server.make_vpn_nft_ports_fixup(settings),
         vpn_server.make_awg_alt_forward_fixup(settings),
@@ -57,6 +58,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
     fixups += [
         proxy.make_proxy_units_fixup(settings),
         proxy.make_proxy_firewall_fixup(settings),
+        proxy.make_mtg_ufw_fixup(settings),
         *(host.make_apps_unit_fixup(app) for app in settings.apps.items),
     ]
     return [f for f in fixups if f.needed(settings)]
