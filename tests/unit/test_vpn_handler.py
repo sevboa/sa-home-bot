@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 import pytest_asyncio
 
 from sa_home_bot.bot import (
@@ -918,6 +919,33 @@ async def test_admin_screen_lists_guests():
     )
     assert "Гости VPN" in callback.message.edits[0]
     assert "Аня" in callback.message.edits[0]
+
+
+@pytest.mark.parametrize("offset", [0, vpn_admin_view.GUEST_PAGE_SIZE])
+async def test_admin_screen_asks_servers_only_for_visible_page(monkeypatch, offset):
+    guests = [
+        Subscription(chat_id=1000 + i, name=f"Гость {i}", source=SOURCE_GUEST) for i in range(20)
+    ]
+    asked: list[int] = []
+
+    async def fake_fanout_usage(_link, chat_id):
+        asked.append(chat_id)
+        return []
+
+    monkeypatch.setattr(vpn_nodes, "fanout_usage", fake_fanout_usage)
+    callback = FakeCallback(vpn_admin_view.guests_cb(offset), chat_id=1)
+    await vpn_handlers.handle_action(
+        callback,
+        TwoServersLink(),
+        FakeNotifier(),
+        make_config(),
+        ADMIN,
+        new_pending(),
+        _book(*guests),
+    )
+    expected = [g.chat_id for g in vpn_admin_view.visible_guests(guests, offset)]
+    assert len(expected) == vpn_admin_view.GUEST_PAGE_SIZE
+    assert sorted(asked) == sorted(expected)
 
 
 async def test_admin_location_screen_opens_from_guest_card():
