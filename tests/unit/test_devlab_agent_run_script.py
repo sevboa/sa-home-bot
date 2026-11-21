@@ -3,6 +3,8 @@ import sys
 import pytest
 
 from sa_home_bot.devlab.agent import tools as tools_module
+from sa_home_bot.devlab.agent.loop import AgentStatus
+from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.script import PROCESS_FORBIDDEN, SCRIPT_FAILED_HEAD, script_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -16,7 +18,12 @@ from sa_home_bot.devlab.agent.tools import (
     ToolBox,
     ToolError,
 )
+from tests.unit.support.fakes import ScriptedChatModel, tool_reply
+from tests.unit.test_devlab_agent import GREEN_TEST, make_loop
 
+GREEN_CHECK = (sys.executable, "-c", "import sys; sys.exit(0)")
+RED_CHECK = (sys.executable, "-c", "import sys; sys.exit(1)")
+EDIT_APP = "edit('src/app.py', 'VALUE = 1', 'VALUE = 2')\n"
 PYTEST_ARGV = (sys.executable, "-m", "pytest", "-q")
 
 
@@ -158,3 +165,61 @@ async def test_run_action_goes_through_allowed_commands(project, command, expect
     box = toolbox(project, allowed_commands=(f"{sys.executable} -c",))
     outcome = await box.call(TOOL_RUN_SCRIPT, {"code": f"run({command!r})"})
     assert expected in outcome.text
+
+
+
+async def run_script_loop(tmp_path, code, checks=()):
+    steps = []
+
+    async def on_step(title):
+        steps.append(title)
+
+    spec = AgentSpec(
+        test_argv=GREEN_TEST, checks=checks, diff_prefixes=("src/",), code_mode=True
+    )
+    model = ScriptedChatModel(tool_reply(TOOL_RUN_SCRIPT, "s1", code=code), ModelError("конец"))
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    loop._on_step = on_step
+    result = await loop.run("s", "t")
+    answer = model.seen[1][-1]["content"] if len(model.seen) > 1 else ""
+    return result, answer, steps
+
+
+@pytest.mark.parametrize(("check", "accepted"), [(GREEN_CHECK, True), (RED_CHECK, False)])
+async def test_step_done_from_script_goes_through_the_guard(tmp_path, check, accepted):
+    code = EDIT_APP + 'step_done("итог шага")'
+    result, answer, steps = await run_script_loop(tmp_path, code, checks=(check,))
+    assert result.status is AgentStatus.MODEL_FAILED
+    assert (steps == ["итог шага"]) is accepted
+    assert ("действие 2 step_done: шаг принят" in answer) is accepted
+    assert ("действие 2 step_done: шаг не принят" in answer) is not accepted
+
+
+@pytest.mark.parametrize(
+    ("edits", "finished"), [(EDIT_APP, True), ("print('нет правок')\n", False)]
+)
+async def test_finish_from_script_goes_through_the_guard(tmp_path, edits, finished):
+    result, answer, _ = await run_script_loop(tmp_path, edits + 'finish("всё готово")')
+    assert (result.status is AgentStatus.FINISHED) is finished
+    if finished:
+        assert result.summary == "всё готово"
+    else:
+        assert "финал отклонён" in answer
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        ('step_done("рано")\n' + EDIT_APP, "действие 1 step_done: не выполнено: после него"),
+        ('finish("рано")\n' + EDIT_APP, "действие 1 finish: не выполнено: после него"),
+        (
+            "edit('src/app.py', 'нет такого', 'x')\nstep_done(\"итог\")",
+            "действие 2 step_done: не выполнено: предыдущее действие скрипта упало",
+        ),
+    ],
+)
+async def test_closing_action_not_last_or_after_error_is_not_executed(tmp_path, code, reason):
+    result, answer, steps = await run_script_loop(tmp_path, code)
+    assert result.status is AgentStatus.MODEL_FAILED
+    assert steps == []
+    assert reason in answer

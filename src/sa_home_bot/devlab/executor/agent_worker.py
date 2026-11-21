@@ -505,7 +505,7 @@ class AgentWorker(WorkerLoops):
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
         )
-        system = build_system(rules, job.model, spec.allowed_commands)
+        system = build_system(rules, job.model, spec.allowed_commands, code_mode=spec.code_mode)
         if role_text is not None:
             system = system + "\n\n" + role_text
         dialog = self._answered_dialog(run)

@@ -17,8 +17,10 @@ from sa_home_bot.devlab.agent.sandbox import (
 )
 from sa_home_bot.devlab.agent.script import (
     ACTION_EDIT,
+    ACTION_FINISH,
     ACTION_RUN,
     ACTION_RUN_TESTS,
+    ACTION_STEP_DONE,
     ACTION_WRITE,
     SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
@@ -59,6 +61,11 @@ SCRIPT_ACTION_TOOLS = {
     ACTION_RUN: TOOL_RUN_COMMAND,
     ACTION_RUN_TESTS: TOOL_RUN_TESTS,
 }
+SCRIPT_CONTROL_ACTIONS = {ACTION_STEP_DONE: TOOL_STEP_DONE, ACTION_FINISH: TOOL_FINISH}
+SCRIPT_CONTROL_NOT_LAST = (
+    "не выполнено: после него в скрипте есть другие действия; {tool}() должен быть последним"
+)
+SCRIPT_CONTROL_AFTER_ERROR = "не выполнено: предыдущее действие скрипта упало"
 SCRIPT_NO_OUTPUT = "(скрипт ничего не напечатал)"
 SCRIPT_ACTIONS_SKIPPED = "действия скрипта не исполнены"
 SCRIPT_DIRECT_WRITES = (
@@ -87,10 +94,18 @@ class ToolError(Exception):
 
 
 @dataclass(frozen=True)
+class ControlRequest:
+    tool: str
+    args: dict[str, str]
+    label: str
+
+
+@dataclass(frozen=True)
 class ToolOutcome:
     text: str
     mutating: bool = False
     green: bool | None = None
+    control: ControlRequest | None = None
 
 
 def _schema(name: str, description: str, **properties: dict[str, str]) -> dict[str, Any]:
@@ -403,9 +418,19 @@ class ToolBox:
         mutating = False
         green: bool | None = None
         failed = False
+        control: ControlRequest | None = None
         for number, action in enumerate(run.actions, 1):
-            tool = SCRIPT_ACTION_TOOLS.get(action.tool)
+            closing = SCRIPT_CONTROL_ACTIONS.get(action.tool)
+            tool = SCRIPT_ACTION_TOOLS.get(action.tool) or closing
             label = f"действие {number} {tool or action.tool}"
+            if closing is not None:
+                if number != len(run.actions):
+                    lines.append(f"{label}: {SCRIPT_CONTROL_NOT_LAST.format(tool=closing)}")
+                elif failed:
+                    lines.append(f"{label}: {SCRIPT_CONTROL_AFTER_ERROR}")
+                else:
+                    control = ControlRequest(closing, action.args, label)
+                continue
             if failed:
                 lines.append(f"{label}: пропущено после ошибки")
                 continue
@@ -422,4 +447,4 @@ class ToolBox:
                 outcome = outcome.text
             mutating = mutating or tool in MUTATING_TOOLS
             lines.append(f"{label}: {outcome}")
-        return ToolOutcome("\n".join(lines), mutating=mutating, green=green)
+        return ToolOutcome("\n".join(lines), mutating=mutating, green=green, control=control)

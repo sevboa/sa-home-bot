@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
 
 from sa_home_bot.devlab.agent.prompt import (
+    CODE_MODE_INTRO,
+    CODE_MODE_REMINDER,
     FLOW_REMINDER,
     GLM_FLOW_REMINDER,
     GLM_INTRO,
@@ -23,6 +26,7 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_GREP,
     TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
+    TOOL_RUN_SCRIPT,
     TOOL_RUN_TESTS,
     TOOL_STEP_DONE,
 )
@@ -109,3 +113,39 @@ def test_glm_reminder_is_russian_and_rides_on_step_end():
     assert sent == [{"role": "user", "content": f"t\n\n{GLM_FLOW_REMINDER}"}]
     assert GLM_FLOW_REMINDER.startswith("[Напоминание]")
     assert "заканчивается красным тестом" in GLM_FLOW_REMINDER
+
+
+
+@pytest.mark.parametrize("model", [*GLM_MODELS, *OTHER_MODELS])
+def test_code_mode_prompt_is_the_same_for_every_model(model):
+    system = build_system(RULES, model, COMMANDS, TODAY, code_mode=True)
+    assert system == build_system(RULES, "", COMMANDS, TODAY, code_mode=True)
+    assert system.startswith(CODE_MODE_INTRO)
+    assert reminder_for(model, code_mode=True) == CODE_MODE_REMINDER
+    assert "Сегодня 2026-11-16." in system
+    assert "`ruff check`, `python -m pytest`, `git diff`" in system
+    assert "=== CLAUDE.md ===\nправило-один" in system
+
+
+@pytest.mark.parametrize("model", [*GLM_MODELS, *OTHER_MODELS])
+def test_without_code_mode_build_system_and_reminder_are_unchanged(model):
+    assert build_system(RULES, model, COMMANDS, TODAY, code_mode=False) == build_system(
+        RULES, model, COMMANDS, TODAY
+    )
+    assert reminder_for(model, code_mode=False) == reminder_for(model)
+
+
+@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_REMINDER])
+def test_code_mode_texts_name_no_hidden_tools(text):
+    for hidden in (TOOL_READ_FILE, TOOL_EDIT_FILE, TOOL_RUN_COMMAND, "write_file", "list_files"):
+        assert hidden not in text
+    assert not re.search(r"\b(grep|run_tests)\b(?!\()", text)
+    assert "по одной" not in text
+    assert "обдумай" not in text
+
+
+def test_code_mode_intro_names_script_and_control_calls():
+    for name in (TOOL_RUN_SCRIPT, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
+        assert name in CODE_MODE_INTRO
+    assert 'step_done("a.py возвращает 2")' in CODE_MODE_INTRO
+

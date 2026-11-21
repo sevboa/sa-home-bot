@@ -611,3 +611,36 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 `grep(...)[:2500]`, считая срез символьным, каждый вывод упирался в потолок, и контекст забивался за десяток шагов
 (21 600 входных токенов на шаге 10), после чего модель ходила по кругу одним и тем же `grep`. Пометка об обрезке
 теперь напоминает, что `grep()` и `ls()` возвращают список строк.
+
+
+### Свой системный промпт Code Mode и step_done/finish из скрипта (2026-11-22)
+
+Замеры Code Mode показали противоречие: системный промпт (`GLM_INTRO` для GLM, `SYSTEM_INTRO` для остальных)
+велел пользоваться `read_file`/`grep`/`edit_file`/`run_tests`/`run_command`, которых в Code Mode у модели нет
+(видны только `run_script`, `step_done`, `ask_owner`, `finish`), а GLM к тому же требовал «правку и проверку
+делай по одной» и «перед каждой правкой обдумай 3 пункта». Это тянуло модель к шагам по одному действию.
+Кроме того, закрытие шага и задания требовало отдельного хода: за прогон t1 набиралось 3–4 лишних запроса на
+`step_done`/`finish`.
+
+- `prompt.py`: `CODE_MODE_INTRO` (роль, цикл шага «скрипт 1 читает пачкой, скрипт 2 правит, проверяет и закрывает
+  шаг», последний шаг — `run("ruff check ...")` и `finish` в одном скрипте, один полный пример из `SCRIPT_EXAMPLE`),
+  `CODE_MODE_SETTING` (дата для `docs/`, разрешённые команды для `run()`, «не коммитишь и не деплоишь»),
+  `CODE_MODE_REMINDER`. Они общие для всех моделей. `build_system(..., code_mode=)` берёт их вместо
+  `intro_for`/`glm_setting`; `reminder_for(model, code_mode=)` отдаёт `CODE_MODE_REMINDER`. Без `code_mode` вывод
+  байт в байт прежний. Признак идёт из `AgentSpec.code_mode` в `agent_worker` (`build_system`); `GatewayChat`
+  определяет его по списку инструментов запроса (есть `run_script` — Code Mode), чтобы не менять фабрику
+  моделей.
+- `script.py`: функции скрипта `step_done(text)` и `finish(summary)` ставят действие в очередь (`ACTION_STEP_DONE`,
+  `ACTION_FINISH`), описаны в `SCRIPT_FUNCTIONS`, `SCRIPT_EXAMPLE` кончается `step_done`.
+- `tools.py`: `ToolBox._run_script` сам эти действия не исполняет (у него нет стража). Если действие последнее и
+  предыдущие не упали, в `ToolOutcome.control` кладётся `ControlRequest`; иначе строка «действие N step_done: не
+  выполнено: …» с причиной (не последнее — «после него в скрипте есть другие действия», после ошибки — «предыдущее
+  действие скрипта упало»), остальные действия идут как обычно. Красный `run_tests` ошибкой не считается: решает
+  страж.
+- `loop.py`: `_run_tool` после обычного разбора ответа зовёт те же `_step_done`/`_finish`, что и вызов
+  инструмента (тот же страж, `on_step`, `red_runs`, тексты «шаг принят»/«шаг не принят»/«финал отклонён»), и
+  дописывает результат строкой «действие N step_done: …». `finish` из скрипта возвращает итог, и цикл
+  завершается как обычно. В журнале шагов `rejected` у `run_script` теперь ставится и по такой строке.
+- Инструменты `step_done`/`finish` остаются отдельными вызовами.
+Тесты: `tests/unit/test_devlab_agent_prompt.py`, `tests/unit/test_devlab_agent_run_script.py`,
+`test_gateway_chat_uses_code_mode_reminder_when_run_script_offered` в `tests/unit/test_devlab_agent.py`.
