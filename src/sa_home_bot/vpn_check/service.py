@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
-import json
 import logging
 import shutil
 import socket
@@ -51,14 +50,6 @@ from sa_home_bot.vpn_series.sni_probe import parse_domains, probe_many
 
 log = logging.getLogger(__name__)
 
-
-def _reality_sni(conf_text: str) -> str | None:
-    try:
-        doc: Any = json.loads(conf_text)
-        sni = doc["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"]
-    except (ValueError, KeyError, IndexError, TypeError):
-        return None
-    return str(sni) if sni else None
 
 _ROUTE_SENTINEL = "1.1.1.1"
 
@@ -300,10 +291,12 @@ class VpnCheckService:
                 await self._tunnel_down(slot)
 
     def _entry_name(self, slot: ProbeSlot) -> str:
-        sni = None
-        if slot.transport in REALITY_PROBE_TRANSPORTS:
+        sni = slot.sni
+        if sni is None and slot.transport in REALITY_PROBE_TRANSPORTS:
             try:
-                sni = _reality_sni(vpn_probe_state.reality_conf_path(slot).read_text())
+                sni = vpn_probe_state.reality_conf_sni(
+                    vpn_probe_state.reality_conf_path(slot).read_text()
+                )
             except OSError:
                 sni = None
         return probe_entry_name(slot.transport, sni)

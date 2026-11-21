@@ -48,6 +48,7 @@ from sa_home_bot.proto.messages import (
     Address,
     ProtoError,
 )
+from sa_home_bot.reality.client_config import probe_entry_name
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_CHECK_FAILED,
@@ -56,8 +57,11 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_OUTAGE,
     EVENT_VPN_SERIES_FAILED,
     EVENT_VPN_SERIES_RECOVERED,
+    PROBE_TRANSPORT_REALITY_ALT,
+    PROBE_TRANSPORT_REALITY_XHTTP,
     TELEGRAM_EGRESS_TARGET,
     TELEGRAM_EGRESS_TRANSPORT,
+    TRANSPORT_REALITY,
 )
 from sa_home_bot.vpn.service_common import (
     ACTION_TRIGGER_PEERS,
@@ -78,6 +82,18 @@ def _entry_name(raw: object) -> str | None:
     if not isinstance(raw, str):
         return None
     return raw.strip()[:ENTRY_MAX_LEN] or None
+
+
+def _server_entry_sni(reality: Any, transport: str) -> str | None:
+    if reality is None:
+        return None
+    if transport == TRANSPORT_REALITY:
+        return reality.sni or None
+    if transport == PROBE_TRANSPORT_REALITY_ALT:
+        return reality.alt.sni if reality.alt is not None else None
+    if transport == PROBE_TRANSPORT_REALITY_XHTTP:
+        return reality.xhttp.sni if reality.xhttp is not None else None
+    return None
 
 
 def _net_reports(raw: object) -> dict[str, bool]:
@@ -168,6 +184,10 @@ class ChecksMixin:
             error_raw = raw.get("error")
             ok = bool(raw.get("ok"))
             entry = _entry_name(raw.get("entry"))
+            if server == self._node:
+                sni = _server_entry_sni(self._cfg.reality, transport)
+                if sni:
+                    entry = _entry_name(probe_entry_name(transport, sni)) or entry
             error = str(error_raw) if error_raw else None
             run = runs.setdefault((server, transport), {"failed": [], "recovered": [], "items": []})
             run["items"].append((str(target), ok, ms))

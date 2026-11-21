@@ -416,9 +416,28 @@ def make_vpn_probe_forwarding_persist_fixup(slots: list[vpn_probe_state.ProbeSlo
     )
 
 
+def _slots_with_sni(slots: list[vpn_probe_state.ProbeSlot]) -> list[vpn_probe_state.ProbeSlot]:
+    result = []
+    for slot in slots:
+        if slot.transport in vpn_protocol.REALITY_PROBE_TRANSPORTS:
+            conf = read_text_if_exists(vpn_probe_state.reality_conf_path(slot))
+            sni = vpn_probe_state.reality_conf_sni(conf) if conf else None
+            if sni:
+                slot = slot.model_copy(update={"sni": sni})
+        result.append(slot)
+    return result
+
+
+def _state_check(slots: list[vpn_probe_state.ProbeSlot]) -> bool:
+    return file_matches(vpn_probe_state.STATE_PATH, vpn_probe_state.render(_slots_with_sni(slots)))
+
+
 def _state_apply(slots: list[vpn_probe_state.ProbeSlot]) -> None:
     install_root_file(
-        vpn_probe_state.STATE_PATH, vpn_probe_state.render(slots), mode="0644", make_parents=True
+        vpn_probe_state.STATE_PATH,
+        vpn_probe_state.render(_slots_with_sni(slots)),
+        mode="0644",
+        make_parents=True,
     )
 
 
@@ -427,6 +446,6 @@ def make_vpn_probe_state_fixup(slots: list[vpn_probe_state.ProbeSlot]) -> Fixup:
         id="vpn-check-probe-state",
         title="Записать список настроенных пробников (что реально проверяется с этой ноды)",
         needed=needs.vpn_check,
-        check=lambda: file_matches(vpn_probe_state.STATE_PATH, vpn_probe_state.render(slots)),
+        check=lambda: _state_check(slots),
         apply=lambda: _state_apply(slots),
     )

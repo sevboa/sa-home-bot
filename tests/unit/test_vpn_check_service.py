@@ -132,11 +132,7 @@ def _patch_curl(
         calls.append(cmd)
         if any("awg-quick" in c for c in cmd):
             if "up" in cmd:
-                return (
-                    _FakeProc(b"", b"", 0)
-                    if tunnel_up_ok
-                    else _FakeProc(b"", tunnel_up_err, 1)
-                )
+                return _FakeProc(b"", b"", 0) if tunnel_up_ok else _FakeProc(b"", tunnel_up_err, 1)
             return _FakeProc(b"", b"", 0)
         if any("xray" in c for c in cmd):
             return (
@@ -164,9 +160,7 @@ def _patch_curl(
 
 def _target_curl_calls(calls: list[tuple]) -> list[tuple]:
     return [
-        c
-        for c in calls
-        if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
+        c for c in calls if "curl" in c and c[-1] != _IP_ECHO and not ("route" in c and "get" in c)
     ]
 
 
@@ -369,9 +363,7 @@ async def test_two_slots_for_same_server_are_both_checked(monkeypatch):
     calls = _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
     node_link = _FakeNodeLink()
     slots = [_slot(), _reality_slot()]
-    await _service(node_link, slots=slots)._run_and_report(
-        PROBE_SERVER, slots, ["https://1.1.1.1"]
-    )
+    await _service(node_link, slots=slots)._run_and_report(PROBE_SERVER, slots, ["https://1.1.1.1"])
     results = node_link.calls[0]["args"]["results"]
     transports = {r["transport"] for r in results}
     assert transports == {"awg", "reality"}
@@ -777,3 +769,46 @@ async def test_reality_result_entry_name_without_config_is_bare(monkeypatch, tmp
         PROBE_SERVER, [slot], ["https://1.1.1.1"]
     )
     assert _result_for(node_link, "https://1.1.1.1")["entry"] == "Reality"
+
+
+async def test_unreadable_slot_config_is_silent(monkeypatch, caplog):
+    from sa_home_bot.node import vpn_probe_state
+
+    class Denied:
+        def read_text(self):
+            raise PermissionError(13, "Permission denied")
+
+    def denied(slot):
+        return Denied()
+
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    monkeypatch.setattr(vpn_probe_state, "reality_conf_path", denied)
+    node_link = _FakeNodeLink()
+    slot = _reality_slot()
+    with caplog.at_level("DEBUG"):
+        await _service(node_link, slots=[slot])._run_and_report(
+            PROBE_SERVER, [slot], ["https://1.1.1.1"]
+        )
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == "Reality"
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+
+
+@pytest.mark.parametrize(
+    ("transport", "expected"),
+    [("reality", "Reality azgez"), ("reality_xhttp", "XHTTP azgez")],
+)
+async def test_entry_name_prefers_sni_from_slot_state(monkeypatch, transport, expected):
+    from sa_home_bot.node import vpn_probe_state
+
+    class Denied:
+        def read_text(self):
+            raise PermissionError(13, "Permission denied")
+
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    monkeypatch.setattr(vpn_probe_state, "reality_conf_path", lambda slot: Denied())
+    node_link = _FakeNodeLink()
+    slot = _reality_slot(transport=transport, sni="www.azgez.com")
+    await _service(node_link, slots=[slot])._run_and_report(
+        PROBE_SERVER, [slot], ["https://1.1.1.1"]
+    )
+    assert _result_for(node_link, "https://1.1.1.1")["entry"] == expected
