@@ -240,6 +240,10 @@ Reality-пробника (маршрут там прямой, права sudo у
 - `bot/vpn_check_view.py::transport_label` и легенда графика (`ChartPanel.names`, заполняется в
   `vpn_daily.build_panels` из поля `entry` рядов истории) показывают `entry`, если оно есть, иначе
   прежнее имя. Строки без `entry` выводятся как раньше. У `reality_xhttp` есть свой цвет линии.
-- Ограничение: `vpn` пока не сохраняет `entry` в `vpn_check_states` и `vpn_check_samples` и не
-  отдаёт его в `check_status` и `check_history`, поэтому в отчётах и на графиках имена появятся,
-  когда `vpn` начнёт хранить и пересылать это поле.
+- `vpn` (`vpn/checks.py::_report_check`) берёт необязательное `entry` из строки результата
+  (строка, обрезка до 40 символов, иначе None) и хранит его в колонках `entry` таблиц
+  `vpn_check_states` (последнее имя связки, report без `entry` старое имя не затирает) и
+  `vpn_check_samples`; старые БД получают колонки через `_add_column_if_missing`.
+- `check_status` отдаёт `entry` в строках `states` и `rollup` (имя из самой свежей строки пары),
+  `check_history` — в рядах `series` (последнее непустое имя за окно). Старые ноды поля не шлют:
+  в БД NULL, ключа в ответе нет, бот показывает прежнее имя.

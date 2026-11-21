@@ -561,6 +561,7 @@ CREATE TABLE IF NOT EXISTS vpn_check_states (
     last_seen_at         TEXT NOT NULL,
     notified_alert_at    TEXT,
     notified_cleared_at  TEXT,
+    entry                TEXT,
     PRIMARY KEY (node, server, transport, target)
 );
 
@@ -613,7 +614,8 @@ CREATE TABLE IF NOT EXISTS vpn_check_samples (
     transport  TEXT NOT NULL,
     total      INTEGER NOT NULL,
     bad        INTEGER NOT NULL,
-    median_ms  INTEGER
+    median_ms  INTEGER,
+    entry      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_check_samples_at ON vpn_check_samples(at);
 
