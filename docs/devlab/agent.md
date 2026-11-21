@@ -717,5 +717,10 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
   `CODE_REPEAT_GREEN_HINT`, `CODE_REPEAT_READ_HINT` («вызови finish() в execute»); признак берётся из
   `ToolBox.code_mode`. Головы отказов прежние, `SCRIPT_REJECTED` их ловит. Без `code_mode` тексты не
   менялись.
+- Живой прогон: модель писала `read("src/x.py")` последней строкой и ждала вывод, как в Jupyter; получала
+  «(скрипт ничего не напечатал)» и упиралась в стоп-кран. Теперь значение последнего оператора верхнего
+  уровня, если это выражение и оно не `None`, печатается: `str` как есть, список строк построчно, словарь
+  со строковыми значениями как «=== ключ ===», остальное через `repr`. Выражения не в последней строке не
+  выводятся, о чём сказано в `SCRIPT_NO_OUTPUT` и в промпте.
 
 Тесты: `tests/unit/test_devlab_agent_prompt.py`, `test_devlab_agent.py`, `test_devlab_agent_script.py`.

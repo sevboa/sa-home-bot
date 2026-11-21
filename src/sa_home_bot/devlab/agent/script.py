@@ -111,7 +111,8 @@ print(r)
 if r.ok:
     finish("load возвращает 2, тесты и ruff зелёные")"""
 
-PROLOGUE = r'''import builtins
+PROLOGUE = r'''import ast
+import builtins
 import fnmatch
 import io
 import json
@@ -471,11 +472,30 @@ def _finalize():
 '''
 
 _EPILOGUE = r'''
+def _show(value):
+    if isinstance(value, str):
+        print(value)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        print("\n".join(value))
+    elif isinstance(value, dict) and all(isinstance(item, str) for item in value.values()):
+        print("\n".join(f"=== {key} ===\n{item}" for key, item in value.items()))
+    else:
+        print(repr(value))
+
+
 _failed = False
 _control = None
 _namespace = {"__name__": "__main__", **{name: globals()[name] for name in _CONFIG["names"]}}
 try:
-    exec(compile(_code, _CONFIG["filename"], "exec"), _namespace)
+    _tree = ast.parse(_code, _CONFIG["filename"])
+    _last = None
+    if _tree.body and isinstance(_tree.body[-1], ast.Expr):
+        _last = ast.Expression(_tree.body.pop().value)
+    exec(compile(_tree, _CONFIG["filename"], "exec"), _namespace)
+    if _last is not None:
+        _value = eval(compile(_last, _CONFIG["filename"], "eval"), _namespace)
+        if _value is not None:
+            _show(_value)
 except _Signal as _signal_exit:
     _control = {"tool": _signal_exit.tool, "args": _signal_exit.payload}
 except SystemExit as _exit:

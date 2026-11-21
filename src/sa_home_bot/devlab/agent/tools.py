@@ -53,7 +53,10 @@ GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
 NEWLINE_ADDED = "; в конец файла дописан перевод строки"
-SCRIPT_NO_OUTPUT = "(скрипт ничего не напечатал)"
+SCRIPT_NO_OUTPUT = (
+    "(скрипт ничего не напечатал: значения выражений не в последней строке не выводятся — "
+    "оберни в print())"
+)
 SCRIPT_BUDGET_MARGIN_S = 20.0
 PLAIN_TOOLS = frozenset(
     {TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP, TOOL_EDIT_FILE, TOOL_WRITE_FILE}
@@ -194,8 +197,8 @@ EXECUTE_DEFINITION = _schema(
     TOOL_EXECUTE,
     "Исполняет код Python в корне проекта (src в sys.path, пакеты проекта импортируются). "
     "Функции ниже уже определены, import для них не нужен. Код исполняется сразу, по порядку, "
-    "как обычный Python. Виден только вывод print(), до "
-    f"{SCRIPT_OUTPUT_CHARS} симв. (начало). Каждый вызов — новый процесс: переменные прошлых "
+    "как обычный Python. Виден вывод print() и значение последнего выражения, как в Jupyter; "
+    f"до {SCRIPT_OUTPUT_CHARS} симв. (начало). Каждый вызов — новый процесс: переменные прошлых "
     "вызовов не сохраняются. Код, которому нужен ещё не увиденный вывод, — в следующий вызов, "
     "всё остальное — в этот. step_done(), finish() и ask_owner() завершают скрипт. Функции:\n"
     + api_stubs(""),
