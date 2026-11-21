@@ -32,7 +32,7 @@ from sa_home_bot.devlab.agent.model import (
     ToolCall,
     parse_reply,
 )
-from sa_home_bot.devlab.agent.prompt import FLOW_REMINDER, with_flow_reminder
+from sa_home_bot.devlab.agent.prompt import CODE_MODE_REMINDER, FLOW_REMINDER, with_flow_reminder
 from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
 from sa_home_bot.devlab.agent.script import script_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -404,6 +404,23 @@ async def run_gateway(handler, timeout_s=5.0):
     await server.start_server()
     chat = GatewayChat(str(server.make_url("")), "tok", "flint", "job-1", timeout_s=timeout_s)
     return server, chat
+
+
+async def test_gateway_chat_uses_code_mode_reminder_when_run_script_offered():
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response(reply_body("ок", [], {}))
+
+    server, chat = await run_gateway(handler)
+    tools = ToolBox(LocalSandbox(Path(".")), AgentSpec(code_mode=True)).definitions
+    try:
+        await chat.complete([{"role": "user", "content": "x"}], tools)
+    finally:
+        await chat.close()
+        await server.close()
+    assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{CODE_MODE_REMINDER}"}]
 
 
 async def test_gateway_chat_request_and_parse():

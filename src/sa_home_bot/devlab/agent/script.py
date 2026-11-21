@@ -11,6 +11,8 @@ ACTION_EDIT = "edit"
 ACTION_WRITE = "write"
 ACTION_RUN_TESTS = "run_tests"
 ACTION_RUN = "run"
+ACTION_STEP_DONE = "step_done"
+ACTION_FINISH = "finish"
 SCRIPT_GREP_MAX_MATCHES = 200
 SCRIPT_GREP_MAX_FILE_BYTES = 200_000
 SCRIPT_FILENAME = "<script>"
@@ -32,12 +34,20 @@ SCRIPT_FUNCTIONS: dict[str, str] = {
     f"{ACTION_WRITE}(path, content)": "создать или перезаписать файл (после скрипта)",
     f"{ACTION_RUN}(command)": "разрешённая команда без оболочки (после скрипта)",
     f"{ACTION_RUN_TESTS}(paths)": "узкий прогон тестов, список путей (после скрипта)",
+    f"{ACTION_STEP_DONE}(text)": (
+        "закрыть шаг с итогом text: страж проверит шаг; только последним действием скрипта"
+    ),
+    f"{ACTION_FINISH}(summary)": (
+        "завершить задание с итогом summary: страж проверит дифф и проект; только последним "
+        "действием скрипта"
+    ),
 }
 SCRIPT_EXAMPLE = """files = read_many(["src/pkg/a.py", "tests/test_a.py"])
 print("\\n".join(files.values()))
 print("\\n".join(grep(r"def load", "src/", context=2)))
 edit("src/pkg/a.py", "return 1", "return 2")
-run_tests(["tests/test_a.py"])"""
+run_tests(["tests/test_a.py"])
+step_done("a.py возвращает 2")"""
 
 _PROLOGUE_TEMPLATE = Template(
     '''import json
@@ -162,6 +172,14 @@ def $run(command):
 def $run_tests(paths):
     listed = [paths] if isinstance(paths, str) else list(paths)
     _queue($run_tests, paths=" ".join(listed))
+
+
+def $step_done(text):
+    _queue($step_done, title=text)
+
+
+def $finish(summary):
+    _queue($finish, summary=summary)
 '''
 )
 
@@ -173,6 +191,8 @@ PROLOGUE: str = _PROLOGUE_TEMPLATE.substitute(
     write=ACTION_WRITE,
     run_tests=ACTION_RUN_TESTS,
     run=ACTION_RUN,
+    step_done=ACTION_STEP_DONE,
+    finish=ACTION_FINISH,
     functions=repr(SCRIPT_FUNCTIONS),
     forbidden=repr(PROCESS_FORBIDDEN),
 )

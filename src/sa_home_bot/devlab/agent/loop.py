@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_FINISH,
     TOOL_RUN_SCRIPT,
     TOOL_STEP_DONE,
+    ControlRequest,
     ToolBox,
     ToolError,
 )
@@ -42,14 +44,21 @@ NUDGE_TEXT = (
     "Ответ без вызова инструмента не принимается. Работай инструментами; "
     f"закончив, вызови {TOOL_FINISH}."
 )
+FINISH_REJECTED_HEAD = "финал отклонён"
 FINISH_REJECTED = (
-    f"финал отклонён: исправь и вызови {TOOL_FINISH} снова; полный вывод стража ниже:\n"
+    f"{FINISH_REJECTED_HEAD}: исправь и вызови {TOOL_FINISH} снова; полный вывод стража ниже:\n"
 )
+STEP_REJECTED_HEAD = "шаг не принят"
 STEP_REJECTED = (
-    f"шаг не принят: исправь и вызови {TOOL_STEP_DONE} снова; шаг, который по заданию "
+    f"{STEP_REJECTED_HEAD}: исправь и вызови {TOOL_STEP_DONE} снова; шаг, который по заданию "
     "заканчивается красным тестом, закрывается вместе с правкой; полный вывод стража ниже:\n"
 )
 STEP_ACCEPTED = "шаг принят"
+SCRIPT_REJECTED = re.compile(
+    rf"^действие \d+ (?:{TOOL_STEP_DONE}|{TOOL_FINISH}): "
+    rf"(?:{STEP_REJECTED_HEAD}|{FINISH_REJECTED_HEAD})",
+    re.MULTILINE,
+)
 TRACE_TEXT_CHARS = 300
 ASK_SKIPPED = "не выполнено: задан вопрос владельцу"
 CRANE_QUESTION = (
@@ -147,6 +156,12 @@ def _repeat_hint(name: str, text: str) -> str:
     if name in READ_ONLY_TOOLS:
         return REPEAT_READ_HINT
     return REPEAT_GREEN_HINT if text.startswith(OK_HEAD) else REPEAT_HINT
+
+
+def _rejected(name: str, text: str) -> bool:
+    if name == TOOL_RUN_SCRIPT:
+        return SCRIPT_REJECTED.search(text) is not None
+    return text.startswith((FINISH_REJECTED, STEP_REJECTED))
 
 
 def _script_code(arguments: str) -> str:
@@ -375,7 +390,7 @@ class AgentLoop:
             "args": args,
             "result": text[:TRACE_TEXT_CHARS],
             "result_chars": len(text),
-            "rejected": text.startswith((FINISH_REJECTED, STEP_REJECTED)),
+            "rejected": _rejected(call.name, text),
         }
         if call.name == TOOL_RUN_SCRIPT:
             entry["code_chars"] = len(_script_code(call.arguments))
@@ -429,7 +444,18 @@ class AgentLoop:
             seg.red_runs = 0 if outcome.green else seg.red_runs + 1
         if outcome.mutating and self._on_change is not None:
             await self._on_change(f"{call.name}: {outcome.text.splitlines()[0]}")
-        return outcome.text, None
+        if outcome.control is None:
+            return outcome.text, None
+        return await self._close_from_script(outcome.text, outcome.control, seg)
+
+    async def _close_from_script(
+        self, text: str, control: ControlRequest, seg: Segment
+    ) -> tuple[str, str | None]:
+        if control.tool == TOOL_FINISH:
+            result, summary = await self._finish(control.args)
+        else:
+            result, summary = await self._step_done(control.args, seg), None
+        return f"{text}\n{control.label}: {result}", summary
 
     def _ask(self, args: dict[str, Any], seg: Segment) -> str:
         question = args.get("question")

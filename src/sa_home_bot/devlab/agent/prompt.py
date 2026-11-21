@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
+from sa_home_bot.devlab.agent.script import SCRIPT_EXAMPLE
 from sa_home_bot.devlab.agent.tools import (
     TOOL_ASK_OWNER,
     TOOL_EDIT_FILE,
@@ -13,6 +14,7 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_LIST_FILES,
     TOOL_READ_FILE,
     TOOL_RUN_COMMAND,
+    TOOL_RUN_SCRIPT,
     TOOL_RUN_TESTS,
     TOOL_STEP_DONE,
     TOOL_WRITE_FILE,
@@ -92,6 +94,49 @@ GLM_FLOW_REMINDER = (
     "финальный прогон задания и `ruff check` по изменённым файлам, и как только они зелёные, "
     f"вызови {TOOL_FINISH}."
 )
+CODE_MODE_INTRO = (
+    "# Роль\n"
+    "Ты инженер-разработчик в песочнице с копией репозитория. Задание лежит в первом сообщении "
+    "пользователя (task.md): цель, файлы, шаги и проверки. Работаешь только через "
+    f"{TOOL_RUN_SCRIPT}: пишешь код Python, он читает файлы сразу пачкой, а правки, команды и "
+    "тесты ставит в очередь, и очередь исполняется после скрипта по порядку.\n"
+    "\n"
+    "## Цикл шага\n"
+    "- Скрипт 1: прочитай всё нужное шагу сразу, read_many([...]) и grep(шаблон, префикс, "
+    "context=N) для образцов. Печатай только нужное.\n"
+    "- Скрипт 2: все edit() и write() шага и run_tests([...]) в том же скрипте. Когда тесты "
+    f"должны позеленеть, в конце этого же скрипта вызови {TOOL_STEP_DONE}(\"итог шага\"): "
+    "страж прогонит изменённые тесты и примет шаг только на зелёном. Действие step_done или "
+    "finish ставь последним в скрипте.\n"
+    "- Ошибку действия (фрагмент не найден, красный тест) чини следующим скриптом, не "
+    "перечитывая всё. Виденное не перечитывай.\n"
+    "- Шаг, который по заданию заканчивается красным тестом, закрывай вместе с правкой.\n"
+    "- Последний шаг: в одном скрипте run(\"ruff check ...\") по изменённым файлам и "
+    f"{TOOL_FINISH}(\"итог\"). Он проходит при непустом диффе, зелёных тестах и стражах проекта.\n"
+    f"- Решение может принять только владелец: вызови {TOOL_ASK_OWNER}.\n"
+    "\n"
+    "## Пример шага в одном скрипте\n"
+    "Когда нужный текст уже известен, шаг целиком умещается в один скрипт: читать, править, "
+    "проверить, закрыть.\n"
+    f"{SCRIPT_EXAMPLE}\n"
+    "\n"
+    "Каждый ход заканчивается вызовом инструмента: так засчитывается работа."
+)
+CODE_MODE_SETTING = (
+    "- Сегодня {today}. Эту дату ставь у новых находок в `docs/`.\n"
+    "- run(команда) ставит в очередь команду без оболочки, разрешены команды, которые "
+    "начинаются так: {commands}. Песочница уже настроена: команда пишется как есть, без `cd`, "
+    "пайпов и переменных окружения вроде `PYTHONPATH`.\n"
+    "- Ты не коммитишь и не деплоишь: step_done и finish сами сохраняют работу. Правила "
+    "проекта ниже написаны и для людей; тебя касаются правила про код, тесты и документацию."
+)
+CODE_MODE_REMINDER = (
+    "[Напоминание] Работай скриптами. Шаг: одним скриптом прочитай нужное (read_many, grep(..., "
+    "context=N)), затем одним скриптом все edit()/write() и run_tests([...]) и в его конце "
+    "step_done(\"итог шага\"). Ошибку действия чини следующим скриптом, не перечитывая всё. Шаг, "
+    "который по заданию заканчивается красным тестом, закрывай вместе с правкой. Все шаги "
+    "готовы: в одном скрипте run(\"ruff check ...\") по изменённым файлам и finish(\"итог\")."
+)
 RULES_TITLE = "Правила проекта (обязательны):"
 CONTINUATION_TITLE = (
     "Работа уже начата и продолжается после перезапуска. Файлы, изменённые относительно базы "
@@ -110,13 +155,23 @@ def intro_for(model: str) -> str:
     return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
-def reminder_for(model: str) -> str:
+def reminder_for(model: str, code_mode: bool = False) -> str:
+    if code_mode:
+        return CODE_MODE_REMINDER
     return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
 
 
-def glm_setting(commands: Sequence[str], today: date) -> str:
+def _setting(template: str, commands: Sequence[str], today: date) -> str:
     listed = ", ".join(f"`{command}`" for command in commands) or "нет"
-    return f"{GLM_SETTING_TITLE}\n{GLM_SETTING.format(today=today.isoformat(), commands=listed)}"
+    return f"{GLM_SETTING_TITLE}\n{template.format(today=today.isoformat(), commands=listed)}"
+
+
+def glm_setting(commands: Sequence[str], today: date) -> str:
+    return _setting(GLM_SETTING, commands, today)
+
+
+def code_mode_setting(commands: Sequence[str], today: date) -> str:
+    return _setting(CODE_MODE_SETTING, commands, today)
 
 
 def build_system(
@@ -124,9 +179,12 @@ def build_system(
     model: str = "",
     commands: Sequence[str] = (),
     today: date | None = None,
+    code_mode: bool = False,
 ) -> str:
-    parts = [intro_for(model)]
-    if _is_glm(model):
+    parts = [CODE_MODE_INTRO if code_mode else intro_for(model)]
+    if code_mode:
+        parts.append(code_mode_setting(commands, today or date.today()))
+    elif _is_glm(model):
         parts.append(glm_setting(commands, today or date.today()))
     if rules:
         parts.append(RULES_TITLE)
