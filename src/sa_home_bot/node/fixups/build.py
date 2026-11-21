@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from sa_home_bot.config import Settings
-from sa_home_bot.node.fixups import devlab, host, needs, probe_net, probe_tunnel, proxy, vpn_server
+from sa_home_bot.node.fixups import (
+    devlab,
+    host,
+    needs,
+    probe_net,
+    probe_tunnel,
+    proxy,
+    vpn_server,
+    vpn_warp,
+)
 from sa_home_bot.node.fixups.core import Fixup
 
 
@@ -36,6 +45,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_server.make_reality_xhttp_ufw_fixup(settings),
         vpn_server.make_reality_xhttp_inbound_fixup(settings),
         vpn_server.make_xray_private_block_fixup(settings),
+        vpn_warp.make_vpn_warp_fixup(settings),
         vpn_server.make_awg_forward_fixup(settings),
         vpn_server.make_awg_alt_interface_fixup(settings),
         vpn_server.make_awg_alt_ufw_fixup(settings),
