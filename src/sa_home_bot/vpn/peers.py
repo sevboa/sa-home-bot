@@ -19,6 +19,7 @@ from sa_home_bot.vpn import awg_conf, qr
 from sa_home_bot.vpn.protocol import (
     EVENT_VPN_PEER_ISSUED,
     PROBE_CHAT_ID,
+    PROBE_LABEL_PREFIX,
     PURPOSE_APP,
     TRANSPORT_AWG,
     TRANSPORT_REALITY,
@@ -231,6 +232,8 @@ class PeersMixin:
 
         self._sub_cache.clear()
         async with self._issue_lock:
+            if explicit is not None and chat_id == PROBE_CHAT_ID:
+                await self._supersede_probe_peers(explicit, transport)
             if explicit is not None and await self._active_row(chat_id, explicit, transport):
                 raise ProtoError(
                     ERR_BAD_REQUEST,
@@ -256,6 +259,55 @@ class PeersMixin:
             "device_label": device_label,
             "location": self._cfg.location,
             "prior_device_count": len(existing_labels),
+        }
+
+    async def _supersede_probe_peers(self, label: str, transport: str) -> None:
+        cur = await self._db.conn.execute(
+            "SELECT public_key, address, transport FROM vpn_peers "
+            "WHERE chat_id = ? AND device_label = ? AND status = 'active' AND purpose = ? "
+            "AND COALESCE(transport, 'awg') = ?",
+            (PROBE_CHAT_ID, label, PURPOSE_APP, transport),
+        )
+        await self._revoke_probe_rows(await cur.fetchall())
+
+    async def _revoke_probe_rows(self, rows: list[Any]) -> None:
+        revoked_at = utc_now().isoformat()
+        for row in rows:
+            await self._db.conn.execute(
+                "UPDATE vpn_peers SET status = 'revoked', revoked_at = ? "
+                "WHERE chat_id = ? AND public_key = ?",
+                (revoked_at, PROBE_CHAT_ID, row["public_key"]),
+            )
+        await self._db.conn.commit()
+        for row in rows:
+            await self._remove_from_backend(
+                row["transport"] or TRANSPORT_AWG, row["public_key"], row["address"]
+            )
+
+    async def _prune_probe_peers(self, args: dict[str, Any]) -> dict[str, Any]:
+        dry_run = args.get("dry_run", True) is not False
+        cur = await self._db.conn.execute(
+            "SELECT device_label, public_key, address, transport, created_at FROM vpn_peers "
+            "WHERE chat_id = ? AND status = 'active' AND purpose = ? "
+            "AND substr(device_label, 1, ?) != ? ORDER BY created_at, id",
+            (PROBE_CHAT_ID, PURPOSE_APP, len(PROBE_LABEL_PREFIX), PROBE_LABEL_PREFIX),
+        )
+        rows = await cur.fetchall()
+        if not dry_run:
+            self._sub_cache.clear()
+            async with self._issue_lock:
+                await self._revoke_probe_rows(rows)
+        return {
+            "dry_run": dry_run,
+            "count": len(rows),
+            "peers": [
+                {
+                    "device_label": row["device_label"],
+                    "transport": row["transport"] or TRANSPORT_AWG,
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ],
         }
 
     def _reality_artifacts(

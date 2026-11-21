@@ -45,6 +45,7 @@ from sa_home_bot.vpn.protocol import (
     ACTION_PROXY_LINK,
     ACTION_PROXY_ROTATE_SECRET,
     ACTION_PROXY_USAGE,
+    ACTION_PRUNE_PROBE_PEERS,
     ACTION_REISSUE,
     ACTION_REPORT_CHECK,
     ACTION_REPORT_SERIES,
@@ -431,6 +432,8 @@ class VpnService(
             return await self._reissue(args)
         if action == ACTION_REVOKE:
             return await self._revoke(args)
+        if action == ACTION_PRUNE_PROBE_PEERS:
+            return await self._prune_probe_peers(args)
         if action == ACTION_GET_VLESS:
             return await self._get_vless(args)
         if action == ACTION_GET_SUBSCRIPTION:

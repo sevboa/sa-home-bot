@@ -7,6 +7,7 @@ SERVICE_NAME = "vpn"
 
 GB = 1_000_000_000
 PROBE_CHAT_ID = 0
+PROBE_LABEL_PREFIX = "probe-"
 
 FLOWER_NAMES = (
     "Rose",
@@ -107,6 +108,7 @@ ACTION_PEERS = "peers"
 ACTION_ISSUE = "issue"
 ACTION_REISSUE = "reissue"
 ACTION_REVOKE = "revoke"
+ACTION_PRUNE_PROBE_PEERS = "prune_probe_peers"
 ACTION_GET_VLESS = "get_vless"
 ACTION_GET_SUBSCRIPTION = "get_subscription"
 ACTION_SUB_LINKS = "sub_links"

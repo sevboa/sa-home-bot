@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from getpass import getuser
@@ -27,6 +28,7 @@ from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import resolve_endpoint
 from sa_home_bot.reality import probe_client_config
 from sa_home_bot.vpn import protocol as vpn_protocol
+from sa_home_bot.vpn.service_common import MAX_DEVICE_LABEL_LEN
 
 VPN_PROBE_AWG_CONF_DIR = Path("/etc/amnezia/amneziawg")
 VPN_PROBE_SUDOERS_FILE = "50-sa-home-node-vpn-probe"
@@ -37,6 +39,13 @@ _ISSUE_TRANSPORT = {
     vpn_protocol.PROBE_TRANSPORT_REALITY_XHTTP: vpn_protocol.TRANSPORT_REALITY,
     vpn_protocol.PROBE_TRANSPORT_AWG_ALT: vpn_protocol.TRANSPORT_AWG,
 }
+
+
+def probe_device_label(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> str:
+    observer = settings.node.id or socket.gethostname()
+    suffix = f"-{slot.transport}"
+    room = MAX_DEVICE_LABEL_LEN - len(vpn_protocol.PROBE_LABEL_PREFIX) - len(suffix)
+    return f"{vpn_protocol.PROBE_LABEL_PREFIX}{observer[:room]}{suffix}"
 
 
 @asynccontextmanager
@@ -69,6 +78,7 @@ async def _fetch_probe_config(settings: Settings, slot: vpn_probe_state.ProbeSlo
             raise FixupError(f"vpn@{slot.server} сейчас недоступна — конфиг пробника взять негде")
         issue_args: dict = {
             "chat_id": vpn_protocol.PROBE_CHAT_ID,
+            "device_label": probe_device_label(settings, slot),
             "transport": _ISSUE_TRANSPORT.get(slot.transport, slot.transport),
         }
         if slot.transport == vpn_protocol.PROBE_TRANSPORT_AWG_ALT:
@@ -160,6 +170,24 @@ def _read_if_exists_or_none(path: Path) -> str | None:
         return None
 
 
+def _recorded_label(slot: vpn_probe_state.ProbeSlot) -> str | None:
+    text = _read_if_exists_or_none(vpn_probe_state.label_path(slot))
+    return text.strip() if text else None
+
+
+def _label_current(settings: Settings | None, slot: vpn_probe_state.ProbeSlot) -> bool:
+    return settings is None or _recorded_label(slot) == probe_device_label(settings, slot)
+
+
+def _record_label(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
+    install_root_file(
+        vpn_probe_state.label_path(slot),
+        probe_device_label(settings, slot) + "\n",
+        mode="0644",
+        make_parents=True,
+    )
+
+
 def _awg_conf_check(slot: vpn_probe_state.ProbeSlot, settings: Settings | None) -> bool:
     current = _read_if_exists_or_none(awg_conf_path(slot))
     if current is None:
@@ -185,6 +213,12 @@ def _probe_conf_check(slot: vpn_probe_state.ProbeSlot, settings: Settings | None
     return _reality_conf_check(slot)
 
 
+def _probe_conf_check_with_label(
+    slot: vpn_probe_state.ProbeSlot, settings: Settings | None = None
+) -> bool:
+    return _probe_conf_check(slot, settings) and _label_current(settings, slot)
+
+
 def _awg_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
     if find_executable("awg-quick") is None:
         build_amneziawg_tools()
@@ -192,13 +226,21 @@ def _awg_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None
             raise FixupError("awg-quick не нашёлся после сборки amneziawg-tools")
     conf_path = awg_conf_path(slot)
     existing = read_text_if_exists(conf_path)
-    if existing is not None and not probe_conf_stale(settings, slot, existing):
+    fetched = False
+    if (
+        existing is not None
+        and _label_current(settings, slot)
+        and not probe_conf_stale(settings, slot, existing)
+    ):
         raw_config_text = existing
     else:
         raw_config_text = fetch_probe_config_or_fail(settings, slot, "конфиг")
+        fetched = True
     install_root_file(
         conf_path, prepare_probe_conf(raw_config_text), mode="0600", make_parents=True
     )
+    if fetched:
+        _record_label(settings, slot)
 
 
 def _reality_conf_doc_or_none(text: str | None) -> dict | None:
@@ -223,7 +265,7 @@ def _reality_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> 
     ensure_xray_binary()
     conf_path = vpn_probe_state.reality_conf_path(slot)
     existing_doc = _reality_conf_doc_or_none(_read_if_exists_or_none(conf_path))
-    if existing_doc is not None:
+    if existing_doc is not None and _label_current(settings, slot):
         if _reality_doc_port(existing_doc) != slot.socks_port:
             existing_doc["inbounds"][0]["port"] = slot.socks_port
             install_root_file(
@@ -232,6 +274,7 @@ def _reality_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> 
         return
     conf_text = fetch_probe_config_or_fail(settings, slot, "reality-конфиг")
     install_root_file(conf_path, conf_text, mode="0600", make_parents=True)
+    _record_label(settings, slot)
 
 
 def _probe_conf_apply(settings: Settings, slot: vpn_probe_state.ProbeSlot) -> None:
@@ -246,7 +289,7 @@ def make_vpn_probe_tunnel_conf_fixup(settings: Settings, slot: vpn_probe_state.P
         id=f"vpn-probe-conf-{slot.server}-{slot.transport}",
         title=f"Получить и установить конфиг {slot.transport}-пробника к {slot.server}",
         needed=needs.vpn_check,
-        check=lambda: _probe_conf_check(slot, settings),
+        check=lambda: _probe_conf_check_with_label(slot, settings),
         apply=lambda: _probe_conf_apply(settings, slot),
     )
 
