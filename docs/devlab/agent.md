@@ -528,3 +528,8 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 лежит в `tools.py`. Исключение в коде печатает трассировку в stdout и ставит `failed`; `sys.exit(0)` —
 не сбой. `parse_output` берёт последнюю строку с маркером, вывод — текст без неё; нет маркера или JSON
 битый — `failed=True`, действий нет, вывод целиком. Тесты: `tests/unit/test_devlab_agent_script.py`.
+
+Флаг роли: `code_mode = true` в `[devlab.agent_profiles.<роль>]` (`DevlabProfileConfig.code_mode`, по
+умолчанию выключен). Работник агента переносит его в `AgentSpec.code_mode` тем же `replace`, что и
+`write_prefixes`; задание без роли идёт с `code_mode=False`. Тест:
+`test_profile_fields_reach_toolbox_spec` в `tests/unit/test_devlab_agent_worker.py`.
