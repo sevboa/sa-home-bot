@@ -533,3 +533,25 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 умолчанию выключен). Работник агента переносит его в `AgentSpec.code_mode` тем же `replace`, что и
 `write_prefixes`; задание без роли идёт с `code_mode=False`. Тест:
 `test_profile_fields_reach_toolbox_spec` в `tests/unit/test_devlab_agent_worker.py`.
+
+Инструмент `run_script` (`TOOL_RUN_SCRIPT`, схема `RUN_SCRIPT_DEFINITION` в `tools.py`) есть в
+`ToolBox.definitions` и в обработчиках только при `spec.code_mode`; без флага `call` отвечает «неизвестный
+инструмент», набор и размер схем прежние. `ToolBox._run_script`:
+- снимает `changed_digests` песочницы до и после исполнения; если скрипт сам изменил файлы (`open(..., "w")`,
+  `os.remove`), действия не исполняются, ответ называет пути и велит менять файлы только через
+  `edit()`/`write()`, а изменённое вернуть через `edit_file`/`write_file` (`mutating=True`). Отката нет:
+  содержимого базы у `ToolBox` нет. Прямые записи запрещены, потому что обходят политику путей роли и
+  закрытые пути;
+- таймаут — обычный `ExecResult.summary`, без действий;
+- скрипт упал (`failed`) — вывод с трассировкой, действия не исполняются;
+- иначе действия по порядку через обычные обработчики (`SCRIPT_ACTION_TOOLS`: `edit` → `edit_file`,
+  `write` → `write_file`, `run_tests` → `run_tests`) — с той же проверкой путей и переводом строки.
+  Ответ: вывод скрипта (конец, обрезанный до `output_chars` общим `clip_tail` из `sandbox.py`, тем же, что
+  в `ExecResult.summary`), затем строка «действие N <инструмент>: <итог>» на каждое. Первая ошибка
+  (`ToolError`/`SandboxPathError`) останавливает остальные: они помечаются «пропущено после ошибки».
+  Красный `run_tests` ошибкой не считается.
+- `mutating` — если исполнено хоть одно `edit`/`write`; `green` — из последнего исполненного
+  `run_tests` (иначе `None`), его цикл и считает в красные прогоны.
+
+Ответ `run_script` не начинается с `[код 0]`, чтобы повтор скрипта не получал подсказку «результат зелёный».
+Тесты: `tests/unit/test_devlab_agent_run_script.py`.

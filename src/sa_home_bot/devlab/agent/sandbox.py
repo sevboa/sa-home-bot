@@ -20,6 +20,12 @@ class SandboxPathError(Exception):
     pass
 
 
+def clip_tail(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
+
+
 @dataclass(frozen=True)
 class ExecResult:
     exit_code: int
@@ -31,9 +37,7 @@ class ExecResult:
         return self.exit_code == 0 and not self.timed_out
 
     def summary(self, limit: int, timeout_s: float = 0.0) -> str:
-        text = self.output
-        if len(text) > limit:
-            text = f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
+        text = clip_tail(self.output, limit)
         head = (
             f"[таймаут {timeout_s:g} с]"
             if self.timed_out

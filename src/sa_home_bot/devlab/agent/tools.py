@@ -8,7 +8,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from sa_home_bot.devlab.agent.paths import matches
-from sa_home_bot.devlab.agent.sandbox import Sandbox, SandboxPathError, safe_relative
+from sa_home_bot.devlab.agent.sandbox import Sandbox, SandboxPathError, clip_tail, safe_relative
+from sa_home_bot.devlab.agent.script import (
+    ACTION_EDIT,
+    ACTION_RUN_TESTS,
+    ACTION_WRITE,
+    parse_output,
+    script_argv,
+)
 from sa_home_bot.devlab.agent.spec import AgentSpec
 
 TOOL_LIST_FILES = "list_files"
@@ -21,6 +28,7 @@ TOOL_RUN_TESTS = "run_tests"
 TOOL_FINISH = "finish"
 TOOL_ASK_OWNER = "ask_owner"
 TOOL_STEP_DONE = "step_done"
+TOOL_RUN_SCRIPT = "run_script"
 READ_ONLY_TOOLS = frozenset({TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP})
 MUTATING_TOOLS = frozenset({TOOL_EDIT_FILE, TOOL_WRITE_FILE, TOOL_RUN_COMMAND})
 
@@ -32,6 +40,17 @@ GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
 NEWLINE_ADDED = "; в конец файла дописан перевод строки"
+SCRIPT_ACTION_TOOLS = {
+    ACTION_EDIT: TOOL_EDIT_FILE,
+    ACTION_WRITE: TOOL_WRITE_FILE,
+    ACTION_RUN_TESTS: TOOL_RUN_TESTS,
+}
+SCRIPT_NO_OUTPUT = "(скрипт ничего не напечатал)"
+SCRIPT_ACTIONS_SKIPPED = "действия скрипта не исполнены"
+SCRIPT_DIRECT_WRITES = (
+    "скрипт сам изменил файлы: {paths}; действия не исполнены. Файлы меняй только через "
+    f"edit()/write() в скрипте; изменённое верни через {TOOL_EDIT_FILE}/{TOOL_WRITE_FILE}"
+)
 
 
 def read_max_lines(window_tokens: int) -> int:
@@ -150,6 +169,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     ),
 ]
 
+RUN_SCRIPT_DEFINITION = _schema(
+    TOOL_RUN_SCRIPT,
+    "Исполняет код Python в корне проекта. Доступны ls(prefix), read(path, start, end), "
+    "read_many(paths), grep(pattern, prefix, context), edit(path, old, new), write(path, content), "
+    "run_tests(paths). Нужное печатай через print. Собирай в одном скрипте всё нужное для шага: "
+    "читай сразу все связанные файлы. edit/write/run_tests исполняются после скрипта по порядку.",
+    code=_text("Код Python"),
+)
+
 
 def _argument(args: dict[str, Any], key: str, kind: type, default: Any = None) -> Any:
     value = args.get(key, default)
@@ -191,9 +219,13 @@ class ToolBox:
             TOOL_RUN_COMMAND: self._run_command,
             TOOL_RUN_TESTS: self._run_tests,
         }
+        if spec.code_mode:
+            self._handlers[TOOL_RUN_SCRIPT] = self._run_script
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
+        if self._spec.code_mode:
+            return [*TOOL_DEFINITIONS, RUN_SCRIPT_DEFINITION]
         return TOOL_DEFINITIONS
 
     async def tree_fingerprint(self) -> str:
@@ -329,3 +361,44 @@ class ToolBox:
         result = await self._sandbox.exec(argv, timeout_s)
         text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)
+
+
+    async def _run_script(self, args: dict[str, Any]) -> ToolOutcome:
+        code = _argument(args, "code", str)
+        timeout_s = self._spec.command_timeout_s
+        before = await self._sandbox.changed_digests()
+        result = await self._sandbox.exec(script_argv(code), timeout_s)
+        after = await self._sandbox.changed_digests()
+        touched = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+        if touched:
+            return ToolOutcome(SCRIPT_DIRECT_WRITES.format(paths=", ".join(touched)), mutating=True)
+        if result.timed_out:
+            return ToolOutcome(result.summary(self._spec.output_chars, timeout_s))
+        run = parse_output(result.output)
+        output = clip_tail(run.output, self._spec.output_chars) or SCRIPT_NO_OUTPUT
+        if run.failed:
+            return ToolOutcome(f"{output}\n{SCRIPT_ACTIONS_SKIPPED}" if run.actions else output)
+        lines = [output]
+        mutating = False
+        green: bool | None = None
+        failed = False
+        for number, action in enumerate(run.actions, 1):
+            tool = SCRIPT_ACTION_TOOLS.get(action.tool)
+            label = f"действие {number} {tool or action.tool}"
+            if failed:
+                lines.append(f"{label}: пропущено после ошибки")
+                continue
+            try:
+                if tool is None:
+                    raise ToolError(f"неизвестное действие {action.tool!r}")
+                outcome = await self._handlers[tool](action.args)
+            except (ToolError, SandboxPathError) as exc:
+                lines.append(f"{label}: ошибка: {exc}")
+                failed = True
+                continue
+            if isinstance(outcome, ToolOutcome):
+                green = outcome.green if outcome.green is not None else green
+                outcome = outcome.text
+            mutating = mutating or tool in MUTATING_TOOLS
+            lines.append(f"{label}: {outcome}")
+        return ToolOutcome("\n".join(lines), mutating=mutating, green=green)
