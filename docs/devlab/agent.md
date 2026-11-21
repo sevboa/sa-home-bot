@@ -196,7 +196,7 @@ CLAUDE.md, pyproject.toml, `deploy/`; секреты — `.env`, `config.toml*`,
   `stop` из `poll` отменяет задачу цикла → `abandon` → `stopped` (`agent/<id>` остаётся с частичным результатом,
   `wip/<id>` нет). Каталог задания удаляется после закрытия.
 - Журнал шагов (60.9.6): `agent/trace.py::StepTrace` пишет `<job root>/steps.jsonl` — строка JSON на событие:
-  `{"event": "start", "resumed"}` в начале каждого отрезка, по строке на ответ модели (`step`, `t`, `tokens_in/out`,
+  `{"event": "start", "resumed"}` в начале каждого отрезка, по строке на ответ модели (`step`, `t`, `model_s` — время запроса к модели, `tokens_in/out`,
   `cost_usd`, `window` — оценка окна в токенах после свёртки, `folded` — свёртка сработала, `text` — первые 300 симв.
   ответа без вызовов, `skipped` — число вызовов, пропущенных после `ask_owner` (0, если вопроса не было), `calls`: `name`, `args` — аргументы, длинные значения обрезаны через `context.shrink_arguments`,
   `result` — первые 300 симв. итога и `result_chars`, `rejected` — `finish`/`step_done` отклонён стражем) и
@@ -555,3 +555,12 @@ self._settings.limits.context_tokens)` — и передаёт его в `ToolBo
 
 Ответ `run_script` не начинается с `[код 0]`, чтобы повтор скрипта не получал подсказку «результат зелёный».
 Тесты: `tests/unit/test_devlab_agent_run_script.py`.
+
+Журнал шагов (`steps.jsonl`): у каждого шага `model_s` — время `ChatModel.complete` в секундах по часам цикла
+(`clock`, `time.monotonic`), округлено до 0.01: ожидание GPU и генерация вместе, раздельных времён шлюз пока не
+отдаёт (стенд 2026-11-20: ~15 мин ожидания GPU терялись в общем времени задачи). У вызова `run_script` в `calls`
+добавлены `code_chars` — длина кода (по полным аргументам, до обрезки `shrink_arguments`) и `script_failed`:
+ответ начинается с `SCRIPT_FAILED_HEAD` (`"[скрипт упал]"`, `script.py`), его `ToolBox._run_script` ставит
+первой строкой, когда скрипт упал или маркер действий не разобран. Таймаут скрипта сюда не попадает: у него свой
+заголовок `[таймаут N с]`. Тесты: `test_trace_has_one_entry_per_step_and_cuts_long_arguments`,
+`test_trace_notes_run_script_code_size_and_failure` в `tests/unit/test_devlab_agent.py`.

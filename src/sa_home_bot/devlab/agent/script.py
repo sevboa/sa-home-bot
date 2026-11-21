@@ -13,6 +13,7 @@ ACTION_RUN_TESTS = "run_tests"
 SCRIPT_GREP_MAX_MATCHES = 200
 SCRIPT_GREP_MAX_FILE_BYTES = 200_000
 SCRIPT_FILENAME = "<script>"
+SCRIPT_FAILED_HEAD = "[скрипт упал]"
 
 _PROLOGUE_TEMPLATE = Template(
     '''import json

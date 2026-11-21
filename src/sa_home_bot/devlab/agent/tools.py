@@ -13,6 +13,7 @@ from sa_home_bot.devlab.agent.script import (
     ACTION_EDIT,
     ACTION_RUN_TESTS,
     ACTION_WRITE,
+    SCRIPT_FAILED_HEAD,
     parse_output,
     script_argv,
 )
@@ -377,7 +378,8 @@ class ToolBox:
         run = parse_output(result.output)
         output = clip_tail(run.output, self._spec.output_chars) or SCRIPT_NO_OUTPUT
         if run.failed:
-            return ToolOutcome(f"{output}\n{SCRIPT_ACTIONS_SKIPPED}" if run.actions else output)
+            skipped = f"\n{SCRIPT_ACTIONS_SKIPPED}" if run.actions else ""
+            return ToolOutcome(f"{SCRIPT_FAILED_HEAD}\n{output}{skipped}")
         lines = [output]
         mutating = False
         green: bool | None = None
