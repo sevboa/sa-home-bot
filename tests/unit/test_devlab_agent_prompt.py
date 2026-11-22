@@ -173,16 +173,32 @@ def test_code_mode_second_call_example_uses_variable_from_first():
 
 
 @pytest.mark.parametrize(
-    ("text", "portions", "stale"),
+    ("text", "portions", "stale", "plan"),
     [
-        (CODE_MODE_INTRO, "Пиши порциями", "от трёх до шести"),
-        (CODE_MODE_INTRO_EN, "Write in portions", "three to six"),
-        (CODE_MODE_REMINDER, "пиши порциями", "Порция работы = два вызова"),
-        (CODE_MODE_REMINDER_EN, "write in portions", "A portion of work = two calls"),
+        (CODE_MODE_INTRO, "Пиши порциями", "от трёх до шести", "Код в размышлении не пиши"),
+        (
+            CODE_MODE_INTRO_EN,
+            "Write in portions",
+            "three to six",
+            "Do not write code in your thinking",
+        ),
+        (
+            CODE_MODE_REMINDER,
+            "пиши порциями",
+            "Порция работы = два вызова",
+            "короткий план без кода",
+        ),
+        (
+            CODE_MODE_REMINDER_EN,
+            "write in portions",
+            "A portion of work = two calls",
+            "short plan without code",
+        ),
     ],
 )
-def test_code_mode_texts_write_in_portions(text, portions, stale):
+def test_code_mode_texts_write_in_portions(text, portions, stale, plan):
     assert portions in text
+    assert plan in text
     assert stale not in text
     assert "в том же вызове: правка теста" not in text
 
