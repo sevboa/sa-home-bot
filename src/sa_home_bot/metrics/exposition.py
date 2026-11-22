@@ -83,7 +83,7 @@ class MetricsEndpoint:
             await asyncio.sleep(self._retry_s)
 
     async def _listen(self, host: str) -> None:
-        runner = web.AppRunner(build_metrics_app(self._render))
+        runner = web.AppRunner(build_metrics_app(self._render), access_log=None)
         await runner.setup()
         try:
             await web.TCPSite(runner, host, self._port).start()

@@ -98,6 +98,8 @@ arch-t480 — остальные ноды рой находит сам. Grafana 
 v0.216.1 к целям добавлены пиры из `node-state.json`.
 
 ## Дашборды
+Находка 2026-11-23: матрица VPN одним Status history на все ряды упиралась в «Too many points» (721 точка). Теперь матрица повторяется по серверу (`repeat`), шаг 5 мин (`avg_over_time` по `$__interval`), не больше 96 точек. Журнал доступа aiohttp у `/metrics` выключен: на ion (464 МБ, медленный диск) каждый scrape писал строку в journald.
+
 Каталог `metrics/dashboard.py::CATALOG` (JSON пишет нода-хаб, см. выше) (имя файла → построитель): сейчас `nodes.json` («Ноды», uid
 `sa-home-nodes`; переменная `node` — multi, All). Сводная таблица по нодам (up, CPU %, RAM занято %, диск макс %, steal %, аптайм,
 макс. температура) и графики: CPU %, steal, iowait, load/ядро и load average, RAM занято и доступно, swap,

@@ -19,6 +19,10 @@ PAIR_LEGEND = (
     f"{{{{{protocol.LABEL_OBSERVER}}}}} → {{{{{protocol.LABEL_SERVER}}}}} · "
     f"{{{{{protocol.LABEL_TRANSPORT}}}}}"
 )
+MATRIX_LEGEND = f"{{{{{protocol.LABEL_OBSERVER}}}}} · {{{{{protocol.LABEL_TRANSPORT}}}}}"
+MATRIX_HEIGHT = 12
+MATRIX_INTERVAL = "5m"
+MATRIX_MAX_POINTS = 96
 PAIR_LABELS = f"{protocol.LABEL_OBSERVER}, {protocol.LABEL_SERVER}, {protocol.LABEL_TRANSPORT}"
 RATIO_STEPS = [
     {"color": "red", "value": None},
@@ -51,9 +55,13 @@ def _grid(x: int, y: int, w: int, h: int) -> dict[str, int]:
 def _matrix(title: str, selection: str, y: int) -> dict[str, Any]:
     return {
         "type": "status-history",
-        "title": title,
+        "title": f"{title} · ${protocol.LABEL_SERVER}",
         "datasource": DATASOURCE,
-        "gridPos": _grid(0, y, 24, 10),
+        "gridPos": _grid(0, y, 24, MATRIX_HEIGHT),
+        "repeat": protocol.LABEL_SERVER,
+        "repeatDirection": "v",
+        "interval": MATRIX_INTERVAL,
+        "maxDataPoints": MATRIX_MAX_POINTS,
         "fieldConfig": {
             "defaults": {
                 "min": 0,
@@ -72,7 +80,11 @@ def _matrix(title: str, selection: str, y: int) -> dict[str, Any]:
             "legend": {"showLegend": False},
         },
         "targets": [
-            target(f"avg by ({PAIR_LABELS}) ({OK_RATIO}{{{selection}}})", PAIR_LEGEND, "A")
+            target(
+                f"avg by ({PAIR_LABELS}) (avg_over_time({OK_RATIO}{{{selection}}}[$__interval]))",
+                MATRIX_LEGEND,
+                "A",
+            )
         ],
     }
 
@@ -147,16 +159,16 @@ def _broken_table(y: int) -> dict[str, Any]:
 
 def vpn_dashboard() -> dict[str, Any]:
     panels: list[dict[str, Any]] = [
-        _matrix("Матрица проверок: наблюдатель → сервер · способ", SELECTION, 0),
-        _row("Из России", 10),
-        _matrix("Матрица проверок из России", RUSSIA_SELECTION, 11),
-        _row("Доступность и задержка", 21),
+        _matrix("Матрица проверок", SELECTION, 0),
+        _row("Из России", 12),
+        _matrix("Из России", RUSSIA_SELECTION, 13),
+        _row("Доступность и задержка", 25),
         _timeseries(
             "Доступность по способам и наблюдателям (15 мин)",
             f"avg by ({protocol.LABEL_OBSERVER}, {protocol.LABEL_TRANSPORT}) "
             f"(avg_over_time({OK_RATIO}{{{SELECTION}}}[15m]))",
             f"{{{{{protocol.LABEL_OBSERVER}}}}} · {{{{{protocol.LABEL_TRANSPORT}}}}}",
-            (0, 22),
+            (0, 26),
             "percentunit",
             percent=True,
         ),
@@ -165,7 +177,7 @@ def vpn_dashboard() -> dict[str, Any]:
             f"avg by ({protocol.LABEL_SERVER}, {protocol.LABEL_TRANSPORT}) "
             f"(avg_over_time({OK_RATIO}{{{SELECTION}}}[15m]))",
             f"{{{{{protocol.LABEL_SERVER}}}}} · {{{{{protocol.LABEL_TRANSPORT}}}}}",
-            (12, 22),
+            (12, 26),
             "percentunit",
             percent=True,
         ),
@@ -173,7 +185,7 @@ def vpn_dashboard() -> dict[str, Any]:
             "Задержка проверок, мс",
             f"avg by ({PAIR_LABELS}) ({protocol.METRIC_VPN_CHECK_LATENCY_MS}{{{SELECTION}}})",
             PAIR_LEGEND,
-            (0, 30),
+            (0, 34),
             "ms",
             percent=False,
         ),
@@ -181,11 +193,11 @@ def vpn_dashboard() -> dict[str, Any]:
             "Уровень связки (2 работает, 1 частично, 0 нет)",
             f"{protocol.METRIC_VPN_LINK_LEVEL}{{{SELECTION}}}",
             PAIR_LEGEND,
-            (12, 30),
+            (12, 34),
             "short",
             percent=False,
         ),
-        _broken_table(38),
+        _broken_table(42),
     ]
     number_panels(panels)
     return {
