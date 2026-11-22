@@ -24,14 +24,15 @@ from sa_home_bot.devlab.agent.model import (
     PaidFreeModelError,
     ToolCall,
 )
-from sa_home_bot.devlab.agent.sandbox import OK_HEAD
 from sa_home_bot.devlab.agent.script import SCRIPT_FAILED_HEAD
 from sa_home_bot.devlab.agent.tools import (
     READ_ONLY_TOOLS,
     TOOL_ASK_OWNER,
+    TOOL_EDIT_FILE,
     TOOL_EXECUTE,
     TOOL_FINISH,
     TOOL_STEP_DONE,
+    TOOL_WRITE_FILE,
     ControlRequest,
     ToolBox,
     ToolError,
@@ -85,27 +86,22 @@ ASK_SKIPPED = "не выполнено: задан вопрос владельц
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
-REPEAT_HINT = "\n\nэтот вызов уже был, результат тот же, попробуй иначе"
-REPEAT_GREEN_HINT = (
-    "\n\nэтот вызов уже был, результат тот же и зелёный: не повторяй проверку; "
-    f"если все шаги сделаны, вызови {TOOL_FINISH}"
+REPEAT_TURN = (
+    "Этот вызов ты уже делал (вызов {number}), результат был выше и не изменился. "
+    "Прочитанное держи в переменных. Следующий вызов должен изменить файл "
+    f"({TOOL_EDIT_FILE}/{TOOL_WRITE_FILE}), запустить проверку или вызвать {TOOL_FINISH}()/"
+    f"{TOOL_ASK_OWNER}(). Если не знаешь, что править, — {TOOL_ASK_OWNER}()."
 )
-REPEAT_READ_HINT = (
-    "\n\nэтот фрагмент ты уже читал, и он не менялся: не перечитывай его, используй то, что узнал, "
-    f"и переходи к правке, проверке или {TOOL_FINISH}; ещё один такой же вызов остановит задание"
-)
-CODE_REPEAT_GREEN_HINT = (
-    "\n\nэтот вызов уже был, результат тот же и зелёный: не повторяй проверку; "
-    "если все шаги сделаны, вызови finish() в execute"
-)
-CODE_REPEAT_READ_HINT = (
-    "\n\nэтот фрагмент ты уже читал, и он не менялся: не перечитывай его, возьми из переменной "
-    "прошлого вызова (она сохраняется, если не было таймаута), и переходи к правке, проверке "
-    "или finish(); ещё один такой же вызов остановит задание"
+CODE_REPEAT_TURN = (
+    "Этот вызов ты уже делал (вызов {number}), результат был выше и не изменился. "
+    "Прочитанное держи в переменных. Следующий вызов execute должен изменить файл "
+    "(edit/write), запустить проверку или вызвать finish()/ask_owner(). "
+    "Если не знаешь, что править, — ask_owner()."
 )
 REPEAT_REASON = "модель повторяет {call}"
 REPEAT_SKIPPED = "не выполнено: стоп-кран на повторах"
 RECENT_CALLS_WINDOW = 6
+REPEAT_TURNS = 2
 OVERFLOW_REASON = (
     "{pinned}, схемы инструментов {tools} ток.; бюджет диалога {budget} ток. "
     "при окне {window} ток.: "
@@ -178,17 +174,13 @@ class Segment:
     calls: list[dict[str, Any]] = field(default_factory=list)
     skipped: int = 0
     recent_calls: list[tuple[str, str]] = field(default_factory=list)
+    first_numbers: dict[tuple[str, str], int] = field(default_factory=dict)
+    repeated: int = 0
+    turn_number: int = 0
+    turn_message: dict[str, Any] | None = None
     repeat_reason: str | None = None
     tree_fingerprint: str | None = None
     context_tokens: int = 0
-
-
-def _repeat_hint(name: str, text: str, code_mode: bool = False) -> str:
-    if name in READ_ONLY_TOOLS:
-        return CODE_REPEAT_READ_HINT if code_mode else REPEAT_READ_HINT
-    if not text.startswith(OK_HEAD):
-        return REPEAT_HINT
-    return CODE_REPEAT_GREEN_HINT if code_mode else REPEAT_GREEN_HINT
 
 
 def _rejected(name: str, text: str) -> bool:
@@ -382,6 +374,7 @@ class AgentLoop:
             seg.calls = []
             seg.skipped = 0
             seg.repeat_reason = None
+            seg.repeated = 0
             asked_at = self._clock()
             quick = bool(limits.quick_params) and seg.steps <= limits.quick_steps
             try:
@@ -414,8 +407,17 @@ class AgentLoop:
                 messages.append({"role": "user", "content": nudge})
                 continue
             seg.idle = 0
+            reply_index = len(messages) - 1
             finished = await self._handle_calls(reply.tool_calls, seg)
             self._emit_step(seg, reply, window, window < before, model_s, quick)
+            if (
+                finished is None
+                and seg.repeat_reason is None
+                and seg.asked is None
+                and seg.repeated == len(reply.tool_calls)
+            ):
+                self._collapse_repeat(messages, reply_index, seg)
+                continue
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
             if seg.repeat_reason is not None:
@@ -428,6 +430,14 @@ class AgentLoop:
                     reason=question,
                     dialog=Dialog(messages=messages, question=question, call_id=call_id),
                 )
+
+    def _collapse_repeat(self, messages: list[dict[str, Any]], index: int, seg: Segment) -> None:
+        del messages[index:]
+        if seg.turn_message is not None and messages and messages[-1] is seg.turn_message:
+            messages.pop()
+        template = CODE_REPEAT_TURN if self._tools.code_mode else REPEAT_TURN
+        seg.turn_message = {"role": "user", "content": template.format(number=seg.turn_number)}
+        messages.append(seg.turn_message)
 
     async def _handle_calls(self, calls: tuple[ToolCall, ...], seg: Segment) -> str | None:
         for index, call in enumerate(calls):
@@ -486,31 +496,37 @@ class AgentLoop:
             return await self._step_done(args, seg), None
         if call.name == TOOL_ASK_OWNER:
             return self._ask(args, seg), None
-        repeats = await self._count_repeats(call, args, seg)
-        if repeats + 1 >= self._limits.max_repeats:
-            seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
-            return REPEAT_SKIPPED, None
+        repeats, entry = await self._count_repeats(call, args, seg)
+        if repeats and entry in seg.first_numbers:
+            if repeats + 1 >= self._limits.max_repeats + REPEAT_TURNS:
+                seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
+                return REPEAT_SKIPPED, None
+            seg.repeated += 1
+            seg.turn_number = seg.first_numbers[entry]
+            template = CODE_REPEAT_TURN if self._tools.code_mode else REPEAT_TURN
+            return template.format(number=seg.turn_number), None
         text, summary = await self._run_tool(call, args, seg)
         if call.name not in READ_ONLY_TOOLS:
             seg.tree_fingerprint = None
-        if repeats:
-            text += _repeat_hint(call.name, text, self._tools.code_mode)
+        number = seg.steps
         if call.name == TOOL_EXECUTE:
             self._script_calls += 1
-            counter = CODE_COUNTER.format(
-                number=self._script_calls, thousands=round(seg.context_tokens / 1000)
-            )
+            number = self._script_calls
+            counter = CODE_COUNTER.format(number=number, thousands=round(seg.context_tokens / 1000))
             text = f"{text}\n{counter}" if text else counter
+        seg.first_numbers[entry] = number
         return text, summary
 
-    async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:
+    async def _count_repeats(
+        self, call: ToolCall, args: dict[str, Any], seg: Segment
+    ) -> tuple[int, tuple[str, str]]:
         key = f"{call.name} {json.dumps(args, sort_keys=True, ensure_ascii=False)}"
         if seg.tree_fingerprint is None:
             seg.tree_fingerprint = await self._tools.tree_fingerprint()
         entry = (key, seg.tree_fingerprint)
         repeats = seg.recent_calls.count(entry)
         seg.recent_calls = [*seg.recent_calls, entry][-RECENT_CALLS_WINDOW:]
-        return repeats
+        return repeats, entry
 
     async def _run_tool(
         self, call: ToolCall, args: dict[str, Any], seg: Segment
