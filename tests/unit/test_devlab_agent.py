@@ -537,6 +537,31 @@ async def test_quick_params_only_on_first_steps(tmp_path, quick_steps, quick_par
 
 
 @pytest.mark.parametrize(
+    ("params", "quick_params", "expected"),
+    [
+        ({"reasoning": {"enabled": True}}, {}, [{"reasoning": {"enabled": True}}] * 3),
+        (
+            {"reasoning": {"enabled": True}, "temperature": 1.0},
+            {"reasoning": {"enabled": False}},
+            [
+                {"reasoning": {"enabled": False}, "temperature": 1.0},
+                {"reasoning": {"enabled": True}, "temperature": 1.0},
+                {"reasoning": {"enabled": True}, "temperature": 1.0},
+            ],
+        ),
+    ],
+)
+async def test_profile_params_ride_on_every_step(tmp_path, params, quick_params, expected):
+    model = ExtraRecordingModel(
+        *(tool_reply(TOOL_GREP, f"g{n}", pattern=f"p{n}") for n in range(3))
+    )
+    limits = AgentLimits(max_steps=3, quick_steps=1, quick_params=quick_params, params=params)
+    loop, _ = make_loop(tmp_path, model, limits=limits)
+    await loop.run("правила", "задача")
+    assert model.extras == expected
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         {REASONING_FIELD: "план"},

@@ -141,6 +141,7 @@ class AgentLimits:
     keep_recent: int = 4
     quick_steps: int = 0
     quick_params: dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -377,12 +378,11 @@ class AgentLoop:
             seg.repeated = 0
             asked_at = self._clock()
             quick = bool(limits.quick_params) and seg.steps <= limits.quick_steps
+            extra = {**limits.params, **(limits.quick_params if quick else {})}
             try:
                 reply = await (
-                    self._model.complete(
-                        messages, self._tools.definitions, extra=limits.quick_params
-                    )
-                    if quick
+                    self._model.complete(messages, self._tools.definitions, extra=extra)
+                    if extra
                     else self._model.complete(messages, self._tools.definitions)
                 )
             except PaidFreeModelError as exc:
