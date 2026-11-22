@@ -105,6 +105,9 @@ class PodmanSandbox:
     async def list_files(self) -> list[str]:
         return [rel for rel in await self._local.list_files() if not self._is_secret(rel)]
 
+    async def base_bytes(self, path: str) -> bytes | None:
+        return await self._local.base_bytes(self._checked_path(path))
+
     async def changed_paths(self) -> list[str]:
         return await self._local.changed_paths()
 

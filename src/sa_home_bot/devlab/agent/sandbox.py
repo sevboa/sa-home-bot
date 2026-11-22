@@ -265,6 +265,8 @@ class Sandbox(Protocol):
 
     async def diff(self, prefixes: tuple[str, ...] = ()) -> str: ...
 
+    async def base_bytes(self, path: str) -> bytes | None: ...
+
     async def changed_paths(self) -> list[str]: ...
 
     async def changed_digests(self) -> dict[str, str]: ...
@@ -374,6 +376,12 @@ class LocalSandbox:
         changed = {rel: d for rel, d in current.items() if self._baseline.get(rel) != d}
         removed = {rel: "" for rel in self._baseline.keys() - current.keys()}
         return {**changed, **removed}
+
+    async def base_bytes(self, path: str) -> bytes | None:
+        if self._base_root is None:
+            return None
+        target = self._base_root / safe_relative(path)
+        return target.read_bytes() if target.is_file() else None
 
     async def changed_paths(self) -> list[str]:
         return sorted(await self.changed_digests())

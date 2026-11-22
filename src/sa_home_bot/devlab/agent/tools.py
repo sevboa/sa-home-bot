@@ -5,6 +5,7 @@ import json
 import re
 import shlex
 import tokenize
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -67,8 +68,8 @@ GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
 NEWLINE_ADDED = "; в конец файла дописан перевод строки"
 SCRIPT_NO_OUTPUT = (
-    "(скрипт ничего не напечатал: значения выражений не в последней строке не выводятся — "
-    "оберни в print())"
+    "(скрипт ничего не напечатал и последней строкой не было выражения: значения выражений "
+    "не в последней строке не выводятся — оберни в print())"
 )
 SCRIPT_STATE_RESET = (
     "[состояние сброшено: процесс скрипта перезапущен, переменные и импорты прошлых вызовов "
@@ -225,9 +226,10 @@ EXECUTE_DEFINITION = _schema(
     "как обычный Python. Виден вывод print() и значение последнего выражения, как в Jupyter; "
     f"до {SCRIPT_OUTPUT_CHARS} симв. (начало). Процесс один на задание: переменные, импорты и "
     "функции сохраняются между вызовами, как в Jupyter; прочитанное держи в переменной и не "
-    "перечитывай. После таймаута или падения процесса состояние сбрасывается. Код, которому "
-    "нужен ещё не увиденный вывод, — в следующий вызов, всё остальное — в этот. "
-    "finish() и ask_owner() завершают скрипт; step_done() не завершает: принят — скрипт "
+    "перечитывай. После таймаута или падения процесса состояние сбрасывается. Новый вызов — "
+    "только когда нужно суждение о ещё не виденном тексте; остальное решай условием в этом. "
+    "finish() закрывает все шаги задания; finish() и ask_owner() завершают скрипт; "
+    "step_done() необязателен и не завершает: принят — скрипт "
     "идёт дальше, отклонён — StepRejected с причиной и остановка. Функции:\n"
     + api_stubs(""),
     code=_text("Код Python"),
@@ -474,6 +476,48 @@ class ToolBox:
             ]
         return lines
 
+    async def _new_comment_lines(self, args: dict[str, Any]) -> list[str]:
+        path, old, new = args.get("path"), args.get("old"), args.get("new")
+        if not (isinstance(path, str) and isinstance(new, str)):
+            return []
+        if not (path.endswith(".py") and path.startswith(COMMENTS_ROOTS)):
+            return []
+        if await self._sandbox.read_bytes(COMMENTS_RULE_MARKER) is None:
+            return []
+        try:
+            found = comment_findings(new)
+            known = Counter(text for _, text in comment_findings(old or ""))
+        except (SyntaxError, tokenize.TokenError):
+            return []
+        lines = []
+        for line, text in found:
+            if known.get(text):
+                known[text] -= 1
+                continue
+            lines.append(
+                COMMENTS_FORBIDDEN.format(path=path, line=line, text=text[:COMMENTS_TEXT_CHARS])
+            )
+        return lines
+
+    async def _failed_in_base(self, args: dict[str, Any]) -> bool:
+        failed = args.get("failed")
+        if not isinstance(failed, list):
+            return False
+        for item in failed:
+            if not (isinstance(item, list) and len(item) == 2):
+                continue
+            if not all(isinstance(part, str) for part in item):
+                continue
+            path, name = item
+            try:
+                data = await self._sandbox.base_bytes(path)
+            except SandboxPathError:
+                continue
+            pattern = rf"def {re.escape(name)}\("
+            if data is not None and re.search(pattern, data.decode(errors="replace")):
+                return True
+        return False
+
     async def _serve_call(
         self, request: dict[str, Any], gate: StepGate | None, accepted: list[str]
     ) -> dict[str, Any]:
@@ -490,6 +534,10 @@ class ToolBox:
         if name == "diff":
             text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
+        if name == "check_comments" and isinstance(args, dict):
+            return {"ok": True, "value": await self._new_comment_lines(args)}
+        if name == "base_tests" and isinstance(args, dict):
+            return {"ok": True, "value": await self._failed_in_base(args)}
         if name == "comments":
             return {"ok": True, "value": await self._comment_lines()}
         return {"ok": False, "reason": CALL_UNKNOWN.format(name=name)}

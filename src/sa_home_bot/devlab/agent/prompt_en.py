@@ -6,18 +6,17 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2, fix load, run tests, close steps 1-2
+SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, steps 1-2
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+red = run_tests(["tests/test_a.py"])
+print("before fix:", "red" if not red.ok else "green: the test does not catch the bug")
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
-print(r)
-if r.ok:
-    step_done("1-2: load returns 2, test is green")"""
+print(r)"""
 SCRIPT_FINAL_EXAMPLE_EN = """# Intent: docs note, step 3, ruff and finish
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
-step_done("3: docs/pkg.md updated")
 r = run("ruff check src/pkg/a.py tests/test_a.py")
 print(r)
 if r.ok:
@@ -38,14 +37,14 @@ CODE_MODE_INTRO_EN = (
     "## Cost of a call\n"
     "Every execute call is a full round trip: you re-read the whole conversation and write a "
     "new reply. That is the main cost in time and budget. Code inside a call is almost free: "
-    "five read() calls, three edit() calls, tests, ruff and step_done() in one script cost less "
+    "five read() calls, three edit() calls, tests and ruff in one script cost less "
     "than two calls.\n"
     "Make a new call only when the next action needs your judgment about text you have not seen "
     "yet: what exactly to edit after reading a file, how to fix a failing test. Anything a "
     "condition can decide, decide with a condition in the same script: if r.ok: go on, "
     "else print(r). Never come back just to look at a green result.\n"
-    "A typical task step is two calls: read; then edit, check and close the step. A three-step "
-    "task takes about six calls.\n"
+    "A typical portion of work is two calls: read; then edit and check. A three-step "
+    "task takes three to six calls, as in the example below.\n"
     "\n"
     "## How code runs\n"
     "- Like plain Python, immediately and in order: edit() and write() change the file at once. "
@@ -59,21 +58,23 @@ CODE_MODE_INTRO_EN = (
     "timeout or a crash the state is reset and the output says so; files on disk stay.\n"
     "- You see what print() printed and the value of the last expression, as in Jupyter. Output "
     f"longer than {SCRIPT_OUTPUT_CHARS} chars is cut; you see the beginning.\n"
-    "- Long file (over ~150 lines): do not print it whole and do not page through it: "
+    "- Output is cut by characters, not lines: a file over ~6000 chars (about 150 lines) - "
+    "do not print it whole and do not page through it: "
     "grep(pattern, path, context=5) shows line numbers, then read(path, start, end).\n"
-    "- Do not re-read a file after edit(): EditError reports failures. diff() shows all your "
-    "changes.\n"
+    "- Do not re-read a file after edit(): EditError reports failures. Use diff() only if you "
+    "do not remember what you changed. If the last run is green and only docs/ changed since, "
+    "call finish() at once: no rerun, no diff().\n"
     "- Processes only via run() and run_tests(); subprocess and os.system are forbidden.\n"
     "\n"
     "## Steps and finishing\n"
-    "- step_done(\"N: summary\") closes a numbered step: the guard immediately runs the changed "
-    "tests. Accepted: the function returns and the script goes on. Rejected: it raises "
+    "- finish(\"summary\") closes all steps of the task and ends it; put it in the same call as "
+    "the last edits, tests and ruff. The guard checks the diff, tests and project rules; a "
+    "rejection comes back as the output of that call.\n"
+    "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
+    "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
-    "- A step \"write a test that fails for now\" and the step that fixes the code are done in "
-    "one call and closed together: step_done(\"1-2: ...\").\n"
-    "- finish(\"summary\") ends the task; put it in the same call as the last step_done() and "
-    "ruff. The guard checks the diff, tests and project rules; a rejection comes back as the "
-    "output of that call.\n"
+    "- If a step needs a red test, verify it yourself in the same call: edit the test, "
+    "red = run_tests(...), fix the code, run_tests() - as in call 2 of the example.\n"
     "- ask_owner(\"question\") only when the decision belongs to the owner; the answer comes as "
     "the next message.\n"
     "\n"
@@ -86,7 +87,7 @@ CODE_MODE_INTRO_EN = (
     "Call 2 - lines for edit() come from the variables of call 1:\n"
     f"{SCRIPT_EDIT_EXAMPLE_EN}\n"
     "\n"
-    "Call 3 - docs, checks and finish in one script:\n"
+    "Call 3 - docs, checks and finish in one script (finish closes steps 1-3):\n"
     f"{SCRIPT_FINAL_EXAMPLE_EN}\n"
     "\n"
     "If a call failed (EditError, red test, guard rejection), the next call fixes exactly that "
@@ -95,13 +96,17 @@ CODE_MODE_INTRO_EN = (
     "## Common mistakes\n"
     "- An existing test fails after your edit: most likely the edit is wrong, not the test. "
     "Check the task and fix the code; change an existing test only if the task says so.\n"
-    "- Comments and docstrings in .py files under src/ and tests/ are forbidden; do not write "
-    "them at all. run_tests() checks changed files for comments itself. Comments inside execute "
-    "code are fine.\n"
+    "- Comments and docstrings in .py files under src/ and tests/ are forbidden. The intent "
+    "comment is only the first line of the script itself; text that goes into a file "
+    "(new_test = '''...''', edit() and write() arguments) has no # and no docstrings. "
+    "run_tests() checks changed files for comments itself.\n"
+    "- A docs/ note is usually appended to the end of the file, as in call 3 of the example; "
+    "for a section use grep(heading, path, context=3), not reading the whole file.\n"
+    "- ruff checks line length: wrap long signatures, tuples and parametrize right away.\n"
     "- Run tests with run_tests(paths), not run(\"python -m pytest ...\").\n"
     "\n"
-    "Every reply is an execute call. Start the code with a comment stating the intent: what this "
-    "whole call will do."
+    "Every reply is a tool call, usually execute. Start the code with a comment stating "
+    "the intent: what this whole call will do."
 )
 CODE_MODE_SETTING_EN = (
     "- Today is {today}. Put this date on new findings in `docs/`.\n"
@@ -114,9 +119,9 @@ CODE_MODE_SETTING_EN = (
 CODE_MODE_REMINDER_EN = (
     "[Reminder] An execute call is expensive, code inside it is cheap. Make a new call only "
     "when you need judgment about text you have not seen; decide the rest with if r.ok: in the "
-    "same script. A step = two calls: read into variables; then edit() from the variables, "
-    "run_tests(), step_done(\"N: summary\"). Last step: edits, run_tests(), step_done(), "
-    "run(\"ruff check ...\") and finish(\"summary\") - in one call."
+    "same script. A portion of work = two calls: read into variables; then edit() from the "
+    "variables and run_tests(). Finish: last edits, run_tests(), run(\"ruff check ...\") and "
+    "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
 )
 GLM_SETTING_TITLE_EN = "## Setting"
 RULES_TITLE_EN = "Project rules (mandatory):"
@@ -132,10 +137,12 @@ EXECUTE_DESCRIPTION_EN = (
     "order, like plain Python. You see print() output and the value of the last expression, as "
     f"in Jupyter; up to {SCRIPT_OUTPUT_CHARS} chars (the beginning). One process per task: "
     "variables, imports and functions persist between calls, as in Jupyter; keep what you read "
-    "in a variable and do not re-read it. After a timeout or a crash the state is reset. Code "
-    "that needs output you have not seen yet goes in the next call, everything else in this "
-    "one. finish() and ask_owner() end the script; step_done() does not: accepted - the script "
-    "goes on, rejected - StepRejected with the reason and a stop. Functions:\n"
+    "in a variable and do not re-read it. After a timeout or a crash the state is reset. Make a "
+    "new call only when you need judgment about text you have not seen; decide the rest with a "
+    "condition in this one. finish() closes all task steps; finish() and ask_owner() end the "
+    "script; step_done() is optional and does not: accepted - the script goes on, rejected - "
+    "StepRejected with the reason and a stop. "
+    "Functions:\n"
 )
 EXECUTE_CODE_EN = "Python code"
 SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
@@ -170,12 +177,14 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
         "edit",
         "def edit(path: str, old: str, new: str) -> None: ...",
         "replace the single occurrence of old with new in the file at once; 0 or more than 1 "
-        "occurrences, or a closed path - EditError",
+        "occurrences (the text lists match line numbers), a closed path, or new comments or "
+        "docstrings in .py under src/ and tests/ - EditError, the edit is not applied",
     ),
     (
         "write",
         "def write(path: str, content: str) -> None: ...",
-        "create or overwrite a file at once; a closed path - EditError",
+        "create or overwrite a file at once; a closed path or new comments or docstrings in .py "
+        "under src/ and tests/ - EditError, the edit is not applied",
     ),
     (
         "run",
@@ -185,12 +194,15 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
     (
         "run_tests",
         "def run_tests(paths: list[str]) -> Result: ...",
-        "pytest over a list of test paths (path::test_name works); returns Result",
+        "pytest over a list of test paths (path::test_name works); returns Result; if a test "
+        "that existed in the task base fails, output gets a line telling to check the code, "
+        "not the test",
     ),
     (
         "step_done",
         "def step_done(text: str) -> None: ...",
-        "close a numbered task step with summary text; the guard runs the changed tests; "
+        "optional intermediate check of a step with summary text (finish() closes all steps "
+        "itself); the guard runs the changed tests; "
         "accepted - control returns and the script goes on; rejected - StepRejected with the "
         "reason, the script stops",
     ),

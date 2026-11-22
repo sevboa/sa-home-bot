@@ -49,13 +49,15 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         "edit",
         "def edit(path: str, old: str, new: str) -> None: ...",
-        "заменить в файле единственное вхождение old на new сразу; 0 или больше 1 вхождения, "
-        "закрытый путь — EditError",
+        "заменить в файле единственное вхождение old на new сразу; 0 или больше 1 вхождения "
+        "(в тексте номера строк совпадений), закрытый путь, новые комментарии или докстринги "
+        "в .py под src/ и tests/ — EditError, правка не применяется",
     ),
     (
         "write",
         "def write(path: str, content: str) -> None: ...",
-        "создать или перезаписать файл сразу; закрытый путь — EditError",
+        "создать или перезаписать файл сразу; закрытый путь или новые комментарии и докстринги "
+        "в .py под src/ и tests/ — EditError, правка не применяется",
     ),
     (
         "run",
@@ -65,12 +67,14 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         "run_tests",
         "def run_tests(paths: list[str]) -> Result: ...",
-        "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result",
+        "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result; если упал тест, "
+        "существовавший в базе задания, в output строка «сначала проверь код, а не тест»",
     ),
     (
         CONTROL_STEP_DONE,
         "def step_done(text: str) -> None: ...",
-        "закрыть пронумерованный шаг задания с итогом text; страж прогонит изменённые тесты; "
+        "необязательная промежуточная проверка шага с итогом text (finish() сам закрывает все "
+        "шаги); страж прогонит изменённые тесты; "
         "принят — возвращает управление, скрипт идёт дальше; не принят — StepRejected с "
         "причиной, скрипт останавливается",
     ),
@@ -117,18 +121,17 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2, правка load, прогон, закрыть шаги 1–2
+SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2 (сначала красный), правка load, шаги 1–2
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+red = run_tests(["tests/test_a.py"])
+print("до правки:", "красный" if not red.ok else "зелёный: тест не ловит ошибку")
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
-print(r)
-if r.ok:
-    step_done("1–2: load возвращает 2, тест зелёный")"""
+print(r)"""
 SCRIPT_FINAL_EXAMPLE = """# Намерение: запись в docs, шаг 3, ruff и финал
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
-step_done("3: docs/pkg.md дополнен")
 r = run("ruff check src/pkg/a.py tests/test_a.py")
 print(r)
 if r.ok:
@@ -313,6 +316,7 @@ def _stats():
 
 
 _BASE = _stats()
+_BASE_TEST_NOTE = "упал тест, существовавший до твоих правок: сначала проверь код, а не тест"
 
 
 def ls(prefix=""):
@@ -406,6 +410,15 @@ def _store(relative, data):
         handle.write(data)
 
 
+def _check_comments(relative, before, after):
+    if not relative.endswith(".py") or not relative.startswith(("src/", "tests/")):
+        return
+    reply = _call("check_comments", {"path": relative, "old": before, "new": after})
+    notes = reply.get("value") if reply.get("ok") else None
+    if isinstance(notes, list) and notes:
+        raise EditError("\n".join(map(str, notes)) + "\n(правка не применена)")
+
+
 def edit(path, old, new):
     relative = _writable(path)
     if not isinstance(old, str) or not isinstance(new, str):
@@ -413,16 +426,32 @@ def edit(path, old, new):
     text = _text(relative)
     found = text.count(old)
     if not old or found != 1:
+        where = ""
+        if found > 1:
+            lines = []
+            position = text.find(old)
+            while position != -1 and len(lines) < 5:
+                lines.append(str(text.count("\n", 0, position) + 1))
+                position = text.find(old, position + 1)
+            where = f" (строки {', '.join(lines)})"
         raise EditError(
-            f"фрагмент old найден {found} раз в {relative}: нужно ровно один, добавь контекста"
+            f"фрагмент old найден {found} раз в {relative}{where}: нужно ровно один, "
+            "добавь контекста"
         )
-    _store(relative, text.replace(old, new, 1).encode())
+    updated = text.replace(old, new, 1)
+    _check_comments(relative, text, updated)
+    _store(relative, updated.encode())
 
 
 def write(path, content):
     relative = _writable(path)
     if not isinstance(content, str):
         raise EditError("content должен быть строкой")
+    try:
+        previous = _text(relative)
+    except EditError:
+        previous = None
+    _check_comments(relative, previous, content)
     _store(relative, content.encode())
 
 
@@ -495,6 +524,12 @@ def run_tests(paths):
     if isinstance(notes, list) and notes:
         output = "\n".join(part for part in [result.output, *map(str, notes)] if part)
         result = Result(result.code or 1, output)
+    failed = [
+        [match.group(1), match.group(2)]
+        for match in re.finditer(r"^FAILED (\S+?)::(?:\S+::)?([^\s\[]+)", result.output, re.M)
+    ]
+    if failed and _call("base_tests", {"failed": failed}).get("value") is True:
+        result = Result(result.code, f"{result.output}\n{_BASE_TEST_NOTE}")
     _STATE["green"] = result.ok
     return result
 
@@ -532,7 +567,9 @@ def _finalize():
 
 _WORKER = r'''
 def _show(value):
-    if isinstance(value, str):
+    if value in ("", [], {}):
+        print(repr(value))
+    elif isinstance(value, str):
         print(value)
     elif isinstance(value, list) and all(isinstance(item, str) for item in value):
         print("\n".join(value))
