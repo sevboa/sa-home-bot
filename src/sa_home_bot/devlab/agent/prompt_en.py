@@ -6,15 +6,17 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2, fix load, run tests, close steps 1-2
+SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, close steps 1-2
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+red = run_tests(["tests/test_a.py"])
+print("before fix:", "red" if not red.ok else "green: the test does not catch the bug")
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
 print(r)
-if r.ok:
-    step_done("1-2: load returns 2, test is green")"""
+if r.ok and not red.ok:
+    step_done("1-2: the test caught the bug, load returns 2")"""
 SCRIPT_FINAL_EXAMPLE_EN = """# Intent: docs note, step 3, ruff and finish
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
 step_done("3: docs/pkg.md updated")
@@ -45,7 +47,7 @@ CODE_MODE_INTRO_EN = (
     "condition can decide, decide with a condition in the same script: if r.ok: go on, "
     "else print(r). Never come back just to look at a green result.\n"
     "A typical task step is two calls: read; then edit, check and close the step. A three-step "
-    "task takes about six calls.\n"
+    "task takes three to six calls, as in the example below.\n"
     "\n"
     "## How code runs\n"
     "- Like plain Python, immediately and in order: edit() and write() change the file at once. "
@@ -70,7 +72,8 @@ CODE_MODE_INTRO_EN = (
     "tests. Accepted: the function returns and the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
     "- A step \"write a test that fails for now\" and the step that fixes the code are done in "
-    "one call and closed together: step_done(\"1-2: ...\").\n"
+    "one call: edit the test, red = run_tests(...) (make sure it is red), fix the code, "
+    "run_tests() and step_done(\"1-2: ...\") - as in call 2 of the example.\n"
     "- finish(\"summary\") ends the task; put it in the same call as the last step_done() and "
     "ruff. The guard checks the diff, tests and project rules; a rejection comes back as the "
     "output of that call.\n"
@@ -100,8 +103,8 @@ CODE_MODE_INTRO_EN = (
     "code are fine.\n"
     "- Run tests with run_tests(paths), not run(\"python -m pytest ...\").\n"
     "\n"
-    "Every reply is an execute call. Start the code with a comment stating the intent: what this "
-    "whole call will do."
+    "Every reply is a tool call, usually execute. Start the code with a comment stating "
+    "the intent: what this whole call will do."
 )
 CODE_MODE_SETTING_EN = (
     "- Today is {today}. Put this date on new findings in `docs/`.\n"
@@ -132,10 +135,11 @@ EXECUTE_DESCRIPTION_EN = (
     "order, like plain Python. You see print() output and the value of the last expression, as "
     f"in Jupyter; up to {SCRIPT_OUTPUT_CHARS} chars (the beginning). One process per task: "
     "variables, imports and functions persist between calls, as in Jupyter; keep what you read "
-    "in a variable and do not re-read it. After a timeout or a crash the state is reset. Code "
-    "that needs output you have not seen yet goes in the next call, everything else in this "
-    "one. finish() and ask_owner() end the script; step_done() does not: accepted - the script "
-    "goes on, rejected - StepRejected with the reason and a stop. Functions:\n"
+    "in a variable and do not re-read it. After a timeout or a crash the state is reset. Make a "
+    "new call only when you need judgment about text you have not seen; decide the rest with a "
+    "condition in this one. finish() and ask_owner() end the script; step_done() does "
+    "not: accepted - the script goes on, rejected - StepRejected with the reason and a stop. "
+    "Functions:\n"
 )
 EXECUTE_CODE_EN = "Python code"
 SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (

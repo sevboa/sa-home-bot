@@ -117,15 +117,17 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2, правка load, прогон, закрыть шаги 1–2
+SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2 (сначала красный), правка load, шаги 1–2
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+red = run_tests(["tests/test_a.py"])
+print("до правки:", "красный" if not red.ok else "зелёный: тест не ловит ошибку")
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
 print(r)
-if r.ok:
-    step_done("1–2: load возвращает 2, тест зелёный")"""
+if r.ok and not red.ok:
+    step_done("1–2: тест ловил ошибку, load возвращает 2")"""
 SCRIPT_FINAL_EXAMPLE = """# Намерение: запись в docs, шаг 3, ruff и финал
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
 step_done("3: docs/pkg.md дополнен")
