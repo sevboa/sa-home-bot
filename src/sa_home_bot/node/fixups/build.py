@@ -34,6 +34,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
     fixups = [
         host.INSTALL_SMARTMONTOOLS,
         host.SMARTCTL_SUDOERS,
+        host.INSTALL_FONTS_DEJAVU,
         host.NODE_UNIT_SMARTCTL_PATH,
         host.JOURNALCTL_GROUP,
         host.POWER_CONTROL_POLKIT,

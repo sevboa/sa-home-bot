@@ -23,6 +23,7 @@ from sa_home_bot.node.fixups.privileged import (
     run_sudo,
 )
 from sa_home_bot.sensors.disks import SMARTCTL_REQUIREMENT
+from sa_home_bot.utils import fonts
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,23 @@ INSTALL_SMARTMONTOOLS = Fixup(
     needed=needs.monitor_disks,
     check=_smartmontools_check,
     apply=_smartmontools_apply,
+)
+
+
+def _fonts_dejavu_check() -> bool:
+    return path_exists(fonts.FONT_REGULAR) and path_exists(fonts.FONT_BOLD)
+
+
+def _fonts_dejavu_apply() -> None:
+    install_package(fonts.FONT_PACKAGE, "не найден известный пакетный менеджер для шрифтов DejaVu")
+
+
+INSTALL_FONTS_DEJAVU = Fixup(
+    id="install-fonts-dejavu",
+    title="Установить шрифты DejaVu (кириллица на картинках бота)",
+    needed=needs.telegram_bot,
+    check=_fonts_dejavu_check,
+    apply=_fonts_dejavu_apply,
 )
 
 

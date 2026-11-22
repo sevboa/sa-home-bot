@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
 
 from sa_home_bot.domain import vpn_link
+from sa_home_bot.utils import fonts
+
+log = logging.getLogger(__name__)
 
 MAX_MS = 2000
 WIDTH, HEIGHT = 1200, 700
@@ -78,7 +82,6 @@ BAND_SIZE = 16
 TIME_SIZE = 15
 LEGEND_SIZE = 18
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
 
 @dataclass(frozen=True)
@@ -122,10 +125,13 @@ class _Geometry:
 
 @lru_cache
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    path = fonts.FONT_BOLD if bold else fonts.FONT_REGULAR
     try:
-        return ImageFont.truetype(f"{FONT_DIR}/{name}", size)
+        return ImageFont.truetype(str(path), size)
     except OSError:
+        log.warning(
+            "шрифт %s не найден, график без кириллицы: выполните на ноде `nodectl fix`", path
+        )
         return ImageFont.load_default()
 
 

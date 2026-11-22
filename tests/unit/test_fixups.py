@@ -272,6 +272,31 @@ def test_smartmontools_check_sees_binary_in_sbin(sbin_dir):
     assert host.INSTALL_SMARTMONTOOLS.check()
 
 
+@pytest.mark.parametrize(
+    ("assignments", "needed"),
+    [(["telegram-bot@alfred"], True), (["telegram-bot:standby"], True), (["monitor"], False)],
+)
+def test_fonts_dejavu_needed_for_any_telegram_bot_instance(assignments, needed):
+    assert host.INSTALL_FONTS_DEJAVU.needed(make_settings(assignments)) is needed
+
+
+def test_fonts_dejavu_check_requires_both_files_and_apply_installs_package(
+    root, monkeypatch, tmp_path
+):
+    regular, bold = tmp_path / "r.ttf", tmp_path / "b.ttf"
+    monkeypatch.setattr(host.fonts, "FONT_REGULAR", regular)
+    monkeypatch.setattr(host.fonts, "FONT_BOLD", bold)
+    regular.write_text("x")
+    assert not host.INSTALL_FONTS_DEJAVU.check()
+    bold.write_text("x")
+    assert host.INSTALL_FONTS_DEJAVU.check()
+    monkeypatch.setattr(
+        privileged, "install_argv", lambda package: ["apt-get", "install", "-y", package]
+    )
+    host.INSTALL_FONTS_DEJAVU.apply()
+    assert root.sudo_calls[-1] == ["apt-get", "install", "-y", "fonts-dejavu-core"]
+
+
 def test_journalctl_group_apply_warns_about_user_manager_restart(root, caplog):
     host.JOURNALCTL_GROUP.apply()
     usermod = root.sudo_commands("usermod")[-1]

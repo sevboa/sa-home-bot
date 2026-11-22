@@ -38,6 +38,7 @@
 | Фикс | `check()` |
 |---|---|
 | `install-smartmontools` | `smartctl` находится (PATH + sbin-каталоги) |
+| `install-fonts-dejavu` | существуют `DejaVuSans.ttf` и `DejaVuSans-Bold.ttf` (пути в `utils/fonts.py`); нужен ноде с любым инстансом `telegram-bot` |
 | `smartctl-sudoers` | существуют и sudoers-снипет, и обёртка `~/.local/bin/smartctl` (содержимое не сверяется) |
 | `node-unit-smartctl-path` | юнита нет — «применено» (PATH допишет `init`); иначе первый каталог `Environment=PATH=` — `~/.local/bin` |
 | `journalctl-group` | пользователь в группе `systemd-journal` |
@@ -66,6 +67,10 @@
 `FixupError` из `check()` останавливал все оставшиеся фиксы.
 
 ## Живые находки
+- **2026-11-22 (jeeves, wooster, ion)**: при переезде бота (синглтон `telegram-bot@alfred`, аренда
+  лидерства) на ноде без `fonts-dejavu-core` суточный график vpn_check рисовался шрифтом по
+  умолчанию Pillow без кириллицы, вместо букв были прямоугольники. Добавлен фикс-ап
+  `install-fonts-dejavu`, нужный любой ноде с назначением `telegram-bot`; `nodectl fix` ставит пакет.
 - **2026-11-21 (ion)**: на свежем VPN-сервере руками скопированный бинарь mtg не слушал 443 —
   «bind: permission denied», 88 падений: `install_mtg` возвращался при уже существующем бинаре
   ДО `setcap`, а capability `cap_net_bind_service` не была выставлена. Теперь `setcap` зовётся

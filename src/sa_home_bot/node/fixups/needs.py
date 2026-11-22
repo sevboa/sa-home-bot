@@ -40,6 +40,10 @@ def vpn_check(settings: Settings) -> bool:
     return assignments.has_service(settings.node.assignments, "vpn_check")
 
 
+def telegram_bot(settings: Settings) -> bool:
+    return assignments.has_service(settings.node.assignments, "telegram-bot")
+
+
 def devlab(settings: Settings) -> bool:
     return any(
         assignments.has_service(settings.node.assignments, name)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import logging
 
 from PIL import Image
 
 from sa_home_bot.bot import vpn_report_chart as chart
 from sa_home_bot.domain import vpn_link
+from sa_home_bot.utils import fonts
 
 
 def _open(png: bytes) -> Image.Image:
@@ -130,3 +132,14 @@ def test_legend_uses_entry_names_when_given():
     named = chart.render_panel(_panel(lines=lines, names={"reality": "Reality azgez"}))
     assert plain != named
     assert chart.render_panel(_panel(lines=lines, names={})) == plain
+
+
+def test_missing_font_falls_back_with_one_warning(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(fonts, "FONT_REGULAR", tmp_path / "absent.ttf")
+    chart._font.cache_clear()
+    with caplog.at_level(logging.WARNING, logger=chart.log.name):
+        first = chart._font(15)
+        assert chart._font(15) is first
+    chart._font.cache_clear()
+    assert caplog.text.count("nodectl fix") == 1
+    assert str(tmp_path / "absent.ttf") in caplog.text
