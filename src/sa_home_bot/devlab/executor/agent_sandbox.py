@@ -13,7 +13,9 @@ from sa_home_bot.devlab.agent.sandbox import (
     ExecResult,
     LocalSandbox,
     ManagedSandbox,
+    PipeSession,
     SandboxPathError,
+    SessionReply,
     safe_relative,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -62,6 +64,7 @@ class PodmanSandbox:
         self._lost = False
         self._cpus = cpus
         self._memory = memory
+        self._session: PipeSession | None = None
 
     @property
     def name(self) -> str:
@@ -110,6 +113,7 @@ class PodmanSandbox:
             await self._provision()
 
     async def stop(self) -> None:
+        await self.session_close()
         async with self._lock:
             if self._running:
                 await self._wrapper.call("stop", self._name, merge_stderr=True)
@@ -126,6 +130,7 @@ class PodmanSandbox:
             await self._provision()
 
     async def aclose(self) -> None:
+        await self.session_close()
         self._running = False
         await asyncio.shield(self._wrapper.cleanup(self._name))
 
@@ -140,6 +145,25 @@ class PodmanSandbox:
         return ExecResult(
             result.exit_code, result.output.decode(errors="replace"), timed_out=result.timed_out
         )
+
+    async def session_request(
+        self, argv: Sequence[str], payload: bytes, timeout_s: float
+    ) -> SessionReply:
+        async with self._lock:
+            await self._ready()
+            if self._session is None:
+                self._session = self._wrapper.open_session(self._name, argv)
+            reply = await self._wrapper.session_request(self._session, payload, timeout_s)
+            await self._pull()
+            if reply.timed_out:
+                await self._wrapper.remove_container(self._name)
+                self._lost = True
+        return reply
+
+    async def session_close(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            await asyncio.shield(session.close())
 
     async def _provision(self) -> None:
         await self._wrapper.push_tree("sync-in", self._name, self._workdir, self._is_foreign)

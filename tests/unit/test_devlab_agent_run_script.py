@@ -6,10 +6,11 @@ from sa_home_bot.devlab.agent import tools as tools_module
 from sa_home_bot.devlab.agent.loop import AgentStatus
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
-from sa_home_bot.devlab.agent.script import PROCESS_FORBIDDEN, SCRIPT_FAILED_HEAD, script_argv
+from sa_home_bot.devlab.agent.script import PROCESS_FORBIDDEN, SCRIPT_FAILED_HEAD, worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
     SCRIPT_ONLY_TEXT,
+    SCRIPT_STATE_RESET,
     TOOL_ASK_OWNER,
     TOOL_EXECUTE,
     TOOL_FINISH,
@@ -32,8 +33,8 @@ PYTEST_ARGV = (sys.executable, "-m", "pytest", "-q")
 def current_python(monkeypatch):
     monkeypatch.setattr(
         tools_module,
-        "script_argv",
-        lambda code, config: script_argv(code, config, python=sys.executable),
+        "worker_argv",
+        lambda config: worker_argv(config, python=sys.executable),
     )
 
 
@@ -210,3 +211,43 @@ async def test_branch_on_test_result_finishes_or_asks(tmp_path):
     assert result.status is AgentStatus.ASKED
     assert result.reason == "тесты красные, что делать?"
     assert result.dialog.call_id == "s1"
+
+
+async def test_variables_persist_between_execute_calls(project):
+    box = toolbox(project)
+    await box.call(TOOL_EXECUTE, {"code": "src = read('src/a.py')"})
+    outcome = await box.call(TOOL_EXECUTE, {"code": "edit('src/a.py', src, 'value = 2\\n')\nsrc"})
+    await box._sandbox.session_close()
+    assert outcome.text == "value = 1"
+    assert (project / "src" / "a.py").read_text() == "value = 2\n"
+
+
+async def test_state_survives_finish_signal_in_execute(project):
+    box = toolbox(project)
+    await box.call(TOOL_EXECUTE, {"code": "kept = 5"})
+    signalled = await box.call(TOOL_EXECUTE, {"code": "finish('готово')"})
+    after = await box.call(TOOL_EXECUTE, {"code": "kept"})
+    await box._sandbox.session_close()
+    assert signalled.control is not None
+    assert after.text == "5"
+
+
+async def test_timeout_resets_state_and_says_so(project, monkeypatch):
+    monkeypatch.setattr(AgentSpec, "script_timeout_s", property(lambda self: 1.0))
+    box = toolbox(project)
+    await box.call(TOOL_EXECUTE, {"code": "kept = 5"})
+    timed_out = await box.call(TOOL_EXECUTE, {"code": "import time\ntime.sleep(30)"})
+    after = await box.call(TOOL_EXECUTE, {"code": "print('kept' in globals())"})
+    await box._sandbox.session_close()
+    assert timed_out.text.startswith("[таймаут 1 с]")
+    assert SCRIPT_STATE_RESET in timed_out.text
+    assert after.text == "False"
+
+
+async def test_process_death_reports_state_reset(project):
+    box = toolbox(project)
+    died = await box.call(TOOL_EXECUTE, {"code": "import os\nos._exit(3)"})
+    await box._sandbox.session_close()
+    assert died.text.startswith(SCRIPT_FAILED_HEAD)
+    assert "код 3" in died.text
+    assert SCRIPT_STATE_RESET in died.text

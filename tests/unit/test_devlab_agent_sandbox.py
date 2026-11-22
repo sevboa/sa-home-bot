@@ -1,12 +1,14 @@
 import asyncio
 import io
 import json
+import sys
 import tarfile
 
 import pytest
 
 from sa_home_bot.config import DevlabConfig
-from sa_home_bot.devlab.agent.sandbox import LocalSandbox, SandboxPathError
+from sa_home_bot.devlab.agent.sandbox import LocalSandbox, PipeSession, SandboxPathError
+from sa_home_bot.devlab.agent.script import parse_reply, request_payload, worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import ToolBox, ToolError
 from sa_home_bot.devlab.executor import wrapper
@@ -320,3 +322,75 @@ async def test_agent_resources_from_config(work):
     )
     await box.start()
     assert fake.args_of("create")[0][2:] == ["2", "4g", "0-1"]
+
+
+SESSION_CONFIG = {
+    "closed": [],
+    "write_prefixes": [],
+    "allowed": [],
+    "test_argv": [],
+    "command_timeout": 5,
+    "test_timeout": 5,
+    "budget": 100,
+    "output_chars": 6000,
+}
+
+
+def local_session(work, monkeypatch):
+    opened = []
+
+    def open_session(self, name, argv):
+        opened.append((name, list(argv)))
+        return PipeSession(worker_argv(SESSION_CONFIG, python=sys.executable), cwd=str(work))
+
+    monkeypatch.setattr(wrapper.WrapperClient, "open_session", open_session)
+    return opened
+
+
+async def session_text(box, code, timeout_s=60):
+    reply = await box.session_request(["python"], request_payload(code), timeout_s)
+    return reply if reply.data is None else parse_reply(reply.data)
+
+
+def test_open_session_argv_goes_through_wrapper_session_command():
+    client = wrapper.WrapperClient(DevlabConfig(), FakeContainer())
+    session = client.open_session("job-1", ["python", "-c", "print(1)"])
+    assert session._argv[-3:] == ["session", "job-1", "python -c 'print(1)'"]
+
+
+async def test_session_state_persists_and_files_sync_after_each_call(work, monkeypatch):
+    opened = local_session(work, monkeypatch)
+    box, fake = await started(work)
+    first = await session_text(box, "kept = 7")
+    second = await session_text(box, "kept")
+    assert second.output == "7"
+    assert not first.failed
+    assert len(opened) == 1
+    assert fake.commands().count("sync-out") == 2
+    await box.aclose()
+    assert box._session is None
+
+
+async def test_session_timeout_recreates_container_and_drops_state(work, monkeypatch):
+    local_session(work, monkeypatch)
+    box, fake = await started(work)
+    await session_text(box, "kept = 7")
+    timed_out = await box.session_request(
+        ["python"], request_payload("import time\ntime.sleep(30)"), 1
+    )
+    assert timed_out.timed_out
+    assert fake.commands()[-2:] == ["sync-out", "rm"]
+    after = await session_text(box, "print('kept' in globals())")
+    assert after.output == "False"
+    assert fake.commands().count("create") == 2
+    await box.aclose()
+
+
+async def test_stop_closes_session_process(work, monkeypatch):
+    local_session(work, monkeypatch)
+    box, _ = await started(work)
+    await session_text(box, "1")
+    proc = box._session._proc
+    await box.stop()
+    assert proc.returncode is not None
+    assert box._session is None

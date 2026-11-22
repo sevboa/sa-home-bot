@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 from sa_home_bot.devlab.agent.sandbox import IGNORED_DIRS
 
-ACTIONS_MARKER = "DEVLAB_ACTIONS "
 CONTROL_STEP_DONE = "step_done"
 CONTROL_FINISH = "finish"
 CONTROL_ASK_OWNER = "ask_owner"
@@ -97,10 +96,12 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "путь закрыт",
     ),
 )
-SCRIPT_READ_EXAMPLE = """print(read("src/pkg/a.py", 40, 90))
+SCRIPT_READ_EXAMPLE = """src = read("src/pkg/a.py", 40, 90)
+print(src)
 print("\\n".join(grep(r"def load", "src/pkg/", context=3)))
 print("\\n".join(grep(r"def test_load", "tests/", context=8)))"""
-SCRIPT_EDIT_EXAMPLE = """edit("src/pkg/a.py", "    return 1\\n", "    return 2\\n")
+SCRIPT_EDIT_EXAMPLE = """old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
+edit("src/pkg/a.py", old, old.replace("1", "2"))
 edit("tests/test_a.py", "assert load() == 1", "assert load() == 2")
 r = run_tests(["tests/test_a.py"])
 print(r)
@@ -114,6 +115,7 @@ if r.ok:
 PROLOGUE = r'''import ast
 import builtins
 import fnmatch
+import importlib
 import io
 import json
 import os
@@ -471,7 +473,7 @@ def _finalize():
     return notes
 '''
 
-_EPILOGUE = r'''
+_WORKER = r'''
 def _show(value):
     if isinstance(value, str):
         print(value)
@@ -483,37 +485,87 @@ def _show(value):
         print(repr(value))
 
 
-_failed = False
-_control = None
+_wire_in = os.fdopen(os.dup(0), "rb")
+_wire_out = os.fdopen(os.dup(1), "wb")
+_null = os.open(os.devnull, os.O_RDWR)
+for _fd in (0, 1, 2):
+    os.dup2(_null, _fd)
+sys.stdin = io.StringIO("")
+_KNOWN_MODULES = frozenset(sys.modules)
 _namespace = {"__name__": "__main__", **{name: globals()[name] for name in _CONFIG["names"]}}
-try:
-    _tree = ast.parse(_code, _CONFIG["filename"])
-    _last = None
-    if _tree.body and isinstance(_tree.body[-1], ast.Expr):
-        _last = ast.Expression(_tree.body.pop().value)
-    exec(compile(_tree, _CONFIG["filename"], "exec"), _namespace)
-    if _last is not None:
-        _value = eval(compile(_last, _CONFIG["filename"], "eval"), _namespace)
-        if _value is not None:
-            _show(_value)
-except _Signal as _signal_exit:
-    _control = {"tool": _signal_exit.tool, "args": _signal_exit.payload}
-except SystemExit as _exit:
-    _failed = _exit.code not in (None, 0)
-except BaseException as _error:
-    _failed = True
-    traceback.print_exception(
-        type(_error), _error, _error.__traceback__.tb_next, file=sys.stdout
-    )
-try:
-    for _note in _finalize():
-        print(_note)
-except Exception as _error:
-    print(f"[проверка путей записи не удалась: {_error}]")
-sys.stdout.flush()
-print("\n" + _CONFIG["marker"] + json.dumps(
-    {"failed": _failed, "control": _control, "green": _STATE["green"]}, ensure_ascii=False
-))
+
+
+def _drop_project_modules():
+    stale = [
+        name
+        for name, module in list(sys.modules.items())
+        if name not in _KNOWN_MODULES
+        and str(getattr(module, "__file__", None) or "").startswith(_ROOT + os.sep)
+    ]
+    for name in stale:
+        del sys.modules[name]
+    importlib.invalidate_caches()
+
+
+def _run_one(code):
+    global _START
+    _START = time.monotonic()
+    _BACKUPS.clear()
+    _BASE.clear()
+    _BASE.update(_stats())
+    _STATE["green"] = None
+    _drop_project_modules()
+    buffer = io.StringIO()
+    failed = False
+    control = None
+    sys.stdout = buffer
+    try:
+        try:
+            tree = ast.parse(code, _CONFIG["filename"])
+            last = None
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                last = ast.Expression(tree.body.pop().value)
+            exec(compile(tree, _CONFIG["filename"], "exec"), _namespace)
+            if last is not None:
+                value = eval(compile(last, _CONFIG["filename"], "eval"), _namespace)
+                if value is not None:
+                    _show(value)
+        except _Signal as signal_exit:
+            control = {"tool": signal_exit.tool, "args": signal_exit.payload}
+        except SystemExit as exit_request:
+            failed = exit_request.code not in (None, 0)
+        except BaseException as error:
+            failed = True
+            traceback.print_exception(
+                type(error), error, error.__traceback__.tb_next, file=sys.stdout
+            )
+        try:
+            for note in _finalize():
+                print(note)
+        except Exception as error:
+            print(f"[проверка путей записи не удалась: {error}]")
+    finally:
+        sys.stdout = sys.__stdout__
+    return {
+        "output": buffer.getvalue(),
+        "failed": failed,
+        "control": control,
+        "green": _STATE["green"],
+    }
+
+
+def _send(payload):
+    data = json.dumps(payload).encode()
+    _wire_out.write(str(len(data)).encode() + b"\n" + data)
+    _wire_out.flush()
+
+
+while True:
+    _head = _wire_in.readline()
+    if not _head:
+        break
+    _request = json.loads(_wire_in.read(int(_head)).decode())
+    _send(_run_one(_request["code"]))
 '''
 
 
@@ -540,7 +592,7 @@ def api_stubs(query: str = "") -> str:
     )
 
 
-def script_argv(code: str, config: dict[str, object], python: str = "python") -> list[str]:
+def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
     full = {
         **config,
         "ignored": sorted(IGNORED_DIRS),
@@ -549,10 +601,13 @@ def script_argv(code: str, config: dict[str, object], python: str = "python") ->
         "max_matches": SCRIPT_GREP_MAX_MATCHES,
         "names": [name for name, _, _ in SCRIPT_API] + ["Result", "EditError"],
         "filename": SCRIPT_FILENAME,
-        "marker": ACTIONS_MARKER,
     }
-    source = f"_CONFIG = json.loads({json.dumps(full)!r})\n_code = {code!r}\n"
-    return [python, "-I", "-c", f"import json\n{source}{PROLOGUE}\n{_EPILOGUE}"]
+    source = f"_CONFIG = json.loads({json.dumps(full)!r})\n"
+    return [python, "-I", "-c", f"import json\n{source}{PROLOGUE}\n{_WORKER}"]
+
+
+def request_payload(code: str) -> bytes:
+    return json.dumps({"code": code}).encode()
 
 
 def _control(payload: object) -> ScriptControl | None:
@@ -564,22 +619,17 @@ def _control(payload: object) -> ScriptControl | None:
     return ScriptControl(tool, args)
 
 
-def parse_output(text: str) -> ScriptRun:
-    lines = text.splitlines()
-    marked = [i for i, line in enumerate(lines) if line.startswith(ACTIONS_MARKER)]
-    if not marked:
-        return ScriptRun(text.rstrip(), True)
-    index = marked[-1]
-    output = "\n".join(lines[:index] + lines[index + 1 :]).rstrip()
+def parse_reply(data: bytes) -> ScriptRun:
+    text = data.decode(errors="replace")
     try:
-        payload = json.loads(lines[index][len(ACTIONS_MARKER) :])
+        payload = json.loads(data)
     except ValueError:
         return ScriptRun(text.rstrip(), True)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("output"), str):
         return ScriptRun(text.rstrip(), True)
     green = payload.get("green")
     return ScriptRun(
-        output,
+        payload["output"].rstrip(),
         bool(payload.get("failed", True)),
         _control(payload.get("control")),
         green if isinstance(green, bool) else None,

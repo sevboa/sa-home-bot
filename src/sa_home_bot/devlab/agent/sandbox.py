@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Sequence
+import os
+import signal
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -14,6 +17,8 @@ NOT_FOUND_EXIT_CODE = 127
 TIMEOUT_EXIT_CODE = -1
 EXIT_HEAD = "[код {code}]"
 OK_HEAD = EXIT_HEAD.format(code=0)
+SESSION_TICK_S = 0.5
+SESSION_CLOSE_GRACE_S = 2.0
 
 
 class SandboxPathError(Exception):
@@ -52,6 +57,117 @@ class ExecResult:
         return f"{head}\n{text}".rstrip()
 
 
+@dataclass(frozen=True)
+class SessionReply:
+    data: bytes | None
+    timed_out: bool = False
+    detail: str = ""
+
+
+class PipeSession:
+    def __init__(self, argv: Sequence[str], cwd: str | None = None) -> None:
+        self._argv = list(argv)
+        self._cwd = cwd
+        self._proc: asyncio.subprocess.Process | None = None
+
+    async def request(
+        self, payload: bytes, timeout_s: float, spent: Callable[[], float] | None = None
+    ) -> SessionReply:
+        if spent is None:
+            started = time.monotonic()
+
+            def spent() -> float:
+                return time.monotonic() - started
+
+        try:
+            proc = await self._ensure()
+        except OSError as exc:
+            return SessionReply(None, detail=f"{type(exc).__name__}: {exc}")
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(f"{len(payload)}\n".encode() + payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            return await self._died(proc)
+        read = asyncio.ensure_future(self._read_frame(proc))
+        try:
+            while not read.done():
+                left = timeout_s - spent()
+                if left <= 0:
+                    await self.kill()
+                    return SessionReply(None, timed_out=True)
+                await asyncio.wait({read}, timeout=min(SESSION_TICK_S, left))
+        except BaseException:
+            self._kill_group()
+            raise
+        finally:
+            if not read.done():
+                read.cancel()
+        data = read.result()
+        if data is None:
+            return await self._died(proc)
+        return SessionReply(data)
+
+    async def _ensure(self) -> asyncio.subprocess.Process:
+        if self._proc is None or self._proc.returncode is not None:
+            self._proc = await asyncio.create_subprocess_exec(
+                *self._argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=self._cwd,
+                start_new_session=True,
+            )
+        return self._proc
+
+    @staticmethod
+    async def _read_frame(proc: asyncio.subprocess.Process) -> bytes | None:
+        assert proc.stdout is not None
+        try:
+            head = await proc.stdout.readline()
+            if not head:
+                return None
+            return await proc.stdout.readexactly(int(head))
+        except (asyncio.IncompleteReadError, ValueError, ConnectionResetError):
+            return None
+
+    async def _died(self, proc: asyncio.subprocess.Process) -> SessionReply:
+        try:
+            await asyncio.wait_for(proc.wait(), SESSION_CLOSE_GRACE_S)
+        except TimeoutError:
+            await self.kill()
+            return SessionReply(None, detail="процесс не отвечает")
+        self._proc = None
+        return SessionReply(None, detail=f"код {proc.returncode}")
+
+    def _kill_group(self) -> None:
+        if self._proc is not None and self._proc.returncode is None:
+            try:
+                os.killpg(self._proc.pid, signal.SIGKILL)
+            except OSError:
+                self._proc.kill()
+
+    async def kill(self) -> None:
+        proc = self._proc
+        self._kill_group()
+        self._proc = None
+        if proc is not None:
+            await proc.wait()
+
+    async def close(self) -> None:
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            self._proc = None
+            return
+        if proc.stdin is not None:
+            proc.stdin.close()
+        try:
+            await asyncio.wait_for(proc.wait(), SESSION_CLOSE_GRACE_S)
+        except TimeoutError:
+            await self.kill()
+        self._proc = None
+
+
 class Sandbox(Protocol):
     async def read_bytes(self, path: str) -> bytes | None: ...
 
@@ -60,6 +176,12 @@ class Sandbox(Protocol):
     async def list_files(self) -> list[str]: ...
 
     async def exec(self, argv: Sequence[str], timeout_s: float) -> ExecResult: ...
+
+    async def session_request(
+        self, argv: Sequence[str], payload: bytes, timeout_s: float
+    ) -> SessionReply: ...
+
+    async def session_close(self) -> None: ...
 
     async def changed_paths(self) -> list[str]: ...
 
@@ -87,6 +209,7 @@ class LocalSandbox:
     def __init__(self, root: Path, baseline: dict[str, str] | None = None) -> None:
         self._root = root
         self._baseline = baseline if baseline is not None else self._snapshot()
+        self._session: PipeSession | None = None
 
     def _walk(self) -> list[str]:
         found = []
@@ -105,13 +228,13 @@ class LocalSandbox:
         return None
 
     async def stop(self) -> None:
-        return None
+        await self.session_close()
 
     async def resume(self) -> None:
         return None
 
     async def aclose(self) -> None:
-        return None
+        await self.session_close()
 
     def snapshot(self) -> dict[str, str]:
         return self._snapshot()
@@ -144,6 +267,18 @@ class LocalSandbox:
         except OSError as exc:
             return ExecResult(NOT_FOUND_EXIT_CODE, f"{type(exc).__name__}: {exc}")
         return ExecResult(result.returncode, result.stdout_text)
+
+    async def session_request(
+        self, argv: Sequence[str], payload: bytes, timeout_s: float
+    ) -> SessionReply:
+        if self._session is None:
+            self._session = PipeSession(argv, cwd=str(self._root))
+        return await self._session.request(payload, timeout_s)
+
+    async def session_close(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            await session.close()
 
     async def changed_digests(self) -> dict[str, str]:
         current = self._snapshot()
