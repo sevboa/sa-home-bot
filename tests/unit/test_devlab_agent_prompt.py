@@ -7,7 +7,9 @@ import pytest
 
 from sa_home_bot.devlab.agent.prompt import (
     CODE_MODE_INTRO,
+    CODE_MODE_INTRO_REMOTE,
     CODE_MODE_REMINDER,
+    CODE_MODE_REMINDER_REMOTE,
     FLOW_REMINDER,
     GLM_FLOW_REMINDER,
     GLM_INTRO,
@@ -22,7 +24,9 @@ from sa_home_bot.devlab.agent.prompt import (
 )
 from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_EN,
+    CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_EN,
+    CODE_MODE_REMINDER_REMOTE_EN,
     RULES_TITLE_EN,
 )
 from sa_home_bot.devlab.agent.tools import (
@@ -124,12 +128,17 @@ def test_glm_reminder_is_russian_and_rides_on_step_end():
 
 
 
-@pytest.mark.parametrize("model", [*GLM_MODELS, *OTHER_MODELS])
-def test_code_mode_prompt_is_the_same_for_every_model(model):
+@pytest.mark.parametrize(
+    ("model", "intro", "reminder"),
+    [
+        *[(model, CODE_MODE_INTRO, CODE_MODE_REMINDER) for model in GLM_MODELS],
+        *[(model, CODE_MODE_INTRO_REMOTE, CODE_MODE_REMINDER_REMOTE) for model in OTHER_MODELS],
+    ],
+)
+def test_code_mode_prompt_depends_on_glm_only(model, intro, reminder):
     system = build_system(RULES, model, COMMANDS, TODAY, code_mode=True)
-    assert system == build_system(RULES, "", COMMANDS, TODAY, code_mode=True)
-    assert system.startswith(CODE_MODE_INTRO)
-    assert reminder_for(model, code_mode=True) == CODE_MODE_REMINDER
+    assert system.startswith(intro)
+    assert reminder_for(model, code_mode=True) == reminder
     assert "Сегодня 2026-11-16." in system
     assert "`ruff check`, `python -m pytest`, `git diff`" in system
     assert "=== CLAUDE.md ===\nправило-один" in system
@@ -143,7 +152,15 @@ def test_without_code_mode_build_system_and_reminder_are_unchanged(model):
     assert reminder_for(model, code_mode=False) == reminder_for(model)
 
 
-@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_REMINDER])
+RU_CODE_MODE_TEXTS = [
+    CODE_MODE_INTRO,
+    CODE_MODE_INTRO_REMOTE,
+    CODE_MODE_REMINDER,
+    CODE_MODE_REMINDER_REMOTE,
+]
+
+
+@pytest.mark.parametrize("text", RU_CODE_MODE_TEXTS)
 def test_code_mode_texts_name_no_hidden_tools(text):
     for hidden in (TOOL_READ_FILE, TOOL_EDIT_FILE, TOOL_RUN_COMMAND, "write_file", "list_files"):
         assert hidden not in text
@@ -152,14 +169,15 @@ def test_code_mode_texts_name_no_hidden_tools(text):
     assert "обдумай" not in text
 
 
-@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_REMINDER])
+@pytest.mark.parametrize("text", RU_CODE_MODE_TEXTS)
 def test_code_mode_texts_have_no_queue_after_script(text):
     assert "очеред" not in text
     assert "после скрипта" not in text
 
 
 @pytest.mark.parametrize(
-    "text", [CODE_MODE_INTRO, EXECUTE_DEFINITION["function"]["description"]]
+    "text",
+    [CODE_MODE_INTRO, CODE_MODE_INTRO_REMOTE, EXECUTE_DEFINITION["function"]["description"]],
 )
 def test_code_mode_texts_say_state_persists_between_calls(text):
     assert "не сохраняются" not in text
@@ -210,20 +228,68 @@ def test_code_mode_example_splits_test_and_code_calls(text):
     assert text.index("old_test = next") < text.index('old = next(r for r in src')
 
 
-def test_code_mode_intro_names_script_and_control_calls():
+@pytest.mark.parametrize("intro", [CODE_MODE_INTRO, CODE_MODE_INTRO_REMOTE])
+def test_code_mode_intro_names_script_and_control_calls(intro):
     for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
-        assert name in CODE_MODE_INTRO
-    assert 'step_done("1–2: тест ловил ошибку, load возвращает 2")' not in CODE_MODE_INTRO
-    assert 'step_done("3: docs/pkg.md дополнен")' not in CODE_MODE_INTRO
-    assert "закрывает все шаги задания" in CODE_MODE_INTRO
-    assert "необязательная промежуточная проверка" in CODE_MODE_INTRO
-    assert 'finish("load возвращает 2; тесты, ruff и docs готовы")' in CODE_MODE_INTRO
-    assert "список — в описании execute" in CODE_MODE_INTRO
+        assert name in intro
+    assert 'step_done("1–2: тест ловил ошибку, load возвращает 2")' not in intro
+    assert 'step_done("3: docs/pkg.md дополнен")' not in intro
+    assert "закрывает все шаги задания" in intro
+    assert "необязательная промежуточная проверка" in intro
+    assert 'finish("load возвращает 2; тесты, ruff и docs готовы")' in intro
+    assert "список — в описании execute" in intro
+
+
+@pytest.mark.parametrize(
+    ("text", "batch", "single_call", "budget"),
+    [
+        (CODE_MODE_INTRO_REMOTE, "думай подробно", "одним вызовом", "Запросы ограничены"),
+        (
+            CODE_MODE_INTRO_REMOTE_EN,
+            "Think in detail",
+            "in one call",
+            "Requests are limited",
+        ),
+        (CODE_MODE_REMINDER_REMOTE, "Думай подробно", "одним вызовом", "Запросы ограничены"),
+        (CODE_MODE_REMINDER_REMOTE_EN, "Think in detail", "in one call", "Requests are limited"),
+    ],
+    ids=["intro-ru", "intro-en", "reminder-ru", "reminder-en"],
+)
+def test_remote_code_mode_texts_batch_edits_and_save_requests(text, batch, single_call, budget):
+    assert batch.lower() in text.lower()
+    assert single_call in text
+    assert budget in text
+    assert "порциями" not in text
+    assert "in portions" not in text
+    assert "короткий план без кода" not in text
+    assert "short plan without code" not in text
+
+
+@pytest.mark.parametrize(
+    ("intro", "header"),
+    [
+        (CODE_MODE_INTRO_REMOTE, "три вызова\n"),
+        (CODE_MODE_INTRO_REMOTE_EN, "in three calls\n"),
+    ],
+    ids=["ru", "en"],
+)
+def test_remote_code_mode_example_edits_test_and_code_in_one_script(intro, header):
+    assert header in intro
+    red = intro.index('red = run_tests(["')
+    assert intro.count('red = run_tests(["') == 1
+    test_edit = intro.index('edit("tests/test_a.py"')
+    code_edit = intro.index('edit("src/pkg/a.py"')
+    run = intro.index('r = run_tests(["')
+    ruff = intro.index("ruff check src")
+    assert test_edit < red < code_edit < run < ruff
 
 
 def test_english_lang_swaps_code_mode_texts_and_titles():
-    system = build_system(RULES, "", COMMANDS, TODAY, code_mode=True, lang="en")
+    system = build_system(RULES, "glm", COMMANDS, TODAY, code_mode=True, lang="en")
     assert system.startswith(CODE_MODE_INTRO_EN)
+    remote = build_system(RULES, "other", COMMANDS, TODAY, code_mode=True, lang="en")
+    assert remote.startswith(CODE_MODE_INTRO_REMOTE_EN)
+    assert reminder_for("other", code_mode=True, lang="en") == CODE_MODE_REMINDER_REMOTE_EN
     assert "## Setting\n- Today is 2026-11-16." in system
     assert f"\n\n{RULES_TITLE_EN}\n\n=== CLAUDE.md ===" in system
     assert RULES_TITLE not in system

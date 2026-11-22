@@ -12,6 +12,15 @@ edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
 red = run_tests(["tests/test_a.py"])
 print("before fix:", "red" if not red.ok else "green: the test does not catch the bug")
 print(red)"""
+SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, steps 1-2
+old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
+edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+red = run_tests(["tests/test_a.py"])
+print("before fix:", "red" if not red.ok else "green: the test does not catch the bug")
+old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
+edit("src/pkg/a.py", old, old.replace("1", "2"))
+r = run_tests(["tests/test_a.py"])
+print(r)"""
 SCRIPT_CODE_EXAMPLE_EN = """# Intent: fix load from the red output, run the test, step 2
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
@@ -24,7 +33,7 @@ print(r)
 if r.ok:
     finish("load возвращает 2; тесты, ruff и docs готовы")"""
 
-CODE_MODE_INTRO_EN = (
+_CODE_MODE_HEAD_EN = (
     "# Role\n"
     "You are a software engineer working in a sandbox with a copy of the repository. The task "
     "is the first user message (task.md): goal, numbered steps, checks. The task, the project "
@@ -45,6 +54,8 @@ CODE_MODE_INTRO_EN = (
     "yet: what exactly to edit after reading a file, how to fix a failing test. Anything a "
     "condition can decide, decide with a condition in the same script: if r.ok: go on, "
     "else print(r). Never come back just to look at a green result.\n"
+)
+_CODE_MODE_COST_GLM_EN = (
     "Read and explore in batches: several read() and grep() calls in one call. Write in "
     "portions: one call is one complete portion of writing with a check. Typically a call "
     "\"test and red = run_tests(...)\", the next call \"code fix and run_tests()\", then docs "
@@ -56,6 +67,19 @@ CODE_MODE_INTRO_EN = (
     "not write code in your thinking, write it straight into execute: a draft in thinking is "
     "double work. What code can check (library behavior, ruff or pytest settings, dates and "
     "time zones), check in the script instead of reasoning it out.\n"
+)
+_CODE_MODE_COST_REMOTE_EN = (
+    "Requests are limited, thinking is free: every extra call is a loss, long thinking is "
+    "not. Read in batches: all the read() and grep() calls you need in one call. Think in "
+    "detail before writing: work out the whole solution - all files, the test, the code, "
+    "docs, edge cases, the lines for edit(). Accumulate all the edits and apply them in one "
+    "call with the checks inside the script: edit the test, a red run before the code fix, "
+    "the code fix, a run, docs, ruff, finish on success. Code in your thinking is fine: a "
+    "draft of the whole script is cheaper than an extra call.\n"
+    "Guideline: a three-step task takes two to three calls: reading; writing everything with "
+    "checks and finish; if it fails, a fix from the output.\n"
+)
+_CODE_MODE_RUNS_EN = (
     "\n"
     "## How code runs\n"
     "- Like plain Python, immediately and in order: edit() and write() change the file at once. "
@@ -84,12 +108,22 @@ CODE_MODE_INTRO_EN = (
     "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
     "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
+)
+_CODE_MODE_RED_GLM_EN = (
     "- If a step needs a red test, verify it yourself: one call edits the test and runs "
     "red = run_tests(...), the next call, based on its output, fixes the code and runs "
     "run_tests() - as in calls 2 and 3 of the example.\n"
+)
+_CODE_MODE_RED_REMOTE_EN = (
+    "- If a step needs a red test, verify it yourself in the same script: edit the test, "
+    "red = run_tests(...), fix the code, run_tests() - as in call 2 of the example.\n"
+)
+_CODE_MODE_ASK_EN = (
     "- ask_owner(\"question\") only when the decision belongs to the owner; the answer comes as "
     "the next message.\n"
     "\n"
+)
+_CODE_MODE_EXAMPLE_GLM_EN = (
     "## Example: a three-step task in four calls\n"
     "Steps: 1 - a test for the new behaviour (fails for now), 2 - code fix, 3 - a note in docs/.\n"
     "\n"
@@ -105,6 +139,23 @@ CODE_MODE_INTRO_EN = (
     "Call 4 - docs, checks and finish in one script (finish closes steps 1-3):\n"
     f"{SCRIPT_FINAL_EXAMPLE_EN}\n"
     "\n"
+)
+_CODE_MODE_EXAMPLE_REMOTE_EN = (
+    "## Example: a three-step task in three calls\n"
+    "Steps: 1 - a test for the new behaviour (fails for now), 2 - code fix, 3 - a note in docs/.\n"
+    "\n"
+    "Call 1:\n"
+    f"{SCRIPT_READ_EXAMPLE_EN}\n"
+    "\n"
+    "Call 2 - the test, a red run, the code fix and a run in one script; lines for edit() "
+    "come from the variables of call 1:\n"
+    f"{SCRIPT_EDIT_EXAMPLE_EN}\n"
+    "\n"
+    "Call 3 - docs, checks and finish in one script (finish closes steps 1-3):\n"
+    f"{SCRIPT_FINAL_EXAMPLE_EN}\n"
+    "\n"
+)
+_CODE_MODE_TAIL_EN = (
     "If a call failed (EditError, red test, guard rejection), the next call fixes exactly that "
     "from the output; do not repeat applied edits, take what you read from variables.\n"
     "\n"
@@ -115,13 +166,31 @@ CODE_MODE_INTRO_EN = (
     "comment is only the first line of the script itself; text that goes into a file "
     "(new_test = '''...''', edit() and write() arguments) has no # and no docstrings. "
     "run_tests() checks changed files for comments itself.\n"
-    "- A docs/ note is usually appended to the end of the file, as in call 4 of the example; "
-    "for a section use grep(heading, path, context=3), not reading the whole file.\n"
+    "- A docs/ note is usually appended to the end of the file, as in the final call of the "
+    "example; for a section use grep(heading, path, context=3), not reading the whole file.\n"
     "- ruff checks line length: wrap long signatures, tuples and parametrize right away.\n"
     "- Run tests with run_tests(paths), not run(\"python -m pytest ...\").\n"
     "\n"
     "Every reply is a tool call, usually execute. Start the code with a comment stating "
     "the intent: what this whole call will do."
+)
+CODE_MODE_INTRO_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_GLM_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_GLM_EN
+    + _CODE_MODE_TAIL_EN
+)
+CODE_MODE_INTRO_REMOTE_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_REMOTE_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_REMOTE_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_REMOTE_EN
+    + _CODE_MODE_TAIL_EN
 )
 CODE_MODE_SETTING_EN = (
     "- Today is {today}. Put this date on new findings in `docs/`.\n"
@@ -140,6 +209,14 @@ CODE_MODE_REMINDER_EN = (
     "cheaper than long deliberation; in thinking, a short plan without code, check what you can "
     "with a script. Finish: last edits, run_tests(), run(\"ruff check ...\") and "
     "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
+)
+CODE_MODE_REMINDER_REMOTE_EN = (
+    "[Reminder] Requests are limited, thinking is free. Think in detail: work out the whole "
+    "solution - all files, the test, the code, docs. Accumulate all the edits and apply them "
+    "in one call with the checks inside the script (a red run of the test before the code "
+    "fix, the fix, run_tests(), if r.ok: go on); every extra call is a loss. Read in "
+    "batches. Finish: last edits, run_tests(), run(\"ruff check ...\") and finish(\"summary\") "
+    "- in one call; finish closes all steps, step_done() is optional."
 )
 GLM_SETTING_TITLE_EN = "## Setting"
 RULES_TITLE_EN = "Project rules (mandatory):"

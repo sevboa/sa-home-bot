@@ -7,7 +7,9 @@ from typing import Any
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_EN,
+    CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_EN,
+    CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
     GLM_SETTING_TITLE_EN,
@@ -15,6 +17,7 @@ from sa_home_bot.devlab.agent.prompt_en import (
 )
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_CODE_EXAMPLE,
+    SCRIPT_EDIT_EXAMPLE,
     SCRIPT_FINAL_EXAMPLE,
     SCRIPT_OUTPUT_CHARS,
     SCRIPT_READ_EXAMPLE,
@@ -107,7 +110,7 @@ GLM_FLOW_REMINDER = (
     "финальный прогон задания и `ruff check` по изменённым файлам, и как только они зелёные, "
     f"вызови {TOOL_FINISH}."
 )
-CODE_MODE_INTRO = (
+_CODE_MODE_HEAD = (
     "# Роль\n"
     "Ты инженер-разработчик в песочнице с копией репозитория. Задание — первое сообщение "
     "пользователя (task.md): цель, пронумерованные шаги, проверки.\n"
@@ -126,6 +129,8 @@ CODE_MODE_INTRO = (
     "которого ты ещё не видел: что именно править после чтения файла, как чинить упавший "
     "тест. Всё, что решает условие, решай условием в том же скрипте: if r.ok: идти дальше, "
     "иначе print(r). Возвращаться, чтобы посмотреть зелёный результат, не нужно.\n"
+)
+_CODE_MODE_COST_GLM = (
     "Читай и разведывай пачками: несколько read(), grep() в одном вызове. Пиши порциями: "
     "один вызов — одна законченная порция записи с проверкой. Обычно это вызов «тест и "
     "red = run_tests(...)», следующий вызов «правка кода и run_tests()», затем docs и "
@@ -137,6 +142,19 @@ CODE_MODE_INTRO = (
     "почему. Код в размышлении не пиши, пиши его сразу в execute: черновик в размышлении — "
     "двойная работа. Что можно проверить кодом (поведение библиотеки, настройки ruff или "
     "pytest, даты и часовые пояса), проверяй в скрипте, а не рассуждением.\n"
+)
+_CODE_MODE_COST_REMOTE = (
+    "Запросы ограничены, а размышление бесплатно: каждый лишний вызов — потеря, длинное "
+    "размышление — нет. Читай пачками: все нужные read(), grep() в одном вызове. Перед "
+    "записью думай подробно: продумай решение целиком — все файлы, тест, код, docs, "
+    "граничные случаи, строки для edit(). Накопи все правки и внеси их одним вызовом с "
+    "проверкой внутри скрипта: правка теста, red-прогон до правки кода, правка кода, "
+    "прогон, docs, ruff, при успехе finish. Код в размышлении допустим: черновик "
+    "всего скрипта дешевле лишнего вызова.\n"
+    "Ориентир: задание из трёх шагов — два–три вызова: чтение; запись всего с проверкой и "
+    "finish; при неудаче — исправление по выводу.\n"
+)
+_CODE_MODE_RUNS = (
     "\n"
     "## Как исполняется код\n"
     "- Как обычный Python, сразу и по порядку: edit() и write() меняют файл немедленно. "
@@ -167,12 +185,22 @@ CODE_MODE_INTRO = (
     "- step_done(\"N: итог\") — необязательная промежуточная проверка шага на длинных "
     "заданиях: страж прогоняет изменённые тесты. Принял — скрипт идёт дальше; не принял — "
     "StepRejected с причиной, и скрипт останавливается.\n"
+)
+_CODE_MODE_RED_GLM = (
     "- Если шаг требует красного теста, убедись в этом сам: вызов с правкой теста и "
     "red = run_tests(...), по его выводу следующий вызов с правкой кода и run_tests() — "
     "как в вызовах 2 и 3 примера.\n"
+)
+_CODE_MODE_RED_REMOTE = (
+    "- Если шаг требует красного теста, убедись в этом сам в том же скрипте: правка теста, "
+    "red = run_tests(...), правка кода, run_tests() — как в вызове 2 примера.\n"
+)
+_CODE_MODE_ASK = (
     "- ask_owner(\"вопрос\") — только если решение может принять лишь владелец; ответ придёт "
     "следующим сообщением.\n"
     "\n"
+)
+_CODE_MODE_EXAMPLE_GLM = (
     "## Пример задания из трёх шагов: четыре вызова\n"
     "Шаги: 1 — тест на новое поведение (пока падает), 2 — правка кода, 3 — запись в docs/.\n"
     "\n"
@@ -188,6 +216,23 @@ CODE_MODE_INTRO = (
     "Вызов 4 — документация, проверки и финал в одном скрипте (finish закрывает шаги 1–3):\n"
     f"{SCRIPT_FINAL_EXAMPLE}\n"
     "\n"
+)
+_CODE_MODE_EXAMPLE_REMOTE = (
+    "## Пример задания из трёх шагов: три вызова\n"
+    "Шаги: 1 — тест на новое поведение (пока падает), 2 — правка кода, 3 — запись в docs/.\n"
+    "\n"
+    "Вызов 1:\n"
+    f"{SCRIPT_READ_EXAMPLE}\n"
+    "\n"
+    "Вызов 2 — тест, red-прогон, правка кода и прогон в одном скрипте; строки для edit() "
+    "берутся из переменных вызова 1:\n"
+    f"{SCRIPT_EDIT_EXAMPLE}\n"
+    "\n"
+    "Вызов 3 — документация, проверки и финал в одном скрипте (finish закрывает шаги 1–3):\n"
+    f"{SCRIPT_FINAL_EXAMPLE}\n"
+    "\n"
+)
+_CODE_MODE_TAIL = (
     "Если вызов упал (EditError, красный тест, отказ стража), следующий вызов чинит именно "
     "это по выводу; применённые правки не повторяй, прочитанное бери из переменных.\n"
     "\n"
@@ -199,13 +244,31 @@ CODE_MODE_INTRO = (
     "пишется только первой строкой самого скрипта; в тексте, который уходит в файл "
     "(new_test = '''…''', аргументы edit() и write()), нет ни #, ни докстрингов. run_tests() "
     "сам проверяет изменённые файлы на комментарии.\n"
-    "- Запись в docs/ обычно дописывается в конец файла, как в вызове 4 примера; нужен "
-    "раздел — grep(заголовок, путь, context=3), а не чтение файла целиком.\n"
+    "- Запись в docs/ обычно дописывается в конец файла, как в финальном вызове примера; "
+    "нужен раздел — grep(заголовок, путь, context=3), а не чтение файла целиком.\n"
     "- ruff проверяет длину строк: длинные сигнатуры, кортежи и parametrize сразу переноси.\n"
     "- Тесты запускай через run_tests(paths), а не через run(\"python -m pytest ...\").\n"
     "\n"
     "Каждый ответ — вызов инструмента, обычно execute. Первой строкой кода пиши "
     "комментарий с намерением: что этот вызов сделает целиком."
+)
+CODE_MODE_INTRO = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_GLM
+    + _CODE_MODE_RUNS
+    + _CODE_MODE_RED_GLM
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_GLM
+    + _CODE_MODE_TAIL
+)
+CODE_MODE_INTRO_REMOTE = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_REMOTE
+    + _CODE_MODE_RUNS
+    + _CODE_MODE_RED_REMOTE
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_REMOTE
+    + _CODE_MODE_TAIL
 )
 CODE_MODE_SETTING = (
     "- Сегодня {today}. Эту дату ставь у новых находок в `docs/`.\n"
@@ -227,6 +290,14 @@ CODE_MODE_REMINDER = (
     "finish(\"итог\") — одним вызовом; finish сам закрывает все шаги, step_done() "
     "необязателен."
 )
+CODE_MODE_REMINDER_REMOTE = (
+    "[Напоминание] Запросы ограничены, размышление бесплатно. Думай подробно: продумай "
+    "решение целиком — все файлы, тест, код, docs. Накопи все правки и внеси их одним "
+    "вызовом с проверкой внутри скрипта (red-прогон теста до правки кода, правка, "
+    "run_tests(), if r.ok: дальше); каждый лишний вызов — потеря. Читай пачками. Финал: "
+    "последние правки, run_tests(), run(\"ruff check ...\") и finish(\"итог\") — одним "
+    "вызовом; finish сам закрывает все шаги, step_done() необязателен."
+)
 RULES_TITLE = "Правила проекта (обязательны):"
 CONTINUATION_TITLE = (
     "Работа уже начата и продолжается после перезапуска. Файлы, изменённые относительно базы "
@@ -245,10 +316,20 @@ def intro_for(model: str) -> str:
     return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
+def code_mode_intro_for(model: str, lang: str = "ru") -> str:
+    glm = _is_glm(model)
+    if lang == EN:
+        return CODE_MODE_INTRO_EN if glm else CODE_MODE_INTRO_REMOTE_EN
+    return CODE_MODE_INTRO if glm else CODE_MODE_INTRO_REMOTE
+
+
 def reminder_for(model: str, code_mode: bool = False, lang: str = "ru") -> str:
+    glm = _is_glm(model)
     if code_mode:
-        return CODE_MODE_REMINDER_EN if lang == EN else CODE_MODE_REMINDER
-    return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
+        if lang == EN:
+            return CODE_MODE_REMINDER_EN if glm else CODE_MODE_REMINDER_REMOTE_EN
+        return CODE_MODE_REMINDER if glm else CODE_MODE_REMINDER_REMOTE
+    return GLM_FLOW_REMINDER if glm else FLOW_REMINDER
 
 
 def _setting(
@@ -278,8 +359,7 @@ def build_system(
     lang: str = "ru",
 ) -> str:
     english = code_mode and lang == EN
-    intro = CODE_MODE_INTRO_EN if english else CODE_MODE_INTRO
-    parts = [intro if code_mode else intro_for(model)]
+    parts = [code_mode_intro_for(model, lang) if code_mode else intro_for(model)]
     if code_mode:
         parts.append(code_mode_setting(commands, today or date.today(), lang))
     elif _is_glm(model):
