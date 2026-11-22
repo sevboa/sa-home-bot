@@ -64,7 +64,7 @@ def _line(server: str, transport: str, points: list[daily.Point]) -> daily.Line:
 def test_line_length_is_slots_and_point_falls_into_its_slot():
     points = [_point(95, 3, 0, 612), _point(94, 2, 2, 700)]
     panels = _panels(_history(_series("osip", "jeeves", "awg", points)))
-    values = _panel(panels, TITLE_RUSSIA).lines["awg"]
+    values = _panel(panels, TITLE_RUSSIA).lines[("awg", "osip")]
     assert len(values) == SLOTS
     assert values[95] == 612
     assert values[94] == MAX_MS
@@ -74,7 +74,7 @@ def test_line_length_is_slots_and_point_falls_into_its_slot():
 def test_point_outside_the_grid_is_dropped():
     off_grid = {"at": "2026-11-12T03:20:00+00:00", "reports": 1, "down": 0, "median_ms": 100}
     panels = _panels(_history(_series("osip", "jeeves", "awg", [off_grid])))
-    values = _panel(panels, TITLE_RUSSIA).lines["awg"]
+    values = _panel(panels, TITLE_RUSSIA).lines[("awg", "osip")]
     assert len(values) == SLOTS
     assert all(value is None for value in values)
 
@@ -86,15 +86,15 @@ def test_ignored_node_is_skipped_and_nodes_are_split_by_scope():
         _series("zakhar", "jeeves", "reality", [_point(0, 10, 10, 100)]),
     )
     panels = _panels(history)
-    assert _panel(panels, TITLE_GLOBAL).lines["reality"][0] == 300
-    assert _panel(panels, TITLE_RUSSIA).lines["reality"][0] == 400
-    assert sorted(_panel(panels, TITLE_GLOBAL).lines) == ["reality"]
-    assert sorted(_panel(panels, TITLE_RUSSIA).lines) == ["reality"]
+    assert _panel(panels, TITLE_GLOBAL).lines[("reality", "mike")][0] == 300
+    assert _panel(panels, TITLE_RUSSIA).lines[("reality", "osip")][0] == 400
+    assert sorted(_panel(panels, TITLE_GLOBAL).lines) == [("reality", "mike")]
+    assert sorted(_panel(panels, TITLE_RUSSIA).lines) == [("reality", "osip")]
 
 
 def test_slot_with_all_down_is_max_ms_and_empty_slot_is_none():
     history = _history(_series("osip", "jeeves", "awg", [_point(1, 3, 3, 700)]))
-    values = _panel(_panels(history), TITLE_RUSSIA).lines["awg"]
+    values = _panel(_panels(history), TITLE_RUSSIA).lines[("awg", "osip")]
     assert values[1] == MAX_MS
     assert values[0] is None
 
@@ -113,7 +113,8 @@ def test_panels_are_ordered_by_scope_then_server():
         "US · wooster · Из России",
         "zee · Из России",
     ]
-    assert _panel(panels, TITLE_GLOBAL).lines == {"reality": (200,) + (None,) * (SLOTS - 1)}
+    expected = {("reality", "mike"): (200,) + (None,) * (SLOTS - 1)}
+    assert _panel(panels, TITLE_GLOBAL).lines == expected
     assert _panel(panels, "zee · Глобально").lines == {}
 
 
@@ -373,3 +374,85 @@ def test_resource_lines_follow_outage_episodes():
     }
     episodes = daily.outage_episodes(_history(), scopes, now=NOW, tz=TZ, label_of=label_of)
     assert episodes == ["🌐 dead.example: не открывался ни через один сервер 01:00–02:30"]
+
+
+VANKA_SCOPES = {
+    "scopes": {"russia": {"jeeves": "ok"}, "global": {"jeeves": "ok"}},
+    "russia": ["osip", "vanka"],
+    "ignored": [],
+}
+
+
+def _observer(node: str, transport: str, down: int, first: int = 0, last: int = SLOTS - 1) -> dict:
+    return _series(
+        node,
+        "jeeves",
+        transport,
+        [_point(s, 1, down, None if down else 500) for s in range(first, last + 1)],
+    )
+
+
+def _split_history() -> dict:
+    return _history(
+        _observer("vanka", "awg", 1),
+        _observer("vanka", "reality", 1),
+        _observer("osip", "awg", 0),
+        _observer("osip", "reality", 0),
+    )
+
+
+def test_each_observer_has_own_line_and_down_is_drawn_from_own_data():
+    russia = _panel(_panels(_split_history(), VANKA_SCOPES), TITLE_RUSSIA)
+    assert sorted(russia.lines) == [
+        ("awg", "osip"),
+        ("awg", "vanka"),
+        ("reality", "osip"),
+        ("reality", "vanka"),
+    ]
+    assert set(russia.lines[("awg", "vanka")]) == {MAX_MS}
+    assert set(russia.lines[("awg", "osip")]) == {500}
+    assert russia.observers == ("osip", "vanka")
+
+
+def test_status_is_partial_when_observers_disagree():
+    panels = _panels(_split_history(), VANKA_SCOPES)
+    russia = _panel(panels, TITLE_RUSSIA)
+    assert (russia.level, russia.status) == ("partial", "частично")
+    assert _panel(panels, TITLE_GLOBAL).level == "ok"
+
+
+@pytest.mark.parametrize(
+    ("vanka_down", "level"),
+    [(1, "partial"), (0, "ok")],
+)
+def test_status_follows_half_of_reports_rule(vanka_down: int, level: str) -> None:
+    mostly = [_point(s, 1, 1 if s < 49 else 0, 500) for s in range(SLOTS)]
+    history = _history(
+        _series("vanka", "jeeves", "awg", mostly if vanka_down else [_point(0, 1, 0, 500)]),
+        _observer("osip", "awg", 0),
+    )
+    assert _panel(_panels(history, VANKA_SCOPES), TITLE_RUSSIA).level == level
+
+
+def test_status_stays_when_all_observers_are_blind():
+    history = _history(_observer("vanka", "awg", 1), _observer("osip", "awg", 1))
+    scopes = {**VANKA_SCOPES, "scopes": {"russia": {"jeeves": "down"}}}
+    assert _panel(_panels(history, scopes), TITLE_RUSSIA).level == "down"
+
+
+def test_caption_lists_observers_when_they_disagree():
+    caption = daily.build_caption(_split_history(), VANKA_SCOPES, label_of=label_of)
+    assert "🇷🇺 🇳🇱 jeeves: vanka — недоступен 24 ч, osip — работает" in caption.split("\n")
+
+
+def test_caption_has_no_observer_line_when_they_agree():
+    history = _history(_observer("vanka", "awg", 0), _observer("osip", "awg", 0))
+    caption = daily.build_caption(history, VANKA_SCOPES, label_of=label_of)
+    assert "работает" not in caption and "недоступен" not in caption
+
+
+@pytest.mark.parametrize(
+    ("minutes", "text"), [(1440, "24 ч"), (315, "5 ч 15 мин"), (45, "45 мин")]
+)
+def test_duration_text(minutes: int, text: str) -> None:
+    assert daily._duration(minutes) == text

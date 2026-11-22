@@ -25,6 +25,11 @@ STATUS_TEXT = {
     vpn_link.LEVEL_DOWN: "нет связи",
 }
 UNKNOWN_STATUS_TEXT = "нет данных"
+BLIND_SHARE = 0.5
+UNAVAILABLE_WORD = "недоступен"
+WORKS_WORD = "работает"
+HOUR_WORD = "ч"
+MINUTE_WORD = "мин"
 
 PERIOD_FORMAT = "%d.%m %H:%M"
 TIME_FORMAT = "%H:%M"
@@ -137,18 +142,22 @@ def grid_of(history: dict, *, now: datetime, tz: tzinfo) -> Grid:
     )
 
 
-Observations = dict[str, dict[tuple[str, str], tuple[Point, ...]]]
+Observations = dict[str, dict[tuple[str, str, str], tuple[Point, ...]]]
 
 
 def observations(history: dict, scopes: dict) -> Observations:
     russia = scopes.get("russia") or []
     ignored = scopes.get("ignored") or []
-    seen: dict[str, dict[tuple[str, str], list[Point]]] = {}
+    seen: dict[str, dict[tuple[str, str, str], list[Point]]] = {}
     for series in history.get("series") or []:
         scope = vpn_link.scope_of(str(series.get("node") or ""), russia, ignored)
         if scope is None:
             continue
-        key = (str(series.get("server") or ""), str(series.get("transport") or ""))
+        key = (
+            str(series.get("server") or ""),
+            str(series.get("transport") or ""),
+            str(series.get("node") or ""),
+        )
         points = seen.setdefault(scope, {}).setdefault(key, [])
         for raw in series.get("points") or []:
             at = _moment(raw.get("at"))
@@ -177,6 +186,31 @@ def line_values(points: Sequence[Point], grid: Grid) -> tuple[int | None, ...]:
         else:
             values.append(_median_of(group))
     return tuple(values)
+
+
+def observers_of(group: dict[tuple[str, str, str], tuple[Point, ...]]) -> tuple[str, ...]:
+    return tuple(sorted({key[2] for key in group}))
+
+
+def observer_verdicts(
+    group: dict[tuple[str, str, str], tuple[Point, ...]], server: str
+) -> dict[str, bool]:
+    totals: dict[str, list[int]] = {}
+    for (key_server, _, observer), points in group.items():
+        if key_server != server:
+            continue
+        total = totals.setdefault(observer, [0, 0])
+        total[0] += sum(point.reports for point in points)
+        total[1] += sum(point.down for point in points)
+    return {
+        observer: down / reports > BLIND_SHARE
+        for observer, (reports, down) in totals.items()
+        if reports
+    }
+
+
+def observers_diverge(verdicts: dict[str, bool]) -> bool:
+    return any(verdicts.values()) and not all(verdicts.values())
 
 
 def servers_of(history: dict, scopes: dict) -> list[str]:
@@ -242,9 +276,11 @@ def build_panels(
         group = by_scope.get(scope, {})
         for server in servers:
             level = level_of(scopes, scope, server)
+            if level == vpn_link.LEVEL_OK and observers_diverge(observer_verdicts(group, server)):
+                level = vpn_link.LEVEL_PARTIAL
             lines = {
-                transport: line_values(group[(server, transport)], grid)
-                for transport in sorted(key[1] for key in group if key[0] == server)
+                (key[1], key[2]): line_values(group[key], grid)
+                for key in sorted(key for key in group if key[0] == server)
             }
             panels.append(
                 ChartPanel(
@@ -254,7 +290,12 @@ def build_panels(
                     period=period,
                     x_labels=labels,
                     lines=lines,
-                    names={t: names[(server, t)] for t in lines if (server, t) in names},
+                    names={
+                        t: names[(server, t)]
+                        for t in {transport for transport, _ in lines}
+                        if (server, t) in names
+                    },
+                    observers=observers_of(group),
                     bands=tuple(
                         ChartBand(start=episode.first, end=episode.last, label=episode.cause)
                         for episode in episodes
@@ -267,12 +308,17 @@ def build_panels(
 
 def panel_lines(history: dict, scopes: dict) -> dict[str, list[Line]]:
     by_scope = observations(history, scopes)
+    merged: dict[str, dict[tuple[str, str], tuple[Point, ...]]] = {}
+    for scope, group in by_scope.items():
+        pairs: dict[tuple[str, str], tuple[Point, ...]] = {}
+        for (server, transport, _), points in group.items():
+            pairs[(server, transport)] = pairs.get((server, transport), ()) + points
+        merged[scope] = pairs
     return {
         scope: [
-            Line(server=pair[0], transport=pair[1], points=by_scope[scope][pair])
-            for pair in sorted(by_scope[scope])
+            Line(server=pair[0], transport=pair[1], points=pairs[pair]) for pair in sorted(pairs)
         ]
-        for scope in by_scope
+        for scope, pairs in merged.items()
     }
 
 
@@ -376,8 +422,7 @@ def find_episodes(history: dict, scopes: dict, grid: Grid) -> list[Episode]:
         group = by_scope.get(scope, {})
         for server in sorted({pair[0] for pair in group}):
             values_by_line = [
-                line_values(group[(server, transport)], grid)
-                for transport in sorted(key[1] for key in group if key[0] == server)
+                line_values(group[key], grid) for key in sorted(group) if key[0] == server
             ]
             if values_by_line:
                 hits[(scope, server)] = _outage_slots(values_by_line)
@@ -440,6 +485,65 @@ def outage_episodes(
     return [*texts, *resource_lines(scopes, tz=tz)]
 
 
+def _duration(minutes: int) -> str:
+    hours, rest = divmod(minutes, 60)
+    parts = [f"{hours} {HOUR_WORD}"] if hours else []
+    if rest or not hours:
+        parts.append(f"{rest} {MINUTE_WORD}")
+    return " ".join(parts)
+
+
+def _down_minutes(
+    group: dict[tuple[str, str, str], tuple[Point, ...]],
+    server: str,
+    observer: str,
+    bucket_min: int,
+) -> int:
+    moments: dict[datetime, bool] = {}
+    for (key_server, _, key_observer), points in group.items():
+        if key_server != server or key_observer != observer:
+            continue
+        for point in points:
+            moments[point.at] = moments.get(point.at, True) and point.down == point.reports
+    return sum(moments.values()) * bucket_min
+
+
+def _observer_text(
+    group: dict[tuple[str, str, str], tuple[Point, ...]],
+    server: str,
+    observer: str,
+    blind: bool,
+    bucket_min: int,
+) -> str:
+    name = html.escape(observer)
+    if not blind:
+        return f"{name} — {WORKS_WORD}"
+    minutes = _down_minutes(group, server, observer, bucket_min)
+    span = f" {_duration(minutes)}" if minutes else ""
+    return f"{name} — {UNAVAILABLE_WORD}{span}"
+
+
+def divergence_lines(
+    history: dict, scopes: dict, *, label_of: Callable[[str], str]
+) -> list[str]:
+    by_scope = observations(history, scopes)
+    bucket_min = int(history.get("bucket_min") or DEFAULT_BUCKET_MIN)
+    lines = []
+    for scope in vpn_link.SCOPES:
+        group = by_scope.get(scope, {})
+        for server in sorted({key[0] for key in group}):
+            verdicts = observer_verdicts(group, server)
+            if not observers_diverge(verdicts):
+                continue
+            ordered = sorted(verdicts, key=lambda observer: (not verdicts[observer], observer))
+            texts = ", ".join(
+                _observer_text(group, server, observer, verdicts[observer], bucket_min)
+                for observer in ordered
+            )
+            lines.append(f"{notify.SCOPE_ICON[scope]} {_server_name(server, label_of)}: {texts}")
+    return lines
+
+
 def _assemble(head: Sequence[str], episodes: Sequence[str], conclusion: str) -> str:
     parts = [*head, *episodes]
     if conclusion:
@@ -468,7 +572,7 @@ def build_caption(
     for scope in vpn_link.SCOPES:
         head.append(_best_line(scope, stats.get(scope, []), label_of))
 
-    chosen = list(episodes)
+    chosen = [*divergence_lines(history, scopes, label_of=label_of), *episodes]
     tail = html.escape(conclusion) if conclusion else ""
     while chosen and len(_assemble(head, chosen, tail)) > CAPTION_LIMIT:
         chosen.pop()
