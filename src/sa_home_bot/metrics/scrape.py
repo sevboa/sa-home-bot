@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from sa_home_bot.config import Settings
@@ -46,19 +47,38 @@ def scrape_targets(settings: Settings, own_host: str | None) -> list[ScrapeTarge
     return [ScrapeTarget(node, found[node]) for node in sorted(found)]
 
 
-def scrape_config_text(targets: list[ScrapeTarget], interval: str, port: int) -> str:
+@dataclass(frozen=True)
+class ScrapeJob:
+    name: str
+    port: int
+    targets: list[ScrapeTarget]
+
+
+def vpn_scrape_targets(
+    targets: list[ScrapeTarget], known_servers: Collection[str]
+) -> list[ScrapeTarget]:
+    if not known_servers:
+        return targets
+    return [target for target in targets if target.node in known_servers]
+
+
+def _job_lines(job: ScrapeJob) -> list[str]:
     lines = [
-        "global:",
-        f"  scrape_interval: {json.dumps(interval)}",
-        "scrape_configs:",
-        f"  - job_name: {json.dumps(protocol.JOB_NAME)}",
+        f"  - job_name: {json.dumps(job.name)}",
         f"    metrics_path: {json.dumps(protocol.METRICS_PATH)}",
         "    static_configs:",
     ]
-    if not targets:
+    if not job.targets:
         lines[-1] = "    static_configs: []"
-    for target in targets:
-        lines.append(f"      - targets: [{json.dumps(f'{target.host}:{port}')}]")
+    for target in job.targets:
+        lines.append(f"      - targets: [{json.dumps(f'{target.host}:{job.port}')}]")
         lines.append("        labels:")
         lines.append(f"          {protocol.LABEL_NODE}: {json.dumps(target.node)}")
+    return lines
+
+
+def scrape_config_text(jobs: list[ScrapeJob], interval: str) -> str:
+    lines = ["global:", f"  scrape_interval: {json.dumps(interval)}", "scrape_configs:"]
+    for job in jobs:
+        lines.extend(_job_lines(job))
     return "\n".join(lines) + "\n"

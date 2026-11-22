@@ -324,7 +324,7 @@ async def _check_status(ctx: Ctx, value: str | None, node_id: str | None) -> Non
             rollup=result.get("rollup") or [],
             series=result.get("series") or [],
         ),
-        vpn_check_view.status_keyboard(),
+        vpn_check_view.status_keyboard(ctx.config.metrics.grafana_public_url),
     )
 
 
@@ -350,7 +350,7 @@ async def _check_now(ctx: Ctx, value: str | None, node_id: str | None) -> None:
             series=status.get("series") or [],
             pending=True,
         ),
-        vpn_check_view.status_keyboard(),
+        vpn_check_view.status_keyboard(ctx.config.metrics.grafana_public_url),
     )
 
 
