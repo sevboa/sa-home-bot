@@ -2,14 +2,16 @@
 # Сертификат Let's Encrypt на публичный IP для страницы подписки Hiddify (57.10).
 #
 # Запуск на VPN-ноде под её пользователем (нужен беспарольный sudo):
-#   sh sub-cert.sh <публичный-IP> [порт-страницы, по умолчанию 8444]
+#   sh sub-cert.sh <публичный-IP> [порт-страницы, по умолчанию 8444] [доп.имя ...]
+#   например: sh sub-cert.sh 85.122.132.154 2096 sub.heyalfred.fyi
+#   Один сертификат получает SAN на IP и на все доп. имена (профиль shortlived для всего).
 #
 # Что делает (идемпотентно):
 #  1. открывает tcp <порт> и tcp 80 (http-01) в firewall: ufw, либо nftables
 #     (live-правило + строка в /etc/nftables.conf, полный `nft -f` НЕ делается —
 #     он стёр бы таблицы tailscale/awg, см. память jeeves-nftables-forward-hook-trap);
 #  2. ставит acme.sh 3.1.6 в ~/.acme.sh (под root идёт только сам выпуск);
-#  3. выпускает сертификат на IP (профиль shortlived, ~6 суток) и кладёт
+#  3. выпускает сертификат на IP и доп. имена (профиль shortlived, ~6 суток) и кладёт
 #     ~/.config/sa-home-bot/sub-tls/{fullchain,privkey}.pem;
 #  4. ставит systemd-таймер продления (дважды в сутки). Служба vpn сама
 #     перечитывает файлы (раз в 10 минут) и сама переключается с http на https.
@@ -19,6 +21,9 @@ PATH="$PATH:/usr/sbin:/sbin"
 
 IP="${1:?нужен публичный IP}"
 PORT="${2:-8444}"
+shift 2 2>/dev/null || shift $#
+DOMAINS="-d $IP"
+for name in "$@"; do DOMAINS="$DOMAINS -d $name"; done
 ME="$(id -un)"
 ACME_HOME="$HOME/.acme.sh"
 TLS_DIR="$HOME/.config/sa-home-bot/sub-tls"
@@ -60,7 +65,7 @@ fi
 
 # --- 3. выпуск ---
 sudo -n "$ACME_HOME/acme.sh" --home "$ACME_HOME" --set-default-ca --server letsencrypt >/dev/null
-sudo -n "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue -d "$IP" --standalone --httpport 80 \
+sudo -n "$ACME_HOME/acme.sh" --home "$ACME_HOME" --issue $DOMAINS --standalone --httpport 80 \
     --server letsencrypt --certificate-profile shortlived --days 3 || rc=$?
 # rc=2 у acme.sh — «пропущено, ещё не пора продлевать»: не ошибка.
 if [ "${rc:-0}" != 0 ] && [ "${rc:-0}" != 2 ]; then

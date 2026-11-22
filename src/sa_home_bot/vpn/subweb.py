@@ -111,6 +111,10 @@ class SubscriptionWeb:
 
 
     @property
+    def ports(self) -> list[int]:
+        return list(dict.fromkeys([self._cfg.sub_port, *self._cfg.sub_legacy_ports]))
+
+    @property
     def base_url(self) -> str:
         scheme = "https" if self.tls else "http"
         return f"{scheme}://{public_host(self._cfg)}:{self._cfg.sub_port}"
@@ -166,13 +170,15 @@ class SubscriptionWeb:
             return
         runner = web.AppRunner(self._app(), access_log=None)
         await runner.setup()
+        port = self._cfg.sub_port
         try:
-            site = web.TCPSite(runner, self._cfg.sub_bind, self._cfg.sub_port, ssl_context=ctx)
-            await site.start()
+            for port in self.ports:
+                site = web.TCPSite(runner, self._cfg.sub_bind, port, ssl_context=ctx)
+                await site.start()
         except OSError as exc:
             await runner.cleanup()
             self.error = str(exc)
-            log.warning("vpn: порт подписки %s не открылся: %s", self._cfg.sub_port, exc)
+            log.warning("vpn: порт подписки %s не открылся: %s", port, exc)
             return
         self._runner, self._ctx, self.tls, self.error = runner, ctx, ctx is not None, None
         log.info(

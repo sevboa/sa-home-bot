@@ -654,7 +654,8 @@ def sub_ufw_specs(settings: Settings) -> list[str]:
     vpn = settings.vpn
     if vpn.sub_port <= 0 or vpn.reality is None:
         return []
-    return [f"{vpn.sub_port}/tcp", "80/tcp"]
+    ports = dict.fromkeys([vpn.sub_port, *vpn.sub_legacy_ports])
+    return [*(f"{port}/tcp" for port in ports), "80/tcp"]
 
 
 def make_sub_ufw_fixup(settings: Settings) -> Fixup:

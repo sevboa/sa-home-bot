@@ -415,6 +415,14 @@ def test_sub_ufw_check_requires_both_ports_and_is_off_without_sub_port(root):
     assert vpn_server.sub_ufw_specs(settings) == []
 
 
+def test_sub_ufw_specs_include_legacy_ports_without_duplicates():
+    settings = make_settings(["vpn"])
+    settings.vpn.sub_port = 2096
+    settings.vpn.sub_legacy_ports = [8444, 2096]
+    settings.vpn.reality = object()
+    assert vpn_server.sub_ufw_specs(settings) == ["2096/tcp", "8444/tcp", "80/tcp"]
+
+
 def _forward_world(root, *, existing: bool):
     root.outputs[UFW_STATUS] = UFW_CLEAN
     root.outputs["/usr/bin/ip -4 route show default"] = "default via 192.168.0.1 dev eth0\n"

@@ -755,6 +755,7 @@ class VpnConfig(BaseModel):
     reality: RealityTransportConfig | None = None
 
     sub_port: int = Field(default=8444, ge=0, le=65535)
+    sub_legacy_ports: list[int] = Field(default_factory=list)
     sub_bind: str = "0.0.0.0"
     sub_public_host: str = ""
     sub_tls_cert: str = ""

@@ -931,6 +931,47 @@ async def test_subscription_page_url_prefers_https_and_skips_without_vless(monke
     assert KEY
 
 
+@pytest.mark.parametrize(
+    ("urls", "expected"),
+    [
+        (["http://sub.heyalfred.fyi:2096/s/t", "https://198.51.100.1:8444/s/t"], "https://198.51.100.1:8444/s/t"),
+        (["https://198.51.100.1:8444/s/t", "https://sub.heyalfred.fyi:2096/s/t"], "https://sub.heyalfred.fyi:2096/s/t"),
+        (["https://[2001:db8::1]:8444/s/t", "http://a/s/t"], "https://[2001:db8::1]:8444/s/t"),
+        (["http://198.51.100.1:8444/s/t", "http://sub.heyalfred.fyi/s/t"], "http://198.51.100.1:8444/s/t"),
+    ],
+)
+async def test_page_url_priority_domain_then_ip_then_http(monkeypatch, urls, expected):
+    async def fake_fanout(link, action, args):
+        return [{"page_url": u} for u in urls]
+
+    monkeypatch.setattr(vpn_nodes, "fanout", fake_fanout)
+    assert await vpn_screens_handlers.page_url_by_label(object(), 5, LABEL) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected"),
+    [([], [18461]), ([18462, 18462, 18461], [18461, 18462])],
+)
+async def test_subweb_listens_on_legacy_ports(legacy, expected):
+    cfg = VpnConfig(
+        sub_port=18461, sub_legacy_ports=legacy, sub_bind="127.0.0.1", endpoint_host="198.51.100.1"
+    )
+
+    async def resolve(_t):
+        return None
+
+    web = SubscriptionWeb(cfg, resolve)
+    assert web.ports == expected
+    try:
+        assert await web.start()
+        for port in expected:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+        assert web.base_url == "http://198.51.100.1:18461"
+    finally:
+        await web.stop()
+
+
 def _node_pair(**kw):
     return (
         subs.NodeInfo("jeeves", "🇳🇱 Нидерланды", "198.51.100.1", base="https://198.51.100.1:8444"),

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 from aiogram.types import InlineKeyboardMarkup
 
 from sa_home_bot.bot import (
@@ -97,6 +100,17 @@ async def subscription_page_url(
     return await page_url_by_label(node_link, chat_id, device.label)
 
 
+def page_url_rank(url: str) -> int:
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return 2
+    try:
+        ipaddress.ip_address(parts.hostname or "")
+    except ValueError:
+        return 0
+    return 1
+
+
 async def page_url_by_label(node_link: ServiceLink, chat_id: int, label: str) -> str | None:
     answers = await vpn_nodes.fanout(
         node_link,
@@ -104,8 +118,7 @@ async def page_url_by_label(node_link: ServiceLink, chat_id: int, label: str) ->
         {"chat_id": chat_id, "device_label": label},
     )
     urls = [str(a["page_url"]) for a in answers if a.get("page_url")]
-    urls.sort(key=lambda u: not u.startswith("https://"))
-    return urls[0] if urls else None
+    return min(urls, key=page_url_rank) if urls else None
 
 
 async def show_screen(ctx: Ctx, screen: str, key: str = "", *, answered: bool = True) -> None:
