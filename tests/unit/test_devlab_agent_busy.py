@@ -97,7 +97,7 @@ async def test_answer_returns_to_running_hold_until_finished(env, clock):
     await worker.poll_once()
     assert worker._busy.running_jobs() == [job_id]
     assert worker._busy.busy()
-    worker._models = lambda name, jid: ScriptedChatModel(FINISH)
+    worker._models = lambda name, jid, style: ScriptedChatModel(FINISH)
     assert await worker.claim_once()
     assert not worker._busy.busy()
 

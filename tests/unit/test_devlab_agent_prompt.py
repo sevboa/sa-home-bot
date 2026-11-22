@@ -5,10 +5,13 @@ from datetime import date
 
 import pytest
 
+from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab.agent.prompt import (
     CODE_MODE_INTRO,
+    CODE_MODE_INTRO_FAST,
     CODE_MODE_INTRO_REMOTE,
     CODE_MODE_REMINDER,
+    CODE_MODE_REMINDER_FAST,
     CODE_MODE_REMINDER_REMOTE,
     FLOW_REMINDER,
     GLM_FLOW_REMINDER,
@@ -24,8 +27,10 @@ from sa_home_bot.devlab.agent.prompt import (
 )
 from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_EN,
+    CODE_MODE_INTRO_FAST_EN,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_EN,
+    CODE_MODE_REMINDER_FAST_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     RULES_TITLE_EN,
 )
@@ -303,3 +308,70 @@ def test_english_lang_without_code_mode_changes_nothing():
     assert build_system(RULES, "glm", COMMANDS, TODAY, lang="en") == build_system(
         RULES, "glm", COMMANDS, TODAY
     )
+
+
+STYLE_TEXTS = {
+    ("ru", "full"): (CODE_MODE_INTRO, CODE_MODE_REMINDER),
+    ("ru", "fast"): (CODE_MODE_INTRO_FAST, CODE_MODE_REMINDER_FAST),
+    ("en", "full"): (CODE_MODE_INTRO_EN, CODE_MODE_REMINDER_EN),
+    ("en", "fast"): (CODE_MODE_INTRO_FAST_EN, CODE_MODE_REMINDER_FAST_EN),
+}
+
+
+@pytest.mark.parametrize(("lang", "style"), list(STYLE_TEXTS))
+def test_glm_style_picks_intro_and_reminder(lang, style):
+    intro, reminder = STYLE_TEXTS[lang, style]
+    system = build_system(RULES, "glm", COMMANDS, TODAY, code_mode=True, lang=lang, style=style)
+    assert system.startswith(intro)
+    assert reminder_for("glm", code_mode=True, lang=lang, style=style) == reminder
+
+
+@pytest.mark.parametrize(
+    ("lang", "needle"),
+    [
+        ("ru", "Перед записью найди через grep(), как это уже сделано рядом"),
+        ("en", "Before writing, use grep() to find how it is already done nearby"),
+    ],
+)
+def test_full_glm_has_neighbors_rule_and_fast_does_not(lang, needle):
+    full_intro, full_reminder = STYLE_TEXTS[lang, "full"]
+    fast_intro, fast_reminder = STYLE_TEXTS[lang, "fast"]
+    assert needle in full_intro
+    assert needle not in fast_intro
+    assert "schema.sql" in full_intro
+    assert "schema.sql" not in fast_intro
+    assert "schema.sql" in full_reminder
+    assert "schema.sql" not in fast_reminder
+
+
+@pytest.mark.parametrize(("lang", "style"), list(STYLE_TEXTS))
+def test_fast_text_is_full_text_without_neighbors_block(lang, style):
+    intro, reminder = STYLE_TEXTS[lang, style]
+    fast_intro, fast_reminder = STYLE_TEXTS[lang, "fast"]
+    assert len(fast_intro) <= len(intro)
+    assert len(fast_reminder) <= len(reminder)
+    assert reminder.startswith(fast_reminder.split("Финал:")[0].split("Finish:")[0])
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+@pytest.mark.parametrize("style", ["full", "fast"])
+def test_remote_prompt_ignores_style(lang, style):
+    remote_intro = CODE_MODE_INTRO_REMOTE_EN if lang == "en" else CODE_MODE_INTRO_REMOTE
+    remote_reminder = CODE_MODE_REMINDER_REMOTE_EN if lang == "en" else CODE_MODE_REMINDER_REMOTE
+    assert build_system((), "flint", COMMANDS, TODAY, True, lang, style).startswith(remote_intro)
+    assert reminder_for("flint", True, lang, style) == remote_reminder
+
+
+@pytest.mark.parametrize("model", ["glm", "flint"])
+def test_style_does_not_touch_non_code_mode(model):
+    assert build_system(RULES, model, COMMANDS, TODAY, style="fast") == build_system(
+        RULES, model, COMMANDS, TODAY
+    )
+    assert reminder_for(model, False, "ru", "fast") == reminder_for(model)
+
+
+def test_profile_prompt_style_defaults_to_full_and_rejects_unknown():
+    assert DevlabProfileConfig().prompt_style == "full"
+    assert DevlabProfileConfig(prompt_style="fast").prompt_style == "fast"
+    with pytest.raises(ValueError):
+        DevlabProfileConfig(prompt_style="slow")

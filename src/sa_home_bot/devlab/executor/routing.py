@@ -11,6 +11,7 @@ import aiohttp
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.model import ChatModel, GatewayChat, ModelError, ModelReply
+from sa_home_bot.devlab.agent.prompt import STYLE_FULL
 from sa_home_bot.devlab.executor.hub import ExecutorHub, HubRequestError
 
 log = logging.getLogger(__name__)
@@ -213,13 +214,15 @@ class GatewayModels:
         self._token = token
         self._session: aiohttp.ClientSession | None = None
 
-    def __call__(self, model: str, job_id: str) -> ChatModel:
+    def __call__(self, model: str, job_id: str, prompt_style: str = STYLE_FULL) -> ChatModel:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         session = self._session
 
         def make(entry: CatalogEntry) -> GatewayChat:
-            return GatewayChat(entry.url, self._token, model, job_id, session=session)
+            return GatewayChat(
+                entry.url, self._token, model, job_id, session=session, prompt_style=prompt_style
+            )
 
         return FailoverChat(self._catalog, make, model)
 

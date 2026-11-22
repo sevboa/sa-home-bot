@@ -174,6 +174,7 @@ class DevlabProfileConfig(BaseModel):
     require_verdict: bool = False
     code_mode: bool = False
     prompt_lang: Literal["ru", "en"] = "ru"
+    prompt_style: Literal["full", "fast"] = "full"
     quick_steps: int = Field(default=0, ge=0)
     quick_params: dict[str, Any] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)

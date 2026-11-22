@@ -362,7 +362,7 @@ async def test_resume_remarks_survive_claim_before_poll(env):
     worker, _, _ = await parked_worker(env, [WRITE_DONE, ASK])
     assert await worker.claim_once()
     model = ScriptedChatModel(FINISH)
-    worker._models = lambda name, jid: model
+    worker._models = lambda name, jid, style: model
 
     await env.mcp.call(protocol.TOOL_RESUME, id=job_id, text="учти кодировку")
     assert await worker.claim_once()

@@ -480,6 +480,7 @@ class AgentWorker(WorkerLoops):
                 require_verdict=profile.require_verdict,
                 code_mode=profile.code_mode,
                 prompt_lang=profile.prompt_lang,
+                prompt_style=profile.prompt_style,
             )
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
@@ -496,7 +497,7 @@ class AgentWorker(WorkerLoops):
         rules = await self._rules(run, project, repo.base, external)
         limits = self._limits_for(spend, entries, profile)
         loop = AgentLoop(
-            MeteredChat(self._models(job.model, job.id), spend),
+            MeteredChat(self._models(job.model, job.id, spec.prompt_style), spend),
             ToolBox(sandbox, spec, read_max_lines(limits.context_tokens)),
             FinishGuard(sandbox, spec, self._settings.slots.heavy),
             limits,
@@ -513,6 +514,7 @@ class AgentWorker(WorkerLoops):
             spec.allowed_commands,
             code_mode=spec.code_mode,
             lang=spec.prompt_lang,
+            style=spec.prompt_style,
         )
         if role_text is not None:
             system = system + "\n\n" + role_text
