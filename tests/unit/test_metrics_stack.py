@@ -7,8 +7,15 @@ from sa_home_bot.domain.host import HostMetricState
 from sa_home_bot.domain.models import HealthState
 from sa_home_bot.metrics import protocol
 from sa_home_bot.metrics.dashboard import CATALOG, nodes_dashboard, render_dashboard
-from sa_home_bot.metrics.scrape import ScrapeTarget, peer_host, scrape_config_text, scrape_targets
-from sa_home_bot.monitor.exposition import build_metrics_app, render_metrics
+from sa_home_bot.metrics.exposition import build_metrics_app
+from sa_home_bot.metrics.scrape import (
+    ScrapeJob,
+    ScrapeTarget,
+    peer_host,
+    scrape_config_text,
+    scrape_targets,
+)
+from sa_home_bot.monitor.exposition import render_metrics, store_renderer
 from sa_home_bot.node.fixups import build_fixups, metrics, needs
 from tests.unit.fixups_world import FakeRoot, make_settings
 
@@ -65,7 +72,9 @@ def test_scrape_targets_use_own_address_for_self():
 
 
 def test_scrape_config_text():
-    text = scrape_config_text([ScrapeTarget("jeeves", "100.64.0.2")], "30s", 9100)
+    text = scrape_config_text(
+        [ScrapeJob("sa-home-nodes", 9100, [ScrapeTarget("jeeves", "100.64.0.2")])], "30s"
+    )
     assert text == (
         "global:\n"
         '  scrape_interval: "30s"\n'
@@ -77,7 +86,7 @@ def test_scrape_config_text():
         "        labels:\n"
         '          node: "jeeves"\n'
     )
-    assert "static_configs: []" in scrape_config_text([], "30s", 9100)
+    assert "static_configs: []" in scrape_config_text([ScrapeJob("sa-home-nodes", 9100, [])], "30s")
 
 
 def test_vm_args():
@@ -119,7 +128,7 @@ def test_dropin_waits_for_tailscaled():
 def test_dashboard_is_valid_json_with_vm_datasource():
     dashboard = json.loads(render_dashboard(nodes_dashboard()))
     assert dashboard["uid"]
-    assert set(CATALOG) == {"nodes.json"}
+    assert set(CATALOG) == {"nodes.json", "vpn.json"}
     datasources = [
         target["datasource"]["uid"] for panel in dashboard["panels"] for target in panel["targets"]
     ]
@@ -140,6 +149,7 @@ def test_provisioning_files_cover_datasource_provider_and_dashboards():
     assert "http://127.0.0.1:8428" in files[metrics.GRAFANA_DATASOURCE_FILE]
     assert str(metrics.GRAFANA_DASHBOARD_DIR) in files[metrics.GRAFANA_DASHBOARD_PROVIDER_FILE]
     assert metrics.GRAFANA_DASHBOARD_DIR / "nodes.json" in files
+    assert metrics.GRAFANA_DASHBOARD_DIR / "vpn.json" in files
 
 
 def _health(component: str, temp: float) -> HealthState:
@@ -170,7 +180,7 @@ async def test_metrics_endpoint_serves_store_values():
         async def get_all_host_states(self):
             return [_host("steal_pct", 1.0)]
 
-    async with TestClient(TestServer(build_metrics_app(StoreStub()))) as client:
+    async with TestClient(TestServer(build_metrics_app(store_renderer(StoreStub())))) as client:
         resp = await client.get(protocol.METRICS_PATH)
         body = await resp.text()
         assert resp.status == 200

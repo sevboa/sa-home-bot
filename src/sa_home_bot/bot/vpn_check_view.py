@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 
+from aiogram.types import InlineKeyboardButton
+
 from sa_home_bot.bot import vpn_callbacks, vpn_devices, vpn_keyboards
 from sa_home_bot.bot.notifier import MAX_LEN
 from sa_home_bot.bot.ui.keyboards import back_row, button, markup
 from sa_home_bot.domain import vpn_check
+from sa_home_bot.metrics.vpn_dashboard import VPN_DASHBOARD_UID
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 STATUS_ICON = {
@@ -23,6 +26,7 @@ SERIES_VERDICT_TEXT = {
 LEGEND = "🟠 — доступен не отовсюду (где-то уже блокируют), 🔴 — не отвечает ни одному наблюдателю."
 NOTHING_OPENED = "не открылось ничего"
 TRUNCATED_NOTE = "… не влезло в сообщение"
+GRAFANA_BUTTON_TEXT = "📊 Grafana"
 
 
 def transport_icons(server: dict) -> dict[str, str]:
@@ -207,13 +211,24 @@ def status_text(
     return _fit(lines, tail)
 
 
-def status_keyboard():
-    return markup(
+def grafana_button(public_url: str) -> InlineKeyboardButton | None:
+    base = public_url.strip().rstrip("/")
+    if not base:
+        return None
+    return InlineKeyboardButton(text=GRAFANA_BUTTON_TEXT, url=f"{base}/d/{VPN_DASHBOARD_UID}")
+
+
+def status_keyboard(grafana_url: str = ""):
+    rows = [
         [
             button(
                 "🔄 Запустить проверку", vpn_callbacks.vpn_callback(vpn_protocol.ACTION_CHECK_NOW)
             ),
             button("↻ Обновить", vpn_callbacks.vpn_callback(vpn_protocol.ACTION_CHECK_STATUS)),
-        ],
-        back_row(vpn_callbacks.home_cb()),
-    )
+        ]
+    ]
+    grafana = grafana_button(grafana_url)
+    if grafana is not None:
+        rows.append([grafana])
+    rows.append(back_row(vpn_callbacks.home_cb()))
+    return markup(*rows)

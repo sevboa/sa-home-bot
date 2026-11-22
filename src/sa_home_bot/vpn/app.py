@@ -9,6 +9,7 @@ from sa_home_bot.bot.service_link import ServiceLink
 from sa_home_bot.config import RealityTransportConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
+from sa_home_bot.metrics.exposition import MetricsEndpoint
 from sa_home_bot.proto.emitter import DeferredEmitter
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.proto.server import ProtoServer
@@ -101,6 +102,10 @@ async def run_vpn(settings: Settings) -> None:
         except Exception:
             log.exception("vpn: страница подписки не запустилась")
 
+    metrics_endpoint = MetricsEndpoint(service.render_metrics, settings.metrics.vpn_port)
+    if settings.metrics.export:
+        await metrics_endpoint.start()
+
     usage_task = asyncio.create_task(service.usage_loop(), name="vpn-usage-loop")
     tasks = [usage_task]
     if settings.vpn.warp is not None:
@@ -126,6 +131,7 @@ async def run_vpn(settings: Settings) -> None:
             await sub_web.stop()
         if service.backup is not None:
             await service.backup.stop()
+        await metrics_endpoint.stop()
         await server.stop()
         await node_link.stop()
         await db.close()

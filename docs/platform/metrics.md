@@ -1,7 +1,7 @@
 # Метрики и графики нод (Grafana + VictoriaMetrics)
 
 Решение владельца 2026-11-23: процессор по режимам, память, swap, диск, сеть, load и температуры
-нод смотреть на графиках. Матрица VPN-проверок будет следующей задачей, место под неё — каталог дашбордов.
+нод смотреть на графиках. Матрица VPN-проверок и аналог суточного графика — дашборд «VPN» (раздел ниже).
 
 ## Стек
 - **Источник**: служба `monitor` каждой ноды. Своего экспортёра (node_exporter) не ставим: монитор уже
@@ -66,7 +66,7 @@ Debian-пакет victoria-metrics берёт аргументы из `ARGS` в 
 Каталог `metrics/dashboard.py::CATALOG` (имя файла → построитель): сейчас `nodes.json` («Ноды», uid
 `sa-home-nodes`; переменная `node` — multi, All). Сводная таблица по нодам (up, steal, iowait, RAM, диск,
 load, макс. температура) и графики: steal, iowait, load/ядро, RAM, swap, диск, PSI, conntrack, ошибки NIC,
-OOM и стойла, температуры. Матрица VPN-проверок добавится новой записью в `CATALOG`. Дашборды лежат в
+OOM и стойла, температуры. Дашборд «VPN» — вторая запись `CATALOG` (`vpn.json`). Дашборды лежат в
 коде (генерируются), папки Grafana = подкаталоги провайдера (`foldersFromFilesStructure`).
 
 ## Данные
@@ -76,3 +76,54 @@ OOM и стойла, температуры. Матрица VPN-проверок
 ## Первый вход
 `http://<tailscale-IP alfred>:3000` (порт `grafana_port`); логин `admin` / `admin`, Grafana сразу
 попросит сменить пароль. Источник данных и дашборд «Ноды» уже заведены.
+
+## VPN: матрица проверок (решение владельца 2026-11-23)
+
+Только для владельца, через Tailscale. Данные те же, что кладёт в БД служба `vpn` (`vpn_check_states`,
+`vpn_link_states`), ничего нового не снимается и расписание проверок не меняется (раунд 15–20 минут, AWG раз в 1–3 ч).
+
+### Экспорт
+Каждый сервер со службой `vpn` при `[metrics] export = true` отдаёт `GET /metrics` на tailscale-адресе и порту
+`[metrics] vpn_port` (9101). Общий код (рендер строк, `MetricsEndpoint` с повтором привязки раз в 15 с) лежит в
+`metrics/exposition.py`, им же пользуется монитор. Рендер: `metrics/vpn.py`, выборка из БД —
+`ChecksMixin.render_metrics`. Сервер знает результаты проверок к себе от всех наблюдателей.
+
+Свежесть: строки фильтруются той же `_fresh_clause`, что и остальная логика (`stale_after_s`: AWG —
+`awg_check_max_s * 3`, остальное — `(check_interval_s + check_jitter_s) * 3`). Устаревшие ряды не отдаются,
+поэтому в Grafana на их месте провал в данных, а не ложный красный. Наблюдатели из `ignored_observers` не отдаются.
+
+| метрика | значение |
+|---|---|
+| `sa_vpn_check_ok{observer,server,transport,scope,target}` | 1 — последняя проверка цели прошла, 0 — нет |
+| `sa_vpn_check_latency_ms{...}` | задержка последней проверки, мс (если есть) |
+| `sa_vpn_check_ok_ratio{observer,server,transport,scope}` | доля успешных целей: 1 — работает, 0 — не работает, между — «частично» |
+| `sa_vpn_link_level{observer,server,transport,scope}` | устойчивый уровень связки: 2 — работает, 1 — частично, 0 — не работает |
+
+Метки: `observer` — имя наблюдателя; `server` — имя VPN-сервера; `transport` — `reality`, `reality_alt`,
+`reality_xhttp`, `awg`, `awg_alt`; `target` — адрес цели; `scope` — `russia` для наблюдателей из
+`[vpn] russia_observers` (на проде osip и vanka), иначе `global`. Отдельной константы для «Из России» нет:
+охват задаёт конфиг службы, тот же, что у суточного отчёта и алертов. Метку `node` ставит scrape (= сервер).
+
+### Scrape
+Отдельный job `sa-home-vpn` на `vpn_port` (`metrics/scrape.py::ScrapeJob`, `vpn_scrape_targets`). Список серверов
+берётся из `data/vpn_known_servers.json` (его ведёт бот, `vpn_nodes.known_server_nodes`) в пересечении с
+`[swarm].nodes`; если файла нет или он пуст, опрашиваются все пиры роя, лишние остаются `up = 0`. Файл читается при
+`nodectl fix` на хабе, новый VPN-сервер подхватывается следующим фиксом.
+
+### Дашборд «VPN» (`metrics/vpn_dashboard.py`, uid `sa-home-vpn`)
+- Матрица (status history): ряды «наблюдатель → сервер · способ», значение `ok_ratio`: зелёный 1, красный 0,
+  жёлтый «частично».
+- Группа «Из России»: та же матрица, `scope="russia"`.
+- Аналог суточного графика: доступность по способам и наблюдателям и по серверам (`avg_over_time` на 15 минут),
+  задержка, уровень связки.
+- Таблица «Сейчас не работает»: цели с `ok = 0`.
+- Переменные `observer`, `server`, `transport` — multi, по умолчанию All; период по умолчанию 24 часа.
+
+### Кнопка в боте
+Экран «🛰 Проверка сети» (только админ) получает URL-кнопку «📊 Grafana» на `<grafana_public_url>/d/sa-home-vpn`, если
+`[metrics] grafana_public_url` не пуст.
+
+### Что включить
+- На каждом VPN-сервере: `[metrics] export = true` и перезапуск службы `vpn` (порт `vpn_port`, по умолчанию 9101).
+- На alfred (хаб): `[metrics] grafana_public_url = "https://alfred.tail61d88b.ts.net"`, затем `nodectl fix`
+  (перепишет scrape и добавит `vpn.json`); публикацию Grafana по этому адресу (Tailscale Serve) настраивает владелец.
