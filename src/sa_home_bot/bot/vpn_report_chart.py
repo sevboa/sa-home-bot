@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import math
 from dataclasses import dataclass, field
 from functools import lru_cache
+from itertools import pairwise
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -36,7 +38,7 @@ FALLBACK_COLORS = ((90, 90, 90), (200, 60, 120), (100, 140, 40))
 GX = 90
 GY = 120
 PLOT_WIDTH = WIDTH - 140
-PLOT_HEIGHT = 470
+PLOT_HEIGHT = 450
 TOP_BAND = 56
 GRID_MS = (0, 500, 1000, 1500, 2000)
 TOP_BAND_FILL = (248, 226, 222)
@@ -48,8 +50,11 @@ BAND_FILL = (90, 90, 90, 36)
 BAND_TEXT = (90, 90, 90)
 BAND_CAPTION_Y = GY + PLOT_HEIGHT - 26
 
-OUTAGE_ROW_TOP = 12
+OUTAGE_ROW_TOP = 8
 OUTAGE_ROW_STEP = 9
+OUTAGE_OBSERVER_STEP = 3
+SOLID: tuple[int, ...] = ()
+OBSERVER_PATTERNS: tuple[tuple[int, ...], ...] = (SOLID, (14, 8), (3, 7), (14, 6, 3, 6))
 DOT_RADIUS = 3
 LINE_WIDTH = 4
 
@@ -63,12 +68,14 @@ GRID_LABEL_X = GX - 58
 GRID_LABEL_SHIFT = -10
 TIME_LABEL_Y = GY + PLOT_HEIGHT + 8
 
-LEGEND_Y = HEIGHT - 38
-LEGEND_TEXT_Y = HEIGHT - 50
+LEGEND_FIRST_TEXT_Y = 612
+LEGEND_ROW_STEP = 28
+LEGEND_LINE_SHIFT = 12
 LEGEND_SWATCH = 34
 LEGEND_TEXT_X = 42
-LEGEND_STEP = 84
+LEGEND_STEP = 36
 LEGEND_WIDTH = 6
+LEGEND_RIGHT = WIDTH - 40
 
 TITLE_SIZE = 34
 BADGE_SIZE = 20
@@ -95,9 +102,10 @@ class ChartPanel:
     level: str
     period: str
     x_labels: tuple[str, ...]
-    lines: dict[str, tuple[int | None, ...]]
+    lines: dict[tuple[str, str], tuple[int | None, ...]]
     bands: tuple[ChartBand, ...] = ()
     names: dict[str, str] = field(default_factory=dict)
+    observers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,11 +121,11 @@ class _Geometry:
     def y(self, value: int) -> float:
         return GY + PLOT_HEIGHT - min(value, MAX_MS) / MAX_MS * (PLOT_HEIGHT - TOP_BAND)
 
-    def point_y(self, order: int, value: int) -> float:
-        return self.outage_y(order) if value >= MAX_MS else self.y(value)
+    def point_y(self, offset: int, value: int) -> float:
+        return self.outage_y(offset) if value >= MAX_MS else self.y(value)
 
-    def outage_y(self, order: int) -> int:
-        return GY + OUTAGE_ROW_TOP + order * OUTAGE_ROW_STEP
+    def outage_y(self, offset: int) -> int:
+        return GY + OUTAGE_ROW_TOP + offset
 
 
 @lru_cache
@@ -129,10 +137,20 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
         return ImageFont.load_default()
 
 
+def _transports(panel: ChartPanel) -> list[str]:
+    return list(dict.fromkeys(transport for transport, _ in panel.lines))
+
+
+def _pattern(panel: ChartPanel, observer: str) -> tuple[int, ...]:
+    if observer not in panel.observers:
+        return SOLID
+    return OBSERVER_PATTERNS[panel.observers.index(observer) % len(OBSERVER_PATTERNS)]
+
+
 def _transport_colors(panel: ChartPanel) -> dict[str, tuple[int, int, int]]:
     colors = {}
     fallback = 0
-    for transport in panel.lines:
+    for transport in _transports(panel):
         if transport in TRANSPORT_COLORS:
             colors[transport] = TRANSPORT_COLORS[transport]
         else:
@@ -195,8 +213,43 @@ def _draw_grid(image: Image.Image, geometry: _Geometry) -> None:
         draw.text((GRID_LABEL_X, y + GRID_LABEL_SHIFT), label, font=font, fill=MUT)
 
 
+def _dashes(
+    points: list[tuple[float, float]], pattern: tuple[int, ...]
+) -> list[list[tuple[float, float]]]:
+    if not pattern:
+        return [points]
+    runs: list[list[tuple[float, float]]] = []
+    current = [points[0]]
+    index = 0
+    remaining = float(pattern[0])
+    for (x0, y0), (x1, y1) in pairwise(points):
+        length = math.hypot(x1 - x0, y1 - y0)
+        walked = 0.0
+        while length - walked > remaining:
+            walked += remaining
+            share = walked / length
+            cut = (x0 + (x1 - x0) * share, y0 + (y1 - y0) * share)
+            if index % 2 == 0:
+                current.append(cut)
+                runs.append(current)
+                current = []
+            else:
+                current = [cut]
+            index = (index + 1) % len(pattern)
+            remaining = float(pattern[index])
+        remaining -= length - walked
+        if index % 2 == 0:
+            current.append((x1, y1))
+    if index % 2 == 0 and len(current) > 1:
+        runs.append(current)
+    return runs
+
+
 def _draw_run(
-    draw: ImageDraw.ImageDraw, points: list[tuple[float, float]], color: tuple[int, int, int]
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[float, float]],
+    color: tuple[int, int, int],
+    pattern: tuple[int, ...] = SOLID,
 ) -> None:
     if not points:
         return
@@ -205,26 +258,31 @@ def _draw_run(
         draw.ellipse(
             (x - DOT_RADIUS, y - DOT_RADIUS, x + DOT_RADIUS, y + DOT_RADIUS), fill=color
         )
-    else:
-        draw.line(points, fill=color, width=LINE_WIDTH, joint="curve")
+        return
+    for part in _dashes(points, pattern):
+        draw.line(part, fill=color, width=LINE_WIDTH, joint="curve")
 
 
 def _draw_lines(image: Image.Image, panel: ChartPanel, geometry: _Geometry) -> None:
     draw = ImageDraw.Draw(image)
     colors = _transport_colors(panel)
-    for order, (transport, values) in enumerate(panel.lines.items()):
+    transports = _transports(panel)
+    for (transport, observer), values in panel.lines.items():
         color = colors[transport]
+        pattern = _pattern(panel, observer)
+        observer_order = panel.observers.index(observer) if observer in panel.observers else 0
+        offset = (
+            transports.index(transport) * OUTAGE_ROW_STEP
+            + observer_order * OUTAGE_OBSERVER_STEP
+        )
         run: list[tuple[float, float]] = []
         for index, value in enumerate(values):
             if value is None:
-                _draw_run(draw, run, color)
+                _draw_run(draw, run, color, pattern)
                 run = []
                 continue
-            if not run:
-                run = [(geometry.x(index), geometry.point_y(order, value))]
-                continue
-            run.append((geometry.x(index), geometry.point_y(order, value)))
-        _draw_run(draw, run, color)
+            run.append((geometry.x(index), geometry.point_y(offset, value)))
+        _draw_run(draw, run, color, pattern)
 
 
 def _draw_time_labels(image: Image.Image, panel: ChartPanel, geometry: _Geometry) -> None:
@@ -243,19 +301,42 @@ def _draw_time_labels(image: Image.Image, panel: ChartPanel, geometry: _Geometry
         )
 
 
+LegendItem = tuple[str, tuple[int, int, int], tuple[int, ...]]
+
+
+def _legend_items(panel: ChartPanel) -> list[list[LegendItem]]:
+    colors = _transport_colors(panel)
+    transports = [
+        (panel.names.get(t) or t, colors[t], SOLID) for t in _transports(panel)
+    ]
+    present = {observer for _, observer in panel.lines}
+    observers = [
+        (observer, MUT, _pattern(panel, observer))
+        for observer in panel.observers
+        if observer in present
+    ]
+    return [transports, observers] if observers else [transports]
+
+
 def _draw_legend(image: Image.Image, panel: ChartPanel) -> None:
     if not panel.lines:
         return
     draw = ImageDraw.Draw(image)
     font = _font(LEGEND_SIZE)
-    colors = _transport_colors(panel)
-    x = GX
-    for transport in panel.lines:
-        color = colors[transport]
-        draw.line((x, LEGEND_Y, x + LEGEND_SWATCH, LEGEND_Y), fill=color, width=LEGEND_WIDTH)
-        name = panel.names.get(transport) or transport
-        draw.text((x + LEGEND_TEXT_X, LEGEND_TEXT_Y), name, font=font, fill=INK)
-        x += draw.textlength(name, font=font) + LEGEND_STEP
+    y = LEGEND_FIRST_TEXT_Y
+    for group in _legend_items(panel):
+        x = GX
+        for name, color, pattern in group:
+            width = LEGEND_TEXT_X + draw.textlength(name, font=font)
+            if x > GX and x + width > LEGEND_RIGHT:
+                x = GX
+                y += LEGEND_ROW_STEP
+            line_y = y + LEGEND_LINE_SHIFT
+            for part in _dashes([(x, line_y), (x + LEGEND_SWATCH, line_y)], pattern):
+                draw.line(part, fill=color, width=LEGEND_WIDTH)
+            draw.text((x + LEGEND_TEXT_X, y), name, font=font, fill=INK)
+            x += width + LEGEND_STEP
+        y += LEGEND_ROW_STEP
 
 
 def render_panel(panel: ChartPanel) -> bytes:
