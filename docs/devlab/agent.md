@@ -828,3 +828,9 @@ resume состояние начинается с чистого листа.
 `test_devlab_agent_sandbox.py` (кадры туда-обратно, время обработчика, Podman без взаимной блокировки,
 `failure_summary`, `diff`), `test_devlab_agent_run_script.py` (цикл: код после шага, `finish` после
 `step_done`, счётчик, список упавших, шум, комментарии, diff).
+
+### 2026-11-22 (Code Mode: язык промпта, diff по всем файлам)
+- Поле профиля роли `prompt_lang` (`DevlabProfileConfig`, `"ru"` по умолчанию или `"en"`) идёт в `AgentSpec.prompt_lang` тем же `replace`, что `code_mode`. При `"en"` в Code Mode `build_system(..., lang=)` берёт `CODE_MODE_INTRO_EN`, `CODE_MODE_SETTING_EN`, заголовки `GLM_SETTING_TITLE_EN` и `RULES_TITLE_EN`; `ToolBox.definitions` отдаёт `SEARCH_DEFINITION_EN` и `EXECUTE_DEFINITION_EN` (описания функций — `SCRIPT_API_EN`, порядок и имена как у `SCRIPT_API`); `search` ищет по английскому списку. Все английские константы лежат в `agent/prompt_en.py`. Напоминание `GatewayChat` выбирает по тому, что в `tools` лежит `EXECUTE_DEFINITION_EN`. Без Code Mode поле ни на что не влияет. Подсказки стражей в `loop.py`, `build_task` и тексты ошибок воркера остались русскими.
+- `diff()` показывает все изменённые текстовые файлы рабочей копии против базы (в том числе `docs/`), `diff_prefixes` больше не фильтрует его: префиксы остались только у стража `finish`. Служебные каталоги и так вне обхода (`IGNORED_DIRS`).
+- `read(path, start, end)` при `start` за концом файла бросает `EditError("в файле path N строк")` вместо пустой строки.
+- `run("git ...")` отвечает `Result` с кодом 1: «git в песочнице нет: изменения показывает diff()». Список `allowed_commands` приходит из `.devlab.toml` проекта (примеры с `git diff`/`git status` — в `devlab-toml.md`), в коде по умолчанию его нет, поэтому отказ стоит в самом `run()` скрипта, до проверки списка.

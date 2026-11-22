@@ -26,6 +26,7 @@ class AgentSpec:
     allow_no_changes: bool = False
     require_verdict: bool = False
     code_mode: bool = False
+    prompt_lang: str = "ru"
     command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S
     test_timeout_s: float = DEFAULT_TEST_TIMEOUT_S
     narrow_test_timeout_s: float = DEFAULT_NARROW_TEST_TIMEOUT_S

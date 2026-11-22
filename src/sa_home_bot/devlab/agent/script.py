@@ -28,7 +28,7 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "read",
         "def read(path: str, start: int = 1, end: int | None = None) -> str: ...",
         "текст файла, строки start..end (с 1, end включительно); годится для old в edit(); "
-        "нет файла — EditError",
+        "нет файла или start за концом файла — EditError («в файле N строк»)",
     ),
     (
         "read_numbered",
@@ -88,8 +88,8 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         "diff",
         "def diff() -> str: ...",
-        "унифицированный дифф всех твоих правок против базы задания, как его увидит страж "
-        "finish",
+        "унифицированный дифф всех изменённых текстовых файлов рабочей копии против базы "
+        "задания (src, tests, docs и остальные)",
     ),
     (
         "Result",
@@ -108,7 +108,7 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "EditError",
         "class EditError(Exception): ...",
         "правка или чтение не удались: фрагмент не найден или найден не один раз, файла нет, "
-        "путь закрыт",
+        "start за концом файла, путь закрыт",
     ),
 )
 SCRIPT_READ_EXAMPLE = """# Намерение: прочитать load и его тест в переменные, найти описание в docs
@@ -336,6 +336,8 @@ def _text(path):
 
 def read(path, start=1, end=None):
     lines = _text(path).splitlines(keepends=True)
+    if start > max(1, len(lines)):
+        raise EditError(f"в файле {path} {len(lines)} строк")
     return "".join(lines[max(1, start) - 1 : end])
 
 
@@ -468,6 +470,8 @@ def run(command):
         argv = shlex.split(command)
     except (ValueError, AttributeError) as error:
         return Result(2, f"команда не разобрана: {error}")
+    if argv and argv[0] == "git":
+        return Result(1, "git в песочнице нет: изменения показывает diff()")
     if not any(argv[: len(allowed)] == allowed for allowed in _CONFIG["allowed"]):
         listed = ", ".join(" ".join(allowed) for allowed in _CONFIG["allowed"])
         return Result(126, f"команда не разрешена; разрешены: {listed}")
@@ -636,11 +640,11 @@ class ScriptRun:
     green: bool | None = None
 
 
-def api_stubs(query: str = "") -> str:
+def api_stubs(query: str = "", api: tuple[tuple[str, str, str], ...] = SCRIPT_API) -> str:
     needle = query.strip().lower()
     return "\n".join(
         f"{stub}  # {about}"
-        for name, stub, about in SCRIPT_API
+        for name, stub, about in api
         if needle in name.lower() or needle in about.lower()
     )
 

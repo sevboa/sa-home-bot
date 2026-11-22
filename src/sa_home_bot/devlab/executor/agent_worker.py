@@ -479,6 +479,7 @@ class AgentWorker(WorkerLoops):
                 allow_no_changes=profile.allow_no_changes,
                 require_verdict=profile.require_verdict,
                 code_mode=profile.code_mode,
+                prompt_lang=profile.prompt_lang,
             )
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
@@ -506,7 +507,13 @@ class AgentWorker(WorkerLoops):
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
         )
-        system = build_system(rules, job.model, spec.allowed_commands, code_mode=spec.code_mode)
+        system = build_system(
+            rules,
+            job.model,
+            spec.allowed_commands,
+            code_mode=spec.code_mode,
+            lang=spec.prompt_lang,
+        )
         if role_text is not None:
             system = system + "\n\n" + role_text
         dialog = self._answered_dialog(run)

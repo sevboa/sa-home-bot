@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from sa_home_bot.devlab.agent.paths import matches
+from sa_home_bot.devlab.agent.prompt_en import (
+    EN,
+    EXECUTE_CODE_EN,
+    EXECUTE_DESCRIPTION_EN,
+    SCRIPT_API_EN,
+    SEARCH_DESCRIPTION_EN,
+    SEARCH_QUERY_EN,
+)
 from sa_home_bot.devlab.agent.sandbox import (
     Sandbox,
     SandboxPathError,
@@ -18,6 +26,7 @@ from sa_home_bot.devlab.agent.sandbox import (
     safe_relative,
 )
 from sa_home_bot.devlab.agent.script import (
+    SCRIPT_API,
     SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
     SCRIPT_OUTPUT_CHARS,
@@ -224,6 +233,15 @@ EXECUTE_DEFINITION = _schema(
     code=_text("Код Python"),
 )
 
+SEARCH_DEFINITION_EN = _schema(
+    TOOL_SEARCH, SEARCH_DESCRIPTION_EN, query=_text(SEARCH_QUERY_EN)
+)
+EXECUTE_DEFINITION_EN = _schema(
+    TOOL_EXECUTE,
+    EXECUTE_DESCRIPTION_EN + api_stubs("", SCRIPT_API_EN),
+    code=_text(EXECUTE_CODE_EN),
+)
+
 
 def _argument(args: dict[str, Any], key: str, kind: type, default: Any = None) -> Any:
     value = args.get(key, default)
@@ -276,6 +294,8 @@ class ToolBox:
     @property
     def definitions(self) -> list[dict[str, Any]]:
         if self._spec.code_mode:
+            if self._spec.prompt_lang == EN:
+                return [SEARCH_DEFINITION_EN, EXECUTE_DEFINITION_EN]
             return [SEARCH_DEFINITION, EXECUTE_DEFINITION]
         return TOOL_DEFINITIONS
 
@@ -419,7 +439,8 @@ class ToolBox:
         return ToolOutcome(text, green=result.ok)
 
     async def _search(self, args: dict[str, Any]) -> str:
-        return api_stubs(_argument(args, "query", str, "")) or SEARCH_EMPTY
+        api = SCRIPT_API_EN if self._spec.prompt_lang == EN else SCRIPT_API
+        return api_stubs(_argument(args, "query", str, ""), api) or SEARCH_EMPTY
 
     def _script_config(self) -> dict[str, Any]:
         spec = self._spec
@@ -467,7 +488,7 @@ class ToolBox:
             accepted.append(str(args.get("title", "")))
             return {"ok": True}
         if name == "diff":
-            text = await self._sandbox.diff(self._spec.diff_prefixes)
+            text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
         if name == "comments":
             return {"ok": True, "value": await self._comment_lines()}

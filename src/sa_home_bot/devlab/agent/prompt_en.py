@@ -118,3 +118,117 @@ CODE_MODE_REMINDER_EN = (
     "run_tests(), step_done(\"N: summary\"). Last step: edits, run_tests(), step_done(), "
     "run(\"ruff check ...\") and finish(\"summary\") - in one call."
 )
+GLM_SETTING_TITLE_EN = "## Setting"
+RULES_TITLE_EN = "Project rules (mandatory):"
+EN = "en"
+SEARCH_DESCRIPTION_EN = (
+    "API function signatures available inside execute code: those with query in the name or "
+    "description; an empty query lists all functions."
+)
+SEARCH_QUERY_EN = "A word from a function name or description; empty string lists all functions"
+EXECUTE_DESCRIPTION_EN = (
+    "Runs Python code in the project root (src is in sys.path, project packages import). "
+    "The functions below are already defined; do not import them. The code runs immediately, in "
+    "order, like plain Python. You see print() output and the value of the last expression, as "
+    f"in Jupyter; up to {SCRIPT_OUTPUT_CHARS} chars (the beginning). One process per task: "
+    "variables, imports and functions persist between calls, as in Jupyter; keep what you read "
+    "in a variable and do not re-read it. After a timeout or a crash the state is reset. Code "
+    "that needs output you have not seen yet goes in the next call, everything else in this "
+    "one. finish() and ask_owner() end the script; step_done() does not: accepted - the script "
+    "goes on, rejected - StepRejected with the reason and a stop. Functions:\n"
+)
+EXECUTE_CODE_EN = "Python code"
+SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
+    (
+        "ls",
+        'def ls(prefix: str = "") -> list[str]: ...',
+        "paths of project files starting with prefix",
+    ),
+    (
+        "read",
+        "def read(path: str, start: int = 1, end: int | None = None) -> str: ...",
+        "file text, lines start..end (1-based, end inclusive); suitable for old in edit(); "
+        "missing file or start beyond the last line - EditError (\"в файле N строк\")",
+    ),
+    (
+        "read_numbered",
+        "def read_numbered(path: str, start: int = 1, end: int | None = None) -> str: ...",
+        "same with numbers \"n<TAB>line\", for viewing; not suitable for old in edit()",
+    ),
+    (
+        "read_many",
+        "def read_many(paths: list[str]) -> dict[str, str]: ...",
+        "dict path -> file text, as read()",
+    ),
+    (
+        "grep",
+        'def grep(pattern: str, prefix: str = "", context: int = 0) -> list[str]: ...',
+        "regular expression over files whose path starts with prefix (file or directory): "
+        "matches \"path:n:line\", context lines \"path-n-line\"",
+    ),
+    (
+        "edit",
+        "def edit(path: str, old: str, new: str) -> None: ...",
+        "replace the single occurrence of old with new in the file at once; 0 or more than 1 "
+        "occurrences, or a closed path - EditError",
+    ),
+    (
+        "write",
+        "def write(path: str, content: str) -> None: ...",
+        "create or overwrite a file at once; a closed path - EditError",
+    ),
+    (
+        "run",
+        "def run(command: str) -> Result: ...",
+        "an allowed command without a shell (pytest..., ruff...); returns Result",
+    ),
+    (
+        "run_tests",
+        "def run_tests(paths: list[str]) -> Result: ...",
+        "pytest over a list of test paths (path::test_name works); returns Result",
+    ),
+    (
+        "step_done",
+        "def step_done(text: str) -> None: ...",
+        "close a numbered task step with summary text; the guard runs the changed tests; "
+        "accepted - control returns and the script goes on; rejected - StepRejected with the "
+        "reason, the script stops",
+    ),
+    (
+        "finish",
+        "def finish(summary: str) -> NoReturn: ...",
+        "finish the task with summary; the guard checks the diff, tests and project rules; "
+        "ends the script",
+    ),
+    (
+        "ask_owner",
+        "def ask_owner(question: str) -> NoReturn: ...",
+        "ask the owner; the answer arrives as the next message; ends the script",
+    ),
+    (
+        "diff",
+        "def diff() -> str: ...",
+        "unified diff of all changed text files in the working copy against the task base "
+        "(src, tests, docs and the rest)",
+    ),
+    (
+        "Result",
+        "class Result: ...",
+        "outcome of run()/run_tests(): code: int, output: str (output tail), ok: bool (code == "
+        "0); print(r) prints \"[код N]\" and the output; run_tests() appends lines "
+        "\"комментарии запрещены: path:line ...\" and sets ok=False if changed .py files under "
+        "src/ and tests/ contain comments or docstrings",
+    ),
+    (
+        "StepRejected",
+        "class StepRejected(Exception): ...",
+        "the guard did not accept step_done(): the reason is in the exception text, the script "
+        "stops",
+    ),
+    (
+        "EditError",
+        "class EditError(Exception): ...",
+        "an edit or read failed: fragment not found or found more than once, no such file, "
+        "start beyond the end of the file, closed path",
+    ),
+)

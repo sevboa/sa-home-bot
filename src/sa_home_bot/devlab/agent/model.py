@@ -11,7 +11,8 @@ import aiohttp
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELDS
 from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
-from sa_home_bot.devlab.agent.tools import TOOL_EXECUTE
+from sa_home_bot.devlab.agent.prompt_en import EN
+from sa_home_bot.devlab.agent.tools import EXECUTE_DEFINITION_EN, TOOL_EXECUTE
 from sa_home_bot.devlab.usage import usage_cost
 from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
 
@@ -25,6 +26,10 @@ log = logging.getLogger(__name__)
 
 def _has_execute(tools: list[dict[str, Any]]) -> bool:
     return any(tool.get("function", {}).get("name") == TOOL_EXECUTE for tool in tools)
+
+
+def _prompt_lang(tools: list[dict[str, Any]]) -> str:
+    return EN if EXECUTE_DEFINITION_EN in tools else "ru"
 
 
 class ModelError(Exception):
@@ -114,7 +119,7 @@ class GatewayChat:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": with_flow_reminder(
-                messages, reminder_for(self._model, _has_execute(tools))
+                messages, reminder_for(self._model, _has_execute(tools), _prompt_lang(tools))
             ),
             "tools": tools,
             "user": f"devlab {self._job_id}",

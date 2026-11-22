@@ -5,6 +5,14 @@ from datetime import date
 from typing import Any
 
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
+from sa_home_bot.devlab.agent.prompt_en import (
+    CODE_MODE_INTRO_EN,
+    CODE_MODE_REMINDER_EN,
+    CODE_MODE_SETTING_EN,
+    EN,
+    GLM_SETTING_TITLE_EN,
+    RULES_TITLE_EN,
+)
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_EDIT_EXAMPLE,
     SCRIPT_FINAL_EXAMPLE,
@@ -213,23 +221,28 @@ def intro_for(model: str) -> str:
     return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
-def reminder_for(model: str, code_mode: bool = False) -> str:
+def reminder_for(model: str, code_mode: bool = False, lang: str = "ru") -> str:
     if code_mode:
-        return CODE_MODE_REMINDER
+        return CODE_MODE_REMINDER_EN if lang == EN else CODE_MODE_REMINDER
     return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
 
 
-def _setting(template: str, commands: Sequence[str], today: date) -> str:
-    listed = ", ".join(f"`{command}`" for command in commands) or "нет"
-    return f"{GLM_SETTING_TITLE}\n{template.format(today=today.isoformat(), commands=listed)}"
+def _setting(
+    template: str, commands: Sequence[str], today: date, lang: str = "ru"
+) -> str:
+    english = lang == EN
+    listed = ", ".join(f"`{command}`" for command in commands) or ("none" if english else "нет")
+    title = GLM_SETTING_TITLE_EN if english else GLM_SETTING_TITLE
+    return f"{title}\n{template.format(today=today.isoformat(), commands=listed)}"
 
 
 def glm_setting(commands: Sequence[str], today: date) -> str:
     return _setting(GLM_SETTING, commands, today)
 
 
-def code_mode_setting(commands: Sequence[str], today: date) -> str:
-    return _setting(CODE_MODE_SETTING, commands, today)
+def code_mode_setting(commands: Sequence[str], today: date, lang: str = "ru") -> str:
+    template = CODE_MODE_SETTING_EN if lang == EN else CODE_MODE_SETTING
+    return _setting(template, commands, today, lang)
 
 
 def build_system(
@@ -238,14 +251,17 @@ def build_system(
     commands: Sequence[str] = (),
     today: date | None = None,
     code_mode: bool = False,
+    lang: str = "ru",
 ) -> str:
-    parts = [CODE_MODE_INTRO if code_mode else intro_for(model)]
+    english = code_mode and lang == EN
+    intro = CODE_MODE_INTRO_EN if english else CODE_MODE_INTRO
+    parts = [intro if code_mode else intro_for(model)]
     if code_mode:
-        parts.append(code_mode_setting(commands, today or date.today()))
+        parts.append(code_mode_setting(commands, today or date.today(), lang))
     elif _is_glm(model):
         parts.append(glm_setting(commands, today or date.today()))
     if rules:
-        parts.append(RULES_TITLE)
+        parts.append(RULES_TITLE_EN if english else RULES_TITLE)
         parts.extend(f"=== {name} ===\n{text.strip()}" for name, text in rules)
     return "\n\n".join(parts)
 
