@@ -280,6 +280,7 @@ instance-конфиге ноды.
 - `export: bool = false` — служба `monitor` отдаёт `GET /metrics` на tailscale-адресе ноды и порту `exporter_port`. Включает и снятие host-метрик, даже при `sensors.host.enabled = false` (тогда без алертов, только экспорт).
 - `hub: bool = false` — нода держит VictoriaMetrics и Grafana (`nodectl fix` ставит и настраивает).
 - `data_dir: str = "/mnt/data/metrics"` — данные VictoriaMetrics.
+- `runtime_dir: str = "/var/lib/sa-home-metrics"` — каталог пользователя ноды с `targets/` (file_sd целей scrape) и `dashboards/` (JSON дашбордов): его создаёт `nodectl fix` один раз, дальше пишет сама нода-хаб без sudo.
 - `retention: str = "1y"` — срок хранения (`-retentionPeriod`).
 - `scrape_interval: str = "30s"` — период опроса нод.
 - `grafana_port: int = 3000`, `vm_port: int = 8428` (только 127.0.0.1), `exporter_port: int = 9100`.

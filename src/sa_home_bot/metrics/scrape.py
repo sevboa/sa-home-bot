@@ -52,8 +52,7 @@ def scrape_targets(
 @dataclass(frozen=True)
 class ScrapeJob:
     name: str
-    port: int
-    targets: list[ScrapeTarget]
+    targets_file: str
 
 
 def vpn_scrape_targets(
@@ -64,18 +63,21 @@ def vpn_scrape_targets(
     return [target for target in targets if target.node in known_servers]
 
 
+def file_sd_text(targets: list[ScrapeTarget], port: int) -> str:
+    groups = [
+        {"targets": [f"{target.host}:{port}"], "labels": {protocol.LABEL_NODE: target.node}}
+        for target in targets
+    ]
+    return json.dumps(groups, ensure_ascii=False, indent=2) + "\n"
+
+
 def _job_lines(job: ScrapeJob) -> list[str]:
     lines = [
         f"  - job_name: {json.dumps(job.name)}",
         f"    metrics_path: {json.dumps(protocol.METRICS_PATH)}",
-        "    static_configs:",
+        "    file_sd_configs:",
+        f"      - files: [{json.dumps(job.targets_file)}]",
     ]
-    if not job.targets:
-        lines[-1] = "    static_configs: []"
-    for target in job.targets:
-        lines.append(f"      - targets: [{json.dumps(f'{target.host}:{job.port}')}]")
-        lines.append("        labels:")
-        lines.append(f"          {protocol.LABEL_NODE}: {json.dumps(target.node)}")
     return lines
 
 

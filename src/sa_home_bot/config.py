@@ -225,6 +225,7 @@ class MetricsConfig(BaseModel):
     export: bool = False
     hub: bool = False
     data_dir: str = "/mnt/data/metrics"
+    runtime_dir: str = "/var/lib/sa-home-metrics"
     retention: str = "1y"
     scrape_interval: str = "30s"
     grafana_port: int = Field(default=3000, ge=1, le=65535)

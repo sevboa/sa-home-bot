@@ -1,4 +1,6 @@
 import json
+import stat
+from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -8,9 +10,11 @@ from sa_home_bot.domain.models import HealthState
 from sa_home_bot.metrics import protocol
 from sa_home_bot.metrics.dashboard import CATALOG, nodes_dashboard, render_dashboard
 from sa_home_bot.metrics.exposition import build_metrics_app
+from sa_home_bot.metrics.runtime import runtime_files, write_changed
 from sa_home_bot.metrics.scrape import (
     ScrapeJob,
     ScrapeTarget,
+    file_sd_text,
     peer_host,
     scrape_config_text,
     scrape_targets,
@@ -26,6 +30,7 @@ HUB_IDS = {
     "install-grafana",
     "grafana-config",
     "grafana-provisioning",
+    "metrics-runtime-dir",
 }
 
 
@@ -83,28 +88,53 @@ def test_scrape_targets_merge_discovered_peers():
 
 
 def test_scrape_config_text():
-    text = scrape_config_text(
-        [ScrapeJob("sa-home-nodes", 9100, [ScrapeTarget("jeeves", "100.64.0.2")])], "30s"
-    )
+    text = scrape_config_text([ScrapeJob("sa-home-nodes", "/run/targets/nodes.json")], "30s")
     assert text == (
         "global:\n"
         '  scrape_interval: "30s"\n'
         "scrape_configs:\n"
         '  - job_name: "sa-home-nodes"\n'
         '    metrics_path: "/metrics"\n'
-        "    static_configs:\n"
-        '      - targets: ["100.64.0.2:9100"]\n'
-        "        labels:\n"
-        '          node: "jeeves"\n'
+        "    file_sd_configs:\n"
+        '      - files: ["/run/targets/nodes.json"]\n'
     )
-    assert "static_configs: []" in scrape_config_text([ScrapeJob("sa-home-nodes", 9100, [])], "30s")
+
+
+def test_file_sd_text():
+    text = file_sd_text([ScrapeTarget("jeeves", "100.64.0.2")], 9100)
+    assert json.loads(text) == [{"targets": ["100.64.0.2:9100"], "labels": {"node": "jeeves"}}]
+    assert json.loads(file_sd_text([], 9100)) == []
+
+
+def test_runtime_files_cover_targets_and_dashboards():
+    settings = hub_settings()
+    peers = [SwarmNodeConfig(id="ion", endpoint="tcp://100.64.0.4:8710")]
+    files = runtime_files(settings, "100.64.0.9", ["ion"], peers)
+    root = Path("/var/lib/sa-home-metrics")
+    nodes = json.loads(files[root / "targets" / "nodes.json"])
+    assert {group["labels"]["node"] for group in nodes} == {"alfred", "jeeves", "wooster", "ion"}
+    vpn = json.loads(files[root / "targets" / "vpn.json"])
+    assert vpn == [{"targets": ["100.64.0.4:9101"], "labels": {"node": "ion"}}]
+    assert set(files) - {root / "targets" / "nodes.json", root / "targets" / "vpn.json"} == {
+        root / "dashboards" / name for name in CATALOG
+    }
+
+
+def test_write_changed_writes_only_differences(tmp_path):
+    files = {tmp_path / "a" / "x.json": "1\n", tmp_path / "a" / "y.json": "2\n"}
+    assert set(write_changed(files)) == set(files)
+    assert write_changed(files) == []
+    files[tmp_path / "a" / "y.json"] = "3\n"
+    assert write_changed(files) == [tmp_path / "a" / "y.json"]
+    assert (tmp_path / "a" / "y.json").read_text() == "3\n"
+    assert stat.S_IMODE((tmp_path / "a" / "x.json").stat().st_mode) == 0o644
 
 
 def test_vm_args():
     assert metrics.vm_args(hub_settings()) == (
         "-storageDataPath=/mnt/data/metrics -retentionPeriod=1y "
         "-httpListenAddr=127.0.0.1:8428 -promscrape.config=/etc/victoria-metrics/scrape.yml "
-        "-promscrape.configCheckInterval=1m"
+        "-promscrape.configCheckInterval=1m -promscrape.fileSDCheckInterval=30s"
     )
 
 
@@ -158,9 +188,39 @@ def test_provisioning_files_cover_datasource_provider_and_dashboards():
     files = metrics.grafana_provisioning_files(hub_settings())
     assert "uid: vm" in files[metrics.GRAFANA_DATASOURCE_FILE]
     assert "http://127.0.0.1:8428" in files[metrics.GRAFANA_DATASOURCE_FILE]
-    assert str(metrics.GRAFANA_DASHBOARD_DIR) in files[metrics.GRAFANA_DASHBOARD_PROVIDER_FILE]
-    assert metrics.GRAFANA_DASHBOARD_DIR / "nodes.json" in files
-    assert metrics.GRAFANA_DASHBOARD_DIR / "vpn.json" in files
+    assert set(files) == {metrics.GRAFANA_DATASOURCE_FILE, metrics.GRAFANA_DASHBOARD_PROVIDER_FILE}
+    assert "path: /var/lib/sa-home-metrics/dashboards\n" in files[
+        metrics.GRAFANA_DASHBOARD_PROVIDER_FILE
+    ]
+
+
+def test_provisioning_fixup_removes_legacy_dashboards(monkeypatch):
+    root = FakeRoot(monkeypatch)
+    settings = hub_settings()
+    fixup = metrics.make_grafana_provisioning_fixup(settings)
+    for path, content in metrics.grafana_provisioning_files(settings).items():
+        root.files[str(path)] = content
+    assert fixup.check()
+    root.dirs.add(str(metrics.LEGACY_GRAFANA_DASHBOARD_DIR))
+    assert not fixup.check()
+    fixup.apply()
+    assert ["sudo", "rm", "-rf", "--", str(metrics.LEGACY_GRAFANA_DASHBOARD_DIR)] in root.calls
+    assert not any(
+        str(metrics.LEGACY_GRAFANA_DASHBOARD_DIR) in call and "install" in call
+        for call in root.calls
+    )
+
+
+def test_runtime_dir_fixup_creates_user_owned_dirs(monkeypatch):
+    root = FakeRoot(monkeypatch)
+    fixup = metrics.make_metrics_runtime_dir_fixup(hub_settings())
+    monkeypatch.setattr(metrics, "_owned_by_current_user", lambda path: False)
+    assert not fixup.check()
+    monkeypatch.setattr(metrics, "getuser", lambda: "sevboa")
+    fixup.apply()
+    installs = [call for call in root.calls if "install" in call]
+    assert all("sevboa" in call and "-d" in call for call in installs)
+    assert any("/var/lib/sa-home-metrics/targets" in call for call in installs)
 
 
 def _health(component: str, temp: float) -> HealthState:

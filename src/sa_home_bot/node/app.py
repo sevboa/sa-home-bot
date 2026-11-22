@@ -21,6 +21,7 @@ from sa_home_bot.node.events import (
 )
 from sa_home_bot.node.instances import InstanceStore, instances_dir
 from sa_home_bot.node.lease import LeaseManager
+from sa_home_bot.node.metrics_targets import MetricsTargetsWriter
 from sa_home_bot.node.peers import LOCAL_HEARTBEAT_TIMEOUT_S, NodeRouter, PeerLink
 from sa_home_bot.node.replication import ConfigReplicator
 from sa_home_bot.node.service import NodeService
@@ -377,6 +378,9 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await replicator.start()
     await supervisor.start_all()
     await lease.start()
+    metrics_targets = MetricsTargetsWriter(settings, state) if settings.metrics.hub else None
+    if metrics_targets is not None:
+        await metrics_targets.start()
 
     watcher = PresenceWatcher(
         node_id,
@@ -436,6 +440,8 @@ async def run_node(settings: Settings, config_path: str | None = None) -> bool:
         await budget.step("присутствие соседей", watcher.stop())
         await budget.step("маячок discovery", discovery.stop())
         await budget.step("аренда лидерства", lease.stop())
+        if metrics_targets is not None:
+            await budget.step("цели метрик", metrics_targets.stop())
         if replicator is not None:
             await budget.step("репликация настроек", replicator.stop())
         await budget.step(
