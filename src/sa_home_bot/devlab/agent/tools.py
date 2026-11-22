@@ -20,8 +20,9 @@ from sa_home_bot.devlab.agent.script import (
     SCRIPT_FAILED_HEAD,
     SCRIPT_OUTPUT_CHARS,
     api_stubs,
-    parse_output,
-    script_argv,
+    parse_reply,
+    request_payload,
+    worker_argv,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 
@@ -56,6 +57,10 @@ NEWLINE_ADDED = "; в конец файла дописан перевод стр
 SCRIPT_NO_OUTPUT = (
     "(скрипт ничего не напечатал: значения выражений не в последней строке не выводятся — "
     "оберни в print())"
+)
+SCRIPT_STATE_RESET = (
+    "[состояние сброшено: процесс скрипта перезапущен, переменные и импорты прошлых вызовов "
+    "потеряны; прочитанное прочитай заново]"
 )
 SCRIPT_BUDGET_MARGIN_S = 20.0
 PLAIN_TOOLS = frozenset(
@@ -198,9 +203,11 @@ EXECUTE_DEFINITION = _schema(
     "Исполняет код Python в корне проекта (src в sys.path, пакеты проекта импортируются). "
     "Функции ниже уже определены, import для них не нужен. Код исполняется сразу, по порядку, "
     "как обычный Python. Виден вывод print() и значение последнего выражения, как в Jupyter; "
-    f"до {SCRIPT_OUTPUT_CHARS} симв. (начало). Каждый вызов — новый процесс: переменные прошлых "
-    "вызовов не сохраняются. Код, которому нужен ещё не увиденный вывод, — в следующий вызов, "
-    "всё остальное — в этот. step_done(), finish() и ask_owner() завершают скрипт. Функции:\n"
+    f"до {SCRIPT_OUTPUT_CHARS} симв. (начало). Процесс один на задание: переменные, импорты и "
+    "функции сохраняются между вызовами, как в Jupyter; прочитанное держи в переменной и не "
+    "перечитывай. После таймаута или падения процесса состояние сбрасывается. Код, которому "
+    "нужен ещё не увиденный вывод, — в следующий вызов, всё остальное — в этот. "
+    "step_done(), finish() и ask_owner() завершают скрипт. Функции:\n"
     + api_stubs(""),
     code=_text("Код Python"),
 )
@@ -415,12 +422,18 @@ class ToolBox:
         code = _argument(args, "code", str)
         timeout_s = self._spec.script_timeout_s
         before = await self._sandbox.changed_digests()
-        result = await self._sandbox.exec(script_argv(code, self._script_config()), timeout_s)
+        reply = await self._sandbox.session_request(
+            worker_argv(self._script_config()), request_payload(code), timeout_s
+        )
         mutating = before != await self._sandbox.changed_digests()
-        if result.timed_out:
-            text = result.summary(self._spec.output_chars, timeout_s)
+        if reply.timed_out:
+            text = f"[таймаут {timeout_s:g} с]\n{SCRIPT_STATE_RESET}"
             return ToolOutcome(text, mutating=mutating)
-        run = parse_output(result.output)
+        if reply.data is None:
+            died = f"процесс скрипта завершился ({reply.detail})"
+            text = f"{SCRIPT_FAILED_HEAD}\n{died}\n{SCRIPT_STATE_RESET}"
+            return ToolOutcome(text, mutating=mutating)
+        run = parse_reply(reply.data)
         limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
         if run.failed:
             output = clip_tail(run.output, limit) or SCRIPT_NO_OUTPUT

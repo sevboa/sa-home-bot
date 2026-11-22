@@ -3,7 +3,13 @@ import sys
 import pytest
 
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
-from sa_home_bot.devlab.agent.script import SCRIPT_API, api_stubs, parse_output, script_argv
+from sa_home_bot.devlab.agent.script import (
+    SCRIPT_API,
+    api_stubs,
+    parse_reply,
+    request_payload,
+    worker_argv,
+)
 
 CONFIG = {
     "closed": [],
@@ -17,10 +23,32 @@ CONFIG = {
 }
 
 
+class Session:
+    def __init__(self, root, **config):
+        self.sandbox = LocalSandbox(root)
+        self.argv = worker_argv({**CONFIG, **config}, python=sys.executable)
+
+    async def run(self, code, timeout_s=120):
+        reply = await self.sandbox.session_request(self.argv, request_payload(code), timeout_s)
+        return reply if reply.data is None else parse_reply(reply.data)
+
+    async def close(self):
+        await self.sandbox.session_close()
+
+
 async def run_script(root, code, **config):
-    argv = script_argv(code, {**CONFIG, **config}, python=sys.executable)
-    result = await LocalSandbox(root).exec(argv, 120)
-    return parse_output(result.output)
+    session = Session(root, **config)
+    try:
+        return await session.run(code)
+    finally:
+        await session.close()
+
+
+@pytest.fixture
+async def session(project):
+    opened = Session(project, write_prefixes=["src/"])
+    yield opened
+    await opened.close()
 
 
 @pytest.fixture
@@ -96,12 +124,12 @@ async def test_exception_marks_script_failed_with_traceback(project):
     assert (project / "src" / "a.py").read_text().startswith("b = 1")
 
 
-@pytest.mark.parametrize("text", ["просто вывод\n", "DEVLAB_ACTIONS {битый"])
-def test_output_without_valid_marker_is_failed(text):
-    run = parse_output(text)
+@pytest.mark.parametrize("data", [b"plain\n", b"{broken", b"[1]", b'{"output": 5}'])
+def test_reply_without_valid_payload_is_failed(data):
+    run = parse_reply(data)
     assert run.failed
     assert run.control is None
-    assert run.output == text.rstrip()
+    assert run.output == data.decode().rstrip()
 
 
 @pytest.mark.parametrize(("query", "count"), [("", len(SCRIPT_API)), ("тест", 3), ("grep", 1)])
@@ -182,3 +210,133 @@ async def test_run_tests_returns_result_and_branches(project):
 async def test_run_returns_result_for_allowed_commands(project, command, expected):
     run = await run_script(project, f"print(run({command!r}))")
     assert expected in run.output
+
+
+async def test_variables_and_functions_persist_between_calls(session):
+    first = await session.run(
+        "import json\nsrc = read('src/a.py')\ndef twice(n):\n    return n * 2"
+    )
+    second = await session.run("print(json.dumps(twice(len(src.splitlines()))))")
+    assert not first.failed
+    assert second.output == "6"
+
+
+async def test_edit_in_second_call_uses_variable_from_first(session, project):
+    await session.run("src = read('src/a.py')")
+    run = await session.run(
+        "edit('src/a.py', src.splitlines()[0], 'alpha = 7')\nread('src/a.py', 1, 1)"
+    )
+    assert run.output.strip() == "alpha = 7"
+
+
+@pytest.mark.parametrize("code", ["finish('готово')", "step_done('шаг')", "ask_owner('вопрос?')"])
+async def test_state_survives_control_signal(session, code):
+    await session.run("kept = 41")
+    signalled = await session.run(code)
+    after = await session.run("kept + 1")
+    assert signalled.control is not None
+    assert after.output == "42"
+
+
+async def test_exception_keeps_state_and_next_call_is_clean(session):
+    await session.run("kept = 'жив'")
+    failed = await session.run("raise ValueError('x')")
+    after = await session.run("kept")
+    assert failed.failed
+    assert after.output == "жив"
+    assert not after.failed
+
+
+async def test_green_flag_does_not_leak_into_next_call(session, project):
+    (project / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    first = await session.run("run_tests(['test_ok.py']).ok")
+    second = await session.run("1")
+    assert first.green is True
+    assert second.green is None
+
+
+async def test_rollback_of_forbidden_write_works_in_persistent_process(project):
+    session = Session(project, write_prefixes=["src/"])
+    try:
+        await session.run("open('src/ok1.py', 'w').write('a = 1\\n')")
+        denied = await session.run("open('docs.md', 'w').write('x')")
+        again = await session.run("open('docs2.md', 'w').write('x')")
+        allowed = await session.run("open('src/ok2.py', 'w').write('b = 1\\n')")
+    finally:
+        await session.close()
+    assert "вне путей роли" in denied.output
+    assert "вне путей роли" in again.output
+    assert not (project / "docs.md").exists()
+    assert not (project / "docs2.md").exists()
+    assert (project / "src" / "ok1.py").exists()
+    assert (project / "src" / "ok2.py").exists()
+    assert "вне путей" not in allowed.output
+
+
+async def test_project_module_is_reimported_after_edit(session, project):
+    (project / "src" / "mod.py").write_text("NAME = 'старое'\n")
+    first = await session.run("import mod\nmod.NAME")
+    await session.run("edit('src/mod.py', 'старое', 'новое')")
+    second = await session.run("import mod\nmod.NAME")
+    assert (first.output, second.output) == ("старое", "новое")
+
+
+async def test_timeout_resets_state_and_process_restarts(session):
+    await session.run("kept = 1")
+    timed_out = await session.run("import time\ntime.sleep(30)", timeout_s=1)
+    assert timed_out.timed_out
+    assert timed_out.data is None
+    after = await session.run("print('kept' in globals())")
+    assert after.output == "False"
+
+
+@pytest.mark.parametrize(
+    "code", ["import os\nos._exit(3)", "import os, signal\nos.kill(os.getpid(), 9)"]
+)
+async def test_process_death_is_reported_and_restarts(session, code):
+    await session.run("kept = 1")
+    died = await session.run(code)
+    assert died.data is None
+    assert not died.timed_out
+    after = await session.run("print('kept' in globals())")
+    assert after.output == "False"
+
+
+async def test_sys_exit_does_not_kill_state(session):
+    await session.run("kept = 1")
+    exited = await session.run("import sys\nsys.exit(2)")
+    after = await session.run("kept")
+    assert exited.failed
+    assert after.output == "1"
+
+
+async def test_stdout_fd_writes_do_not_corrupt_frames(session):
+    run = await session.run("import os\nos.write(1, b'7\\njunk')\nprint('ok')")
+    after = await session.run("print('дальше')")
+    assert run.output == "ok"
+    assert after.output == "дальше"
+
+
+async def test_close_ends_the_process(project):
+    session = Session(project)
+    await session.run("import os\nprint(os.getpid())")
+    proc = session.sandbox._session._proc
+    assert proc.returncode is None
+    await session.close()
+    assert proc.returncode is not None
+    assert session.sandbox._session is None
+    again = await session.run("print('новый')")
+    await session.close()
+    assert again.output == "новый"
+
+
+async def test_sandbox_stop_and_aclose_close_the_session(project):
+    session = Session(project)
+    await session.run("1")
+    proc = session.sandbox._session._proc
+    await session.sandbox.stop()
+    assert proc.returncode is not None
+    await session.run("1")
+    proc = session.sandbox._session._proc
+    await session.sandbox.aclose()
+    assert proc.returncode is not None

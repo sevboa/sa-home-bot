@@ -345,6 +345,12 @@ exec)
     [ $# -gt 0 ] || fail "нет команды"
     exec podman exec "devlab-$id" timeout "$limit" sh -c "$*"
     ;;
+session)
+    name "${{1:-}}"
+    id="$1"; shift
+    [ $# -gt 0 ] || fail "нет команды"
+    exec podman exec -i "devlab-$id" sh -c "$*"
+    ;;
 ps)
     exec podman ps --all --filter name=devlab- --format json
     ;;
@@ -373,7 +379,7 @@ sweep)
     ;;
 *)
     fail "подкоманды: sync-in refresh sync-out clean build create start stop rm pause" \\
-        "unpause interrupt exec ps images prune sweep"
+        "unpause interrupt exec session ps images prune sweep"
     ;;
 esac
 """

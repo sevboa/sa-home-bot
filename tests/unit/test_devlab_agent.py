@@ -38,7 +38,7 @@ from sa_home_bot.devlab.agent.model import (
 )
 from sa_home_bot.devlab.agent.prompt import CODE_MODE_REMINDER, FLOW_REMINDER, with_flow_reminder
 from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
-from sa_home_bot.devlab.agent.script import script_argv
+from sa_home_bot.devlab.agent.script import worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
     TOOL_EDIT_FILE,
@@ -909,8 +909,8 @@ async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
 async def test_trace_notes_execute_code_size_and_failure(tmp_path, monkeypatch, code, failed):
     monkeypatch.setattr(
         tools_module,
-        "script_argv",
-        lambda source, config: script_argv(source, config, python=sys.executable),
+        "worker_argv",
+        lambda config: worker_argv(config, python=sys.executable),
     )
     entries = []
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
