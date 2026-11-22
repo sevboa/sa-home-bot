@@ -11,6 +11,7 @@ from sa_home_bot.jobs.base import JobContext
 from sa_home_bot.jobs.scan import SensorScanJob
 from sa_home_bot.jobs.smart import SmartScanJob
 from sa_home_bot.monitor.dispatch import ProtoEventDispatcher
+from sa_home_bot.monitor.exposition import MetricsEndpoint
 from sa_home_bot.monitor.service import MonitorService
 from sa_home_bot.proto.server import ProtoServer
 from sa_home_bot.scheduler.setup import build_scheduler, register_jobs
@@ -51,12 +52,17 @@ async def run_monitor(settings: Settings) -> None:
     await queue.put(SmartScanJob())
     await queue.put(SensorScanJob())
 
+    metrics_endpoint = MetricsEndpoint(store, settings.metrics.exporter_port)
+    if settings.metrics.export:
+        await metrics_endpoint.start()
+
     log.info("Монитор запущен, сокет %s", settings.monitor.socket)
 
     try:
         await lifespan.wait()
     finally:
         log.info("Останов монитора...")
+        await metrics_endpoint.stop()
         scheduler.shutdown(wait=False)
         await queue.stop()
         await worker_task

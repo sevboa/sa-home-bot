@@ -32,5 +32,6 @@
   (`platform-llm/openai-backend.md`), STT/TTS, генерация картинок,
   маршрутизатор моделей Strata (`platform-llm/strata-switch.md`), тишина видеокарты
   (`platform-llm/silence.md`).
-- [platform/](platform/README.md) — конфиг, база данных, здоровье и пороги, бэкапы, торренты, задачи.
+- [platform/](platform/README.md) — конфиг, база данных, здоровье и пороги, бэкапы, торренты, задачи,
+  метрики нод и графики (`platform/metrics.md`).
 - [deploy/extras.md](deploy/extras.md) — extras в `pyproject.toml` и причины пинов зависимостей.

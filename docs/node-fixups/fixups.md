@@ -27,6 +27,7 @@
 | `probe_net.py`, `probe_tunnel.py` | netns-пробники `vpn_check` (см. [vpn-probes.md](vpn-probes.md)) |
 | `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables, ufw-порт mtg |
 | `devlab.py` | мастерская devlab (Этап 60.1): podman, пользователь `devlab`, subuid/subgid, linger, обёртка контейнеров + sudoers |
+| `metrics.py` | хаб метрик (`[metrics] hub`): victoria-metrics, репозиторий и пакет grafana, ini, provisioning (см. [../platform/metrics.md](../platform/metrics.md)) |
 | `toolchain.py` | сборка amneziawg-tools, xray-core, mtg (setcap и для уже существующего бинаря) |
 | `build.py` | `build_fixups`: порядок фиксов |
 

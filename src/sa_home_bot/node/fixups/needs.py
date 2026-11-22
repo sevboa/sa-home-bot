@@ -44,6 +44,10 @@ def telegram_bot(settings: Settings) -> bool:
     return assignments.has_service(settings.node.assignments, "telegram-bot")
 
 
+def metrics_hub(settings: Settings) -> bool:
+    return settings.metrics.hub
+
+
 def devlab(settings: Settings) -> bool:
     return any(
         assignments.has_service(settings.node.assignments, name)

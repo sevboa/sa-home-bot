@@ -4,6 +4,7 @@
 - [database.md](database.md) — Store, миграции по датам, идемпотентность уведомлений, outbox, CAS-запись app_state.
 - [domain-health.md](domain-health.md) — гистерезис, политики порогов, host-метрики VPS, SMART, рендер, vpn_check.
 - [backup.md](backup.md) — sealed box, identity и снапшоты, раскладка у напарника, маркер публикации, восстановление.
+- [metrics.md](metrics.md) — `/metrics` монитора, VictoriaMetrics + Grafana на хабе, каталог дашбордов.
 - [torrents.md](torrents.md) — служба torrents (qBittorrent): действия, лестница запросов, nova2dl.
 - [tasks.md](tasks.md) — служба отложенных задач: протокол, прогрев, права, недоступность.
 - [astro-away-subscriptions.md](astro-away-subscriptions.md) — astro, away CLI, подписки и гостевой пакет.

@@ -220,6 +220,17 @@ class MonitorConfig(BaseModel):
     db_path: Path = Path("./data/monitor.sqlite")
 
 
+class MetricsConfig(BaseModel):
+    export: bool = False
+    hub: bool = False
+    data_dir: str = "/mnt/data/metrics"
+    retention: str = "1y"
+    scrape_interval: str = "30s"
+    grafana_port: int = Field(default=3000, ge=1, le=65535)
+    vm_port: int = Field(default=8428, ge=1, le=65535)
+    exporter_port: int = Field(default=9100, ge=1, le=65535)
+
+
 class AppConfig(BaseModel):
     id: str
     title: str
@@ -953,6 +964,7 @@ class Settings(BaseSettings):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
     torrents: TorrentsConfig = Field(default_factory=TorrentsConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)

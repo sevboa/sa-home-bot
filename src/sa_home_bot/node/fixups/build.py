@@ -4,6 +4,7 @@ from sa_home_bot.config import Settings
 from sa_home_bot.node.fixups import (
     devlab,
     host,
+    metrics,
     needs,
     probe_net,
     probe_tunnel,
@@ -40,6 +41,7 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         host.POWER_CONTROL_POLKIT,
         host.WOL_ENABLE,
         *devlab.devlab_fixups(settings),
+        *metrics.metrics_fixups(settings),
         vpn_server.make_awg_sudoers_fixup(settings),
         vpn_server.make_awg_ufw_fixup(settings),
         vpn_server.make_sub_ufw_fixup(settings),
