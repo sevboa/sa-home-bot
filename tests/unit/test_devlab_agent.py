@@ -36,6 +36,8 @@ from sa_home_bot.devlab.agent.model import (
     parse_reply,
 )
 from sa_home_bot.devlab.agent.prompt import (
+    CODE_MODE_REMINDER,
+    CODE_MODE_REMINDER_FAST,
     CODE_MODE_REMINDER_REMOTE,
     FLOW_REMINDER,
     with_flow_reminder,
@@ -419,12 +421,14 @@ def reply_body(content="", calls=None, usage=None):
     return {"choices": [{"message": message}], "usage": usage or {}}
 
 
-async def run_gateway(handler, timeout_s=5.0):
+async def run_gateway(handler, timeout_s=5.0, model="flint", **chat_kwargs):
     app = web.Application()
     app.router.add_post(protocol.HTTP_CHAT_PATH, handler)
     server = TestServer(app)
     await server.start_server()
-    chat = GatewayChat(str(server.make_url("")), "tok", "flint", "job-1", timeout_s=timeout_s)
+    chat = GatewayChat(
+        str(server.make_url("")), "tok", model, "job-1", timeout_s=timeout_s, **chat_kwargs
+    )
     return server, chat
 
 
@@ -444,6 +448,31 @@ async def test_gateway_chat_uses_code_mode_reminder_when_execute_offered():
         await server.close()
     expected = f"x\n\n{CODE_MODE_REMINDER_REMOTE}"
     assert seen["body"]["messages"] == [{"role": "user", "content": expected}]
+
+
+@pytest.mark.parametrize(
+    ("model", "style", "expected"),
+    [
+        ("glm-5.3", "full", CODE_MODE_REMINDER),
+        ("glm-5.3", "fast", CODE_MODE_REMINDER_FAST),
+        ("flint", "fast", CODE_MODE_REMINDER_REMOTE),
+    ],
+)
+async def test_gateway_chat_reminder_follows_prompt_style(model, style, expected):
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response(reply_body("ок", [], {}))
+
+    server, chat = await run_gateway(handler, model=model, prompt_style=style)
+    tools = ToolBox(LocalSandbox(Path(".")), AgentSpec(code_mode=True)).definitions
+    try:
+        await chat.complete([{"role": "user", "content": "x"}], tools)
+    finally:
+        await chat.close()
+        await server.close()
+    assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{expected}"}]
 
 
 async def test_gateway_chat_uses_english_reminder_for_english_definitions():

@@ -7,8 +7,10 @@ from typing import Any
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_EN,
+    CODE_MODE_INTRO_FAST_EN,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_EN,
+    CODE_MODE_REMINDER_FAST_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
@@ -36,6 +38,8 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_WRITE_FILE,
 )
 
+STYLE_FULL = "full"
+STYLE_FAST = "fast"
 SYSTEM_INTRO = (
     "Ты автономный разработчик. Задание — в первом сообщении пользователя (task.md). "
     "Работай только инструментами: читай код, правь его через "
@@ -154,6 +158,13 @@ _CODE_MODE_COST_REMOTE = (
     "Ориентир: задание из трёх шагов — два–три вызова: чтение; запись всего с проверкой и "
     "finish; при неудаче — исправление по выводу.\n"
 )
+_CODE_MODE_NEIGHBORS = (
+    "Перед записью найди через grep(), как это уже сделано рядом, и повторяй: готовые "
+    "хелперы (в том же модуле и в utils/), комментарии над соседними таблицами в "
+    "schema.sql, стиль соседних методов. Похожее уже есть — используй его, а не пиши своё; "
+    "одну вещь не пиши дважды. Образец ищи в том же вызове на чтение, пачкой с read(), а не "
+    "отдельным вызовом.\n"
+)
 _CODE_MODE_RUNS = (
     "\n"
     "## Как исполняется код\n"
@@ -252,9 +263,19 @@ _CODE_MODE_TAIL = (
     "Каждый ответ — вызов инструмента, обычно execute. Первой строкой кода пиши "
     "комментарий с намерением: что этот вызов сделает целиком."
 )
+CODE_MODE_INTRO_FAST = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_GLM
+    + _CODE_MODE_RUNS
+    + _CODE_MODE_RED_GLM
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_GLM
+    + _CODE_MODE_TAIL
+)
 CODE_MODE_INTRO = (
     _CODE_MODE_HEAD
     + _CODE_MODE_COST_GLM
+    + _CODE_MODE_NEIGHBORS
     + _CODE_MODE_RUNS
     + _CODE_MODE_RED_GLM
     + _CODE_MODE_ASK
@@ -279,17 +300,27 @@ CODE_MODE_SETTING = (
     "проекта ниже написаны и для людей; тебя касаются правила про код, тесты и "
     "документацию."
 )
-CODE_MODE_REMINDER = (
+_REMINDER_GLM_HEAD = (
     "[Напоминание] Вызов execute дорог, код внутри дёшев. Новый вызов — только когда нужно "
     "твоё суждение о ещё не виденном тексте; остальное решай через if r.ok: в том же "
     "скрипте. Читай пачками, пиши порциями: один вызов — одна порция записи с "
     "проверкой (тест и red = run_tests(...); затем правка кода и run_tests()). Не продумывай "
     "решение целиком: первая порция, результат, следующая порция по нему; лишний вызов дешевле "
     "долгого обдумывания; в размышлении — короткий план без кода, проверяемое проверяй "
-    "скриптом. Финал: последние правки, run_tests(), run(\"ruff check ...\") и "
+    "скриптом. "
+)
+_REMINDER_GLM_NEIGHBORS = (
+    "Перед записью найди через grep() в том же вызове на чтение, как сделано рядом "
+    "(хелперы в модуле и utils/, комментарии в schema.sql, стиль соседних методов), и "
+    "повторяй; одну вещь не пиши дважды. "
+)
+_REMINDER_GLM_FINISH = (
+    "Финал: последние правки, run_tests(), run(\"ruff check ...\") и "
     "finish(\"итог\") — одним вызовом; finish сам закрывает все шаги, step_done() "
     "необязателен."
 )
+CODE_MODE_REMINDER_FAST = _REMINDER_GLM_HEAD + _REMINDER_GLM_FINISH
+CODE_MODE_REMINDER = _REMINDER_GLM_HEAD + _REMINDER_GLM_NEIGHBORS + _REMINDER_GLM_FINISH
 CODE_MODE_REMINDER_REMOTE = (
     "[Напоминание] Запросы ограничены, размышление бесплатно. Думай подробно: продумай "
     "решение целиком — все файлы, тест, код, docs. Накопи все правки и внеси их одним "
@@ -316,19 +347,31 @@ def intro_for(model: str) -> str:
     return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
-def code_mode_intro_for(model: str, lang: str = "ru") -> str:
+def code_mode_intro_for(model: str, lang: str = "ru", style: str = STYLE_FULL) -> str:
     glm = _is_glm(model)
+    fast = style == STYLE_FAST
     if lang == EN:
-        return CODE_MODE_INTRO_EN if glm else CODE_MODE_INTRO_REMOTE_EN
-    return CODE_MODE_INTRO if glm else CODE_MODE_INTRO_REMOTE
+        if not glm:
+            return CODE_MODE_INTRO_REMOTE_EN
+        return CODE_MODE_INTRO_FAST_EN if fast else CODE_MODE_INTRO_EN
+    if not glm:
+        return CODE_MODE_INTRO_REMOTE
+    return CODE_MODE_INTRO_FAST if fast else CODE_MODE_INTRO
 
 
-def reminder_for(model: str, code_mode: bool = False, lang: str = "ru") -> str:
+def reminder_for(
+    model: str, code_mode: bool = False, lang: str = "ru", style: str = STYLE_FULL
+) -> str:
     glm = _is_glm(model)
+    fast = style == STYLE_FAST
     if code_mode:
         if lang == EN:
-            return CODE_MODE_REMINDER_EN if glm else CODE_MODE_REMINDER_REMOTE_EN
-        return CODE_MODE_REMINDER if glm else CODE_MODE_REMINDER_REMOTE
+            if not glm:
+                return CODE_MODE_REMINDER_REMOTE_EN
+            return CODE_MODE_REMINDER_FAST_EN if fast else CODE_MODE_REMINDER_EN
+        if not glm:
+            return CODE_MODE_REMINDER_REMOTE
+        return CODE_MODE_REMINDER_FAST if fast else CODE_MODE_REMINDER
     return GLM_FLOW_REMINDER if glm else FLOW_REMINDER
 
 
@@ -357,9 +400,10 @@ def build_system(
     today: date | None = None,
     code_mode: bool = False,
     lang: str = "ru",
+    style: str = STYLE_FULL,
 ) -> str:
     english = code_mode and lang == EN
-    parts = [code_mode_intro_for(model, lang) if code_mode else intro_for(model)]
+    parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]
     if code_mode:
         parts.append(code_mode_setting(commands, today or date.today(), lang))
     elif _is_glm(model):

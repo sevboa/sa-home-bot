@@ -94,7 +94,7 @@ def make_worker(
     env.hubs.append(hub)
     return AgentWorker(
         hub,
-        lambda model_name, job_id: model,
+        lambda model_name, job_id, style="full": model,
         sandboxes or (lambda request: LocalSandbox(request.workdir, request.baseline)),
         AgentSettings(
             hub_url=env.hub_url,
@@ -448,11 +448,11 @@ async def test_profile_role_text_joins_system_prompt(env):
 
 
 @pytest.mark.parametrize(
-    ("profile", "write_prefixes", "code_mode", "prompt_lang"),
-    [("custom", ("docs/",), True, "en"), (None, (), False, "ru")],
+    ("profile", "write_prefixes", "code_mode", "prompt_lang", "prompt_style"),
+    [("custom", ("docs/",), True, "en", "fast"), (None, (), False, "ru", "full")],
 )
 async def test_profile_fields_reach_toolbox_spec(
-    env, monkeypatch, profile, write_prefixes, code_mode, prompt_lang
+    env, monkeypatch, profile, write_prefixes, code_mode, prompt_lang, prompt_style
 ):
     captured_spec = {}
 
@@ -471,10 +471,15 @@ async def test_profile_fields_reach_toolbox_spec(
         model,
         profiles={
             "custom": DevlabProfileConfig(
-                write_prefixes=["docs/"], code_mode=True, prompt_lang="en"
+                write_prefixes=["docs/"],
+                code_mode=True,
+                prompt_lang="en",
+                prompt_style="fast",
             )
         },
     )
+    styles = []
+    worker._models = lambda name, jid, style: styles.append(style) or model
     monkeypatch.setattr(agent_worker_module, "AgentLoop", CaptureLoop)
 
     assert await worker.claim_once()
@@ -483,6 +488,8 @@ async def test_profile_fields_reach_toolbox_spec(
     assert captured_spec["spec"].write_prefixes == write_prefixes
     assert captured_spec["spec"].code_mode is code_mode
     assert captured_spec["spec"].prompt_lang == prompt_lang
+    assert captured_spec["spec"].prompt_style == prompt_style
+    assert styles == [prompt_style]
 
 
 async def test_unreadable_profile_role_fails_job_with_profile_name(env):

@@ -79,6 +79,13 @@ _CODE_MODE_COST_REMOTE_EN = (
     "Guideline: a three-step task takes two to three calls: reading; writing everything with "
     "checks and finish; if it fails, a fix from the output.\n"
 )
+_CODE_MODE_NEIGHBORS_EN = (
+    "Before writing, use grep() to find how it is already done nearby, and repeat it: ready "
+    "helpers (in the same module and in utils/), the comments above neighboring tables in "
+    "schema.sql, the style of neighboring methods. Something similar already exists - use "
+    "it instead of writing your own; never write one thing twice. Look for the example in "
+    "the same read call, batched with read(), not in a separate call.\n"
+)
 _CODE_MODE_RUNS_EN = (
     "\n"
     "## How code runs\n"
@@ -174,9 +181,19 @@ _CODE_MODE_TAIL_EN = (
     "Every reply is a tool call, usually execute. Start the code with a comment stating "
     "the intent: what this whole call will do."
 )
+CODE_MODE_INTRO_FAST_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_GLM_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_GLM_EN
+    + _CODE_MODE_TAIL_EN
+)
 CODE_MODE_INTRO_EN = (
     _CODE_MODE_HEAD_EN
     + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_NEIGHBORS_EN
     + _CODE_MODE_RUNS_EN
     + _CODE_MODE_RED_GLM_EN
     + _CODE_MODE_ASK_EN
@@ -200,15 +217,27 @@ CODE_MODE_SETTING_EN = (
     "- You do not commit or deploy: step_done and finish save the work. The project rules below "
     "are written for people too; the rules about code, tests and docs apply to you."
 )
-CODE_MODE_REMINDER_EN = (
+_REMINDER_GLM_HEAD_EN = (
     "[Reminder] An execute call is expensive, code inside it is cheap. Make a new call only "
     "when you need judgment about text you have not seen; decide the rest with if r.ok: in the "
     "same script. Read in batches, write in portions: one call is one portion of writing "
     "with a check (test and red = run_tests(...); then code fix and run_tests()). Do not design "
     "the whole solution at once: first portion, result, next portion from it; an extra call is "
     "cheaper than long deliberation; in thinking, a short plan without code, check what you can "
-    "with a script. Finish: last edits, run_tests(), run(\"ruff check ...\") and "
+    "with a script. "
+)
+_REMINDER_GLM_NEIGHBORS_EN = (
+    "Before writing, use grep() in the same read call to find how it is done nearby "
+    "(helpers in the module and utils/, comments in schema.sql, the style of neighboring "
+    "methods) and repeat it; never write one thing twice. "
+)
+_REMINDER_GLM_FINISH_EN = (
+    "Finish: last edits, run_tests(), run(\"ruff check ...\") and "
     "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
+)
+CODE_MODE_REMINDER_FAST_EN = _REMINDER_GLM_HEAD_EN + _REMINDER_GLM_FINISH_EN
+CODE_MODE_REMINDER_EN = (
+    _REMINDER_GLM_HEAD_EN + _REMINDER_GLM_NEIGHBORS_EN + _REMINDER_GLM_FINISH_EN
 )
 CODE_MODE_REMINDER_REMOTE_EN = (
     "[Reminder] Requests are limited, thinking is free. Think in detail: work out the whole "

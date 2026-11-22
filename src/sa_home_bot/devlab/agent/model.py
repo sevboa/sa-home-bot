@@ -10,7 +10,7 @@ import aiohttp
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELDS
-from sa_home_bot.devlab.agent.prompt import reminder_for, with_flow_reminder
+from sa_home_bot.devlab.agent.prompt import STYLE_FULL, reminder_for, with_flow_reminder
 from sa_home_bot.devlab.agent.prompt_en import EN
 from sa_home_bot.devlab.agent.tools import EXECUTE_DEFINITION_EN, TOOL_EXECUTE
 from sa_home_bot.devlab.usage import usage_cost
@@ -95,6 +95,7 @@ class GatewayChat:
         timeout_s: float = MODEL_TIMEOUT_S,
         temperature: float | None = None,
         session: aiohttp.ClientSession | None = None,
+        prompt_style: str = STYLE_FULL,
     ) -> None:
         self._url = base_url.rstrip("/") + protocol.HTTP_CHAT_PATH
         self._headers = {"Authorization": f"Bearer {token}", protocol.HEADER_JOB: job_id}
@@ -102,6 +103,7 @@ class GatewayChat:
         self._job_id = job_id
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
         self._temperature = temperature
+        self._prompt_style = prompt_style
         self._owns_session = session is None
         self._session = session or aiohttp.ClientSession()
 
@@ -119,7 +121,13 @@ class GatewayChat:
         body: dict[str, Any] = {
             "model": self._model,
             "messages": with_flow_reminder(
-                messages, reminder_for(self._model, _has_execute(tools), _prompt_lang(tools))
+                messages,
+                reminder_for(
+                    self._model,
+                    _has_execute(tools),
+                    _prompt_lang(tools),
+                    self._prompt_style,
+                ),
             ),
             "tools": tools,
             "user": f"devlab {self._job_id}",
@@ -242,4 +250,4 @@ def parse_reply(data: Any, step: int = 0) -> ModelReply:
     raise failure
 
 
-ModelFactory = Callable[[str, str], ChatModel]
+ModelFactory = Callable[[str, str, str], ChatModel]
