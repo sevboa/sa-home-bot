@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sa_home_bot.domain.hysteresis import reconcile_band
@@ -14,6 +14,9 @@ EVENT_HOST_RECOVERED = "host_recovered"
 DIR_ABOVE = "above"
 DIR_BELOW = "below"
 
+INSTANCE_LABEL_MOUNT = "mount"
+INSTANCE_LABEL_IFACE = "iface"
+
 
 @dataclass(frozen=True)
 class HostMetricSpec:
@@ -21,12 +24,15 @@ class HostMetricSpec:
     label: str
     unit: str
     direction: str
-    warn: float
-    crit: float
+    warn: float | None
+    crit: float | None
     hysteresis: float
     hint: str
+    instance_label: str | None = None
 
     def band(self, value: float) -> str:
+        if self.warn is None:
+            return BAND_MID
         if self.direction == DIR_ABOVE:
             if value >= self.warn:
                 return BAND_OVER
@@ -40,16 +46,10 @@ class HostMetricSpec:
         return BAND_MID
 
     def with_thresholds(self, warn: float, crit: float) -> HostMetricSpec:
-        return HostMetricSpec(
-            metric=self.metric,
-            label=self.label,
-            unit=self.unit,
-            direction=self.direction,
-            warn=warn,
-            crit=crit,
-            hysteresis=self.hysteresis,
-            hint=self.hint,
-        )
+        return replace(self, warn=warn, crit=crit)
+
+    def without_thresholds(self) -> HostMetricSpec:
+        return replace(self, warn=None, crit=None)
 
 
 METRICS: dict[str, HostMetricSpec] = {
@@ -106,6 +106,41 @@ METRICS: dict[str, HostMetricSpec] = {
         "ядро логировало стойла — вероятны фризы VM гипервизором",
     ),
 }
+
+
+def _gauge(
+    metric: str, label: str, unit: str, instance_label: str | None = None
+) -> HostMetricSpec:
+    return HostMetricSpec(
+        metric, label, unit, DIR_ABOVE, None, None, 0.0, "", instance_label
+    )
+
+
+GAUGES: dict[str, HostMetricSpec] = {
+    spec.metric: spec
+    for spec in (
+        _gauge("cpu_busy_pct", "CPU загрузка", "%"),
+        _gauge("mem_used_pct", "RAM занято", "%"),
+        _gauge("mem_available_bytes", "RAM доступно", "B"),
+        _gauge("load1", "load 1 мин", ""),
+        _gauge("load5", "load 5 мин", ""),
+        _gauge("load15", "load 15 мин", ""),
+        _gauge("disk_pct", "диск заполнен", "%", INSTANCE_LABEL_MOUNT),
+        _gauge("net_rx_bps", "сеть приём", "B/s", INSTANCE_LABEL_IFACE),
+        _gauge("net_tx_bps", "сеть отдача", "B/s", INSTANCE_LABEL_IFACE),
+        _gauge("uptime_s", "аптайм", "s"),
+        _gauge("procs", "процессов", ""),
+    )
+}
+
+
+def metric_spec(metric: str) -> HostMetricSpec | None:
+    return METRICS.get(metric) or GAUGES.get(metric)
+
+
+def instance_of(component_id: str, metric: str) -> str | None:
+    prefix = f"host:{metric}:"
+    return component_id[len(prefix) :] if component_id.startswith(prefix) else None
 
 
 def fmt_host_value(value: float, unit: str) -> str:

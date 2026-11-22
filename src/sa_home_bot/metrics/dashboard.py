@@ -44,11 +44,16 @@ def _timeseries(
 def _summary_table() -> dict[str, Any]:
     columns = [
         ("A", f'{protocol.METRIC_SCRAPE_UP}{{job="{protocol.JOB_NAME}",{NODE_FILTER}}}', "up", ""),
-        ("B", _host_expr("steal_pct"), "steal %", "percent"),
-        ("C", _host_expr("iowait_pct"), "iowait %", "percent"),
-        ("D", _host_expr("mem_available_pct"), "RAM свободно %", "percent"),
-        ("E", _host_expr("disk_used_pct"), "диск %", "percent"),
-        ("F", _host_expr("load_per_core"), "load/ядро", "short"),
+        ("B", _host_expr("cpu_busy_pct"), "CPU %", "percent"),
+        ("C", _host_expr("mem_used_pct"), "RAM занято %", "percent"),
+        (
+            "D",
+            f"max by ({protocol.LABEL_NODE}) ({_host_expr('disk_pct')})",
+            "диск макс %",
+            "percent",
+        ),
+        ("E", _host_expr("steal_pct"), "steal %", "percent"),
+        ("F", _host_expr("uptime_s"), "аптайм", "s"),
         (
             "G",
             f"max by ({protocol.LABEL_NODE}) ({protocol.METRIC_TEMPERATURE}{{{NODE_FILTER}}})",
@@ -91,12 +96,43 @@ def _summary_table() -> dict[str, Any]:
 def nodes_dashboard() -> dict[str, Any]:
     by_node = "{{node}}"
     specs: list[tuple[str, list[tuple[str, str]], dict[str, Any]]] = [
+        ("CPU загрузка, %", [(_host_expr("cpu_busy_pct"), by_node)], {"percent": True}),
         ("CPU steal, %", [(_host_expr("steal_pct"), by_node)], {"percent": True}),
         ("CPU iowait, %", [(_host_expr("iowait_pct"), by_node)], {"percent": True}),
         ("Load на ядро", [(_host_expr("load_per_core"), by_node)], {}),
-        ("RAM свободно, %", [(_host_expr("mem_available_pct"), by_node)], {"percent": True}),
+        (
+            "Load average",
+            [
+                (_host_expr("load1"), "{{node}} 1м"),
+                (_host_expr("load5"), "{{node}} 5м"),
+                (_host_expr("load15"), "{{node}} 15м"),
+            ],
+            {},
+        ),
+        ("RAM занято, %", [(_host_expr("mem_used_pct"), by_node)], {"percent": True}),
+        (
+            "RAM доступно, байт",
+            [(_host_expr("mem_available_bytes"), by_node)],
+            {"unit": "bytes"},
+        ),
         ("Swap занято, %", [(_host_expr("swap_used_pct"), by_node)], {"percent": True}),
-        ("Диск / заполнен, %", [(_host_expr("disk_used_pct"), by_node)], {"percent": True}),
+        (
+            "Диски по точкам монтирования, %",
+            [(_host_expr("disk_pct"), "{{node}} {{mount}}")],
+            {"percent": True},
+        ),
+        (
+            "Сеть: приём, байт/с",
+            [(_host_expr("net_rx_bps"), "{{node}} {{iface}}")],
+            {"unit": "Bps"},
+        ),
+        (
+            "Сеть: отдача, байт/с",
+            [(_host_expr("net_tx_bps"), "{{node}} {{iface}}")],
+            {"unit": "Bps"},
+        ),
+        ("Аптайм", [(_host_expr("uptime_s"), by_node)], {"unit": "s"}),
+        ("Процессов", [(_host_expr("procs"), by_node)], {}),
         (
             "PSI (давление), %",
             [

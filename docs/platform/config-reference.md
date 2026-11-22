@@ -277,7 +277,7 @@ instance-конфиге ноды.
 
 Таблица `[metrics]` (см. [metrics.md](metrics.md)).
 
-- `export: bool = false` — служба `monitor` отдаёт `GET /metrics` на tailscale-адресе ноды и порту `exporter_port`.
+- `export: bool = false` — служба `monitor` отдаёт `GET /metrics` на tailscale-адресе ноды и порту `exporter_port`. Включает и снятие host-метрик, даже при `sensors.host.enabled = false` (тогда без алертов, только экспорт).
 - `hub: bool = false` — нода держит VictoriaMetrics и Grafana (`nodectl fix` ставит и настраивает).
 - `data_dir: str = "/mnt/data/metrics"` — данные VictoriaMetrics.
 - `retention: str = "1y"` — срок хранения (`-retentionPeriod`).

@@ -149,7 +149,12 @@ def grafana_ini_values(settings: Settings, host: str) -> dict[str, dict[str, str
     return {
         "server": {"http_addr": host, "http_port": str(settings.metrics.grafana_port)},
         "auth.anonymous": {"enabled": "false"},
-        "analytics": {"reporting_enabled": "false", "check_for_updates": "false"},
+        "analytics": {
+            "reporting_enabled": "false",
+            "check_for_updates": "false",
+            "check_for_plugin_updates": "false",
+        },
+        "plugins": {"preinstall_disabled": "true", "preinstall_auto_update": "false"},
     }
 
 

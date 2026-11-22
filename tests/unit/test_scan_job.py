@@ -34,7 +34,7 @@ class FakeSensors:
         self._i += 1
         return [make_reading(temp)]
 
-    async def read_host(self, kernel_since=None):
+    async def read_host(self, kernel_since=None, export=False):
         return []
 
     async def read_disk_summaries(self, health_overrides):
@@ -142,7 +142,7 @@ class FakeGpuSensors:
         self._i += 1
         return [make_reading(temp, component_id="gpu:0", kind=KIND_GPU, label="Tesla V100")]
 
-    async def read_host(self, kernel_since=None):
+    async def read_host(self, kernel_since=None, export=False):
         return []
 
     async def read_disk_summaries(self, health_overrides):
@@ -203,7 +203,7 @@ class FakeHostSensors:
     async def read_all(self):
         return []
 
-    async def read_host(self, kernel_since=None):
+    async def read_host(self, kernel_since=None, export=False):
         from sa_home_bot.domain.host import METRICS, HostMetricReading
 
         self.kernel_since_calls.append(kernel_since)
@@ -287,3 +287,36 @@ async def test_disabled_disks_clears_stale_summary_cache(ctx):
     context.sensors = FakeSensors([40])
     await SensorScanJob().run(context)
     assert await context.store.get_disk_summaries() == []
+
+
+async def test_host_scan_without_host_sensor_exports_but_never_alerts(host_ctx):
+    context, notifier = host_ctx
+    context.config.sensors.host.enabled = False
+    context.config.metrics.export = True
+    job = SensorScanJob()
+    results = [await job.run(context) for _ in range(4)]
+
+    assert sum(r.alerts_sent for r in results) == 0
+    assert notifier.sent == []
+    states = {s.component_id: s for s in await context.store.get_all_host_states()}
+    assert states["host:steal_pct"].status == "ok"
+    assert states["host:steal_pct"].value == 1.0
+    assert await context.store.pending_host_alerts() == []
+
+
+async def test_gauge_metric_never_alerts(host_ctx):
+    from sa_home_bot.domain.host import HostMetricReading
+
+    context, notifier = host_ctx
+
+    async def read_host(kernel_since=None, export=False):
+        return [
+            HostMetricReading("host:disk_pct:/mnt/data", "disk_pct", "d", 99.0, "%", BASE_TIME)
+        ]
+
+    context.sensors.read_host = read_host
+    for _ in range(5):
+        await SensorScanJob().run(context)
+    assert notifier.sent == []
+    states = await context.store.get_all_host_states()
+    assert [(s.component_id, s.status) for s in states] == [("host:disk_pct:/mnt/data", "ok")]
