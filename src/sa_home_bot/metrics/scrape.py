@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.metrics import protocol
 from sa_home_bot.proto import endpoints
 
@@ -33,10 +33,12 @@ def peer_host(candidates: list[str]) -> str | None:
     return best[1] if best else None
 
 
-def scrape_targets(settings: Settings, own_host: str | None) -> list[ScrapeTarget]:
+def scrape_targets(
+    settings: Settings, own_host: str | None, peers: Sequence[SwarmNodeConfig] = ()
+) -> list[ScrapeTarget]:
     own_id = settings.node.id
     found: dict[str, str] = {}
-    for node in settings.swarm.nodes:
+    for node in [*settings.swarm.nodes, *peers]:
         if node.id == own_id:
             continue
         host = peer_host([node.endpoint, *node.endpoints])

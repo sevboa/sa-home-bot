@@ -71,6 +71,17 @@ def test_scrape_targets_use_own_address_for_self():
     ]
 
 
+
+def test_scrape_targets_merge_discovered_peers():
+    peers = [
+        SwarmNodeConfig(id="ion", endpoint="tcp://100.64.0.4:8710"),
+        SwarmNodeConfig(id="wooster", endpoint="tcp://100.64.0.99:8710"),
+    ]
+    targets = scrape_targets(hub_settings(), "100.64.0.9", peers)
+    assert ScrapeTarget("ion", "100.64.0.4") in targets
+    assert ScrapeTarget("wooster", "100.64.0.3") in targets
+
+
 def test_scrape_config_text():
     text = scrape_config_text(
         [ScrapeJob("sa-home-nodes", 9100, [ScrapeTarget("jeeves", "100.64.0.2")])], "30s"

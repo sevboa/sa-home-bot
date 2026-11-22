@@ -71,11 +71,15 @@ Debian-пакет victoria-metrics берёт аргументы из `ARGS` в 
 файлам пакета 1.112.0+ds1-2), служба работает от `_victoria-metrics`.
 
 ## Scrape-конфиг
-Чистая функция `metrics/scrape.py`: цели — все пиры из `[swarm].nodes` (предпочитается tailscale-адрес из
+Чистая функция `metrics/scrape.py`: цели — все пиры из `[swarm].nodes` и пиры, которых нода узнала сама (`node-state.json`, `NodeState.peers`) (предпочитается tailscale-адрес из
 `endpoint/endpoints`, unix и loopback пропускаются) плюс сама нода (`tailscale ip -4`). Надёжно узнать,
 у кого включён `export`, нельзя, поэтому недоступные цели просто `up = 0` — это нормально. Список
 обновляется при каждом `nodectl fix`; VictoriaMetrics перечитывает файл раз в минуту, рестарт не нужен.
-Новая нода в рое: добавить в `[swarm].nodes`, `nodectl fix` на хабе.
+Новая нода в рое: после того как хаб её увидел (она попала в `node-state.json`), `nodectl fix` на хабе.
+
+Находка 2026-11-23: в v0.214–0.216 цели брались только из `[swarm].nodes`, а у alfred там записан один
+arch-t480 — остальные ноды рой находит сам. Grafana видела только alfred, дашборд «VPN» был пуст. С
+v0.216.1 к целям добавлены пиры из `node-state.json`.
 
 ## Дашборды
 Каталог `metrics/dashboard.py::CATALOG` (имя файла → построитель): сейчас `nodes.json` («Ноды», uid

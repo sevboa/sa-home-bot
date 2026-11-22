@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from sa_home_bot.bot.vpn_nodes import known_server_nodes
-from sa_home_bot.config import Settings
+from sa_home_bot.config import Settings, SwarmNodeConfig
 from sa_home_bot.devlab.connect import local_tailscale_address
 from sa_home_bot.metrics import protocol
 from sa_home_bot.metrics.dashboard import CATALOG, render_dashboard
@@ -32,6 +32,7 @@ from sa_home_bot.node.fixups.privileged import (
     temp_file,
     unit_is_active,
 )
+from sa_home_bot.node.state import NodeState
 
 VM_PACKAGE = "victoria-metrics"
 VM_UNIT = "victoria-metrics.service"
@@ -72,10 +73,13 @@ def vm_defaults_content(settings: Settings) -> str:
 
 
 def vm_scrape_content(
-    settings: Settings, own_host: str | None, known_vpn_servers: Collection[str] = ()
+    settings: Settings,
+    own_host: str | None,
+    known_vpn_servers: Collection[str] = (),
+    peers: Sequence[SwarmNodeConfig] = (),
 ) -> str:
     cfg = settings.metrics
-    targets = scrape_targets(settings, own_host)
+    targets = scrape_targets(settings, own_host, peers)
     jobs = [
         ScrapeJob(protocol.JOB_NAME, cfg.exporter_port, targets),
         ScrapeJob(protocol.JOB_VPN, cfg.vpn_port, vpn_scrape_targets(targets, known_vpn_servers)),
@@ -85,6 +89,10 @@ def vm_scrape_content(
 
 def _own_host() -> str | None:
     return local_tailscale_address()
+
+
+def _swarm_peers(settings: Settings) -> list[SwarmNodeConfig]:
+    return NodeState.load(settings.node.state_path).peers
 
 
 def tailscale_dropin_content() -> str:
@@ -236,13 +244,18 @@ def make_victoria_metrics_config_fixup(settings: Settings) -> Fixup:
             path_exists(Path(data_dir))
             and file_matches(VM_DEFAULTS_FILE, vm_defaults_content(settings))
             and file_matches(
-                VM_SCRAPE_FILE, vm_scrape_content(settings, _own_host(), known_server_nodes())
+                VM_SCRAPE_FILE,
+                vm_scrape_content(
+                    settings, _own_host(), known_server_nodes(), _swarm_peers(settings)
+                ),
             )
             and unit_is_active(VM_UNIT)
         )
 
     def apply() -> None:
-        scrape = vm_scrape_content(settings, _own_host(), known_server_nodes())
+        scrape = vm_scrape_content(
+            settings, _own_host(), known_server_nodes(), _swarm_peers(settings)
+        )
         run_sudo(["install", "-d", "-m", "0750", "-o", VM_USER, "-g", VM_USER, data_dir])
         install_root_file(VM_SCRAPE_FILE, scrape, mode="0644", make_parents=True)
         previous = read_text_if_exists(VM_DEFAULTS_FILE)
