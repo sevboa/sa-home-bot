@@ -54,7 +54,7 @@ def test_with_warp_idempotent():
     assert twice == once
     assert [o["tag"] for o in once["outbounds"]].count("warp-1") == 1
     assert len(once["routing"]["balancers"]) == 1
-    assert sum(1 for r in once["routing"]["rules"] if r.get("balancerTag") == "warp") == 2
+    assert sum(1 for r in once["routing"]["rules"] if r.get("balancerTag") == "warp") == 3
 
 
 def test_with_warp_rule_after_private_block_and_balancer():
@@ -99,7 +99,7 @@ def test_with_warp_replaces_manual_outbound_tag():
     warp_rules = [
         r for r in out["routing"]["rules"] if "warp" in (r.get("outboundTag"), r.get("balancerTag"))
     ]
-    assert len(warp_rules) == 2
+    assert len(warp_rules) == 3
 
 
 def test_warp_outbound_shape():
@@ -129,6 +129,9 @@ def test_warp_outbound_shape():
         ),
         (lambda c: c["inbounds"][-1].update(port=1), False),
         (lambda c: c["routing"]["rules"].remove(vpn_warp.warp_probe_rule()), False),
+        (lambda c: c["routing"]["rules"].remove(vpn_warp.warp_quic_rule(INBOUNDS)), False),
+        (lambda c: c["routing"]["rules"][-1].update(port="80"), False),
+        (lambda c: c["routing"]["rules"][-1].update(inboundTag=["reality-in"]), False),
     ],
 )
 def test_warp_applied(mutate, expected):
@@ -326,6 +329,30 @@ def test_probe_rule_precedes_domain_rule_and_follows_private_block():
     )
     last_block = max(i for i, r in enumerate(rules) if r.get("outboundTag") == "block")
     assert last_block < probe < domain
+
+
+def test_quic_rule_routes_all_udp_443_to_warp_after_private_block():
+    rules = _applied()["routing"]["rules"]
+    expected = {
+        "type": "field",
+        "inboundTag": INBOUNDS,
+        "network": "udp",
+        "port": "443",
+        "balancerTag": "warp",
+    }
+    assert vpn_warp.warp_quic_rule(INBOUNDS) == expected
+    assert rules.count(expected) == 1
+    last_block = max(i for i, r in enumerate(rules) if r.get("outboundTag") == "block")
+    assert rules.index(expected) > last_block
+
+
+def test_with_warp_upgrades_config_without_quic_rule():
+    config = _applied()
+    config["routing"]["rules"].remove(vpn_warp.warp_quic_rule(INBOUNDS))
+    assert not vpn_warp.warp_applied(config, 2, DOMAINS, PORT)
+    upgraded = vpn_warp.with_warp(config, [_key(1), _key(2)], DOMAINS, PORT)
+    assert vpn_warp.warp_applied(upgraded, 2, DOMAINS, PORT)
+    assert upgraded == _applied()
 
 
 def test_probe_inbound_listens_on_loopback_only():

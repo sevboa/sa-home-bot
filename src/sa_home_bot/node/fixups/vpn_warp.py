@@ -33,6 +33,8 @@ WARP_MTU = 1280
 WARP_PING_DESTINATION = "https://www.google.com/generate_204"
 WARP_PING_INTERVAL = "5m"
 WARP_PING_TIMEOUT = "10s"
+WARP_QUIC_NETWORK = "udp"
+WARP_QUIC_PORT = "443"
 
 PostJson = Callable[[str, dict, dict], dict]
 KeyGen = Callable[[], tuple[str, str]]
@@ -116,6 +118,27 @@ def warp_rule(domains: list[str], inbound_tags: list[str]) -> dict:
     }
 
 
+def warp_quic_rule(inbound_tags: list[str]) -> dict:
+    return {
+        "type": "field",
+        "inboundTag": list(inbound_tags),
+        "network": WARP_QUIC_NETWORK,
+        "port": WARP_QUIC_PORT,
+        "balancerTag": WARP_TAG,
+    }
+
+
+def _is_quic_rule(rule: dict) -> bool:
+    return rule.get("network") == WARP_QUIC_NETWORK and rule.get("port") == WARP_QUIC_PORT
+
+
+def _same_rule(rule: dict, expected: dict) -> bool:
+    return {**rule, "inboundTag": sorted(rule.get("inboundTag", []))} == {
+        **expected,
+        "inboundTag": sorted(expected["inboundTag"]),
+    }
+
+
 def warp_balancer() -> dict:
     return {
         "tag": WARP_TAG,
@@ -178,7 +201,7 @@ def with_warp(
     routing["balancers"] = [*balancers, warp_balancer()]
     rules = [r for r in routing.get("rules", []) if not _is_warp_rule(r)]
     at = _last_block_index(rules) + 1
-    rules[at:at] = [warp_probe_rule(), warp_rule(domains, tags)]
+    rules[at:at] = [warp_probe_rule(), warp_rule(domains, tags), warp_quic_rule(tags)]
     routing["rules"] = rules
     inbounds = [
         i for i in out.setdefault("inbounds", []) if i.get("tag") != XRAY_WARP_PROBE_INBOUND_TAG
@@ -200,8 +223,15 @@ def warp_applied(config: dict, n: int, domains: list[str], probe_port: int) -> b
         return False
     rules = routing.get("rules", [])
     probe_indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r) and _is_probe_rule(r)]
-    indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r) and not _is_probe_rule(r)]
-    if len(indexes) != 1 or len(probe_indexes) != 1:
+    quic_indexes = [i for i, r in enumerate(rules) if _is_warp_rule(r) and _is_quic_rule(r)]
+    indexes = [
+        i
+        for i, r in enumerate(rules)
+        if _is_warp_rule(r) and not _is_probe_rule(r) and not _is_quic_rule(r)
+    ]
+    if len(indexes) != 1 or len(probe_indexes) != 1 or len(quic_indexes) != 1:
+        return False
+    if quic_indexes[0] <= _last_block_index(rules):
         return False
     index = indexes[0]
     if probe_indexes[0] > index or probe_indexes[0] <= _last_block_index(rules):
@@ -216,11 +246,11 @@ def warp_applied(config: dict, n: int, domains: list[str], probe_port: int) -> b
     if index <= _last_block_index(rules):
         return False
     tags = xray_client_inbound_tags(config)
-    expected = warp_rule(domains, tags)
-    rule = dict(rules[index])
-    rule["inboundTag"] = sorted(rule.get("inboundTag", []))
-    expected["inboundTag"] = sorted(tags)
-    return rule == expected and _quic_sniffing_ok(config, tags)
+    return (
+        _same_rule(rules[index], warp_rule(domains, tags))
+        and _same_rule(rules[quic_indexes[0]], warp_quic_rule(tags))
+        and _quic_sniffing_ok(config, tags)
+    )
 
 
 def parse_warp_registration(resp: dict, priv: str) -> dict:
