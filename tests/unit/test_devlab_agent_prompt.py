@@ -14,10 +14,16 @@ from sa_home_bot.devlab.agent.prompt import (
     RULES_TITLE,
     SYSTEM_INTRO,
     build_system,
+    code_mode_setting,
     glm_setting,
     intro_for,
     reminder_for,
     with_flow_reminder,
+)
+from sa_home_bot.devlab.agent.prompt_en import (
+    CODE_MODE_INTRO_EN,
+    CODE_MODE_REMINDER_EN,
+    RULES_TITLE_EN,
 )
 from sa_home_bot.devlab.agent.tools import (
     EXECUTE_DEFINITION,
@@ -173,3 +179,20 @@ def test_code_mode_intro_names_script_and_control_calls():
     assert 'finish("load возвращает 2; тесты, ruff и docs готовы")' in CODE_MODE_INTRO
     assert "список — в описании execute" in CODE_MODE_INTRO
 
+
+def test_english_lang_swaps_code_mode_texts_and_titles():
+    system = build_system(RULES, "", COMMANDS, TODAY, code_mode=True, lang="en")
+    assert system.startswith(CODE_MODE_INTRO_EN)
+    assert "## Setting\n- Today is 2026-11-16." in system
+    assert f"\n\n{RULES_TITLE_EN}\n\n=== CLAUDE.md ===" in system
+    assert RULES_TITLE not in system
+    assert reminder_for("glm", code_mode=True, lang="en") == CODE_MODE_REMINDER_EN
+    assert "## Setting" in code_mode_setting((), TODAY, "en")
+    setting = code_mode_setting((), TODAY, "en")
+    assert "- run(command) accepts commands starting with: none." in setting
+
+
+def test_english_lang_without_code_mode_changes_nothing():
+    assert build_system(RULES, "glm", COMMANDS, TODAY, lang="en") == build_system(
+        RULES, "glm", COMMANDS, TODAY
+    )

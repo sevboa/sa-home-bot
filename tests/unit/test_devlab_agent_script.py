@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from sa_home_bot.devlab.agent.prompt_en import SCRIPT_API_EN
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_API,
@@ -428,3 +429,21 @@ async def test_host_wait_does_not_eat_script_budget(project):
     code = f"step_done('шаг')\nprint(run({sys.executable + ' -c print(5)'!r}).ok)"
     run = await run_script(project, code, slow, budget=2.2)
     assert run.output == "True"
+
+
+async def test_read_beyond_end_is_edit_error_with_line_count(project):
+    run = await run_script(
+        project, "try:\n    read('src/a.py', 10)\nexcept EditError as e:\n    print(e)"
+    )
+    assert run.output == "в файле src/a.py 3 строк"
+
+
+async def test_git_command_is_refused_even_when_allowed(project):
+    run = await run_script(project, "print(run('git diff'))", allowed=[["git"]])
+    assert run.output == "[код 1]\ngit в песочнице нет: изменения показывает diff()"
+
+
+def test_english_api_matches_russian_names_and_filters():
+    assert [name for name, _, _ in SCRIPT_API_EN] == [name for name, _, _ in SCRIPT_API]
+    assert "def grep(" in api_stubs("regular", SCRIPT_API_EN)
+    assert api_stubs("регулярное", SCRIPT_API_EN) == ""

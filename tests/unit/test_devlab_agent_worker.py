@@ -443,11 +443,11 @@ async def test_profile_role_text_joins_system_prompt(env):
 
 
 @pytest.mark.parametrize(
-    ("profile", "write_prefixes", "code_mode"),
-    [("custom", ("docs/",), True), (None, (), False)],
+    ("profile", "write_prefixes", "code_mode", "prompt_lang"),
+    [("custom", ("docs/",), True, "en"), (None, (), False, "ru")],
 )
 async def test_profile_fields_reach_toolbox_spec(
-    env, monkeypatch, profile, write_prefixes, code_mode
+    env, monkeypatch, profile, write_prefixes, code_mode, prompt_lang
 ):
     captured_spec = {}
 
@@ -464,7 +464,11 @@ async def test_profile_fields_reach_toolbox_spec(
     worker = make_worker(
         env,
         model,
-        profiles={"custom": DevlabProfileConfig(write_prefixes=["docs/"], code_mode=True)},
+        profiles={
+            "custom": DevlabProfileConfig(
+                write_prefixes=["docs/"], code_mode=True, prompt_lang="en"
+            )
+        },
     )
     monkeypatch.setattr(agent_worker_module, "AgentLoop", CaptureLoop)
 
@@ -473,6 +477,7 @@ async def test_profile_fields_reach_toolbox_spec(
     assert await env.status(job_id) == protocol.STATUS_DONE
     assert captured_spec["spec"].write_prefixes == write_prefixes
     assert captured_spec["spec"].code_mode is code_mode
+    assert captured_spec["spec"].prompt_lang == prompt_lang
 
 
 async def test_unreadable_profile_role_fails_job_with_profile_name(env):

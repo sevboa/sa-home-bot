@@ -378,3 +378,26 @@ async def test_diff_of_clean_tree_says_so(project):
     outcome = await box.call(TOOL_EXECUTE, {"code": "print(diff())"})
     await box._sandbox.session_close()
     assert outcome.text == DIFF_EMPTY
+
+
+async def test_diff_includes_docs_despite_diff_prefixes(project, tmp_path_factory):
+    base = tmp_path_factory.mktemp("base")
+    for name, text in (("src/a.py", "value = 1\n"), ("docs/n.md", "старое\n")):
+        (base / name).parent.mkdir(exist_ok=True)
+        (base / name).write_text(text)
+    sandbox = LocalSandbox(project, LocalSandbox(project).snapshot(), base)
+    box = ToolBox(sandbox, AgentSpec(code_mode=True, diff_prefixes=("src/",)))
+    code = "write('docs/n.md', 'новое\\n')\nprint(diff())"
+    outcome = await box.call(TOOL_EXECUTE, {"code": code})
+    await sandbox.session_close()
+    assert "--- a/docs/n.md\n+++ b/docs/n.md" in outcome.text
+
+
+async def test_english_lang_offers_english_definitions_and_search(project):
+    box = toolbox(project, prompt_lang="en")
+    execute = box.definitions[1]["function"]["description"]
+    assert execute.startswith("Runs Python code")
+    assert "def finish(summary: str) -> NoReturn" in execute
+    assert "завершить" not in execute
+    outcome = await box.call(TOOL_SEARCH, {"query": "finish"})
+    assert "finish the task" in outcome.text

@@ -37,6 +37,7 @@ from sa_home_bot.devlab.agent.model import (
     parse_reply,
 )
 from sa_home_bot.devlab.agent.prompt import CODE_MODE_REMINDER, FLOW_REMINDER, with_flow_reminder
+from sa_home_bot.devlab.agent.prompt_en import CODE_MODE_REMINDER_EN
 from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
 from sa_home_bot.devlab.agent.script import worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -439,6 +440,25 @@ async def test_gateway_chat_uses_code_mode_reminder_when_execute_offered():
         await chat.close()
         await server.close()
     assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{CODE_MODE_REMINDER}"}]
+
+
+async def test_gateway_chat_uses_english_reminder_for_english_definitions():
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response(reply_body("ок", [], {}))
+
+    server, chat = await run_gateway(handler)
+    spec = AgentSpec(code_mode=True, prompt_lang="en")
+    tools = ToolBox(LocalSandbox(Path(".")), spec).definitions
+    try:
+        await chat.complete([{"role": "user", "content": "x"}], tools)
+    finally:
+        await chat.close()
+        await server.close()
+    expected = f"x\n\n{CODE_MODE_REMINDER_EN}"
+    assert seen["body"]["messages"] == [{"role": "user", "content": expected}]
 
 
 async def test_gateway_chat_request_and_parse():
