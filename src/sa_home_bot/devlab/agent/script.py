@@ -121,11 +121,13 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2 (сначала красный), правка load, шаги 1–2
+SCRIPT_TEST_EXAMPLE = """# Намерение: тест на 2, убедиться, что красный по нужной причине, шаг 1
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
 red = run_tests(["tests/test_a.py"])
 print("до правки:", "красный" if not red.ok else "зелёный: тест не ловит ошибку")
+print(red)"""
+SCRIPT_CODE_EXAMPLE = """# Намерение: правка load по красному выводу, прогон теста, шаг 2
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])

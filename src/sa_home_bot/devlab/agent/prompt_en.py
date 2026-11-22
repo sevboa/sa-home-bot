@@ -6,11 +6,13 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, steps 1-2
+SCRIPT_TEST_EXAMPLE_EN = """# Intent: test expects 2, check it is red for the right reason, step 1
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
 red = run_tests(["tests/test_a.py"])
 print("before fix:", "red" if not red.ok else "green: the test does not catch the bug")
+print(red)"""
+SCRIPT_CODE_EXAMPLE_EN = """# Intent: fix load from the red output, run the test, step 2
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
@@ -43,8 +45,13 @@ CODE_MODE_INTRO_EN = (
     "yet: what exactly to edit after reading a file, how to fix a failing test. Anything a "
     "condition can decide, decide with a condition in the same script: if r.ok: go on, "
     "else print(r). Never come back just to look at a green result.\n"
-    "A typical portion of work is two calls: read; then edit and check. A three-step "
-    "task takes three to six calls, as in the example below.\n"
+    "Read and explore in batches: several read() and grep() calls in one call. Write in "
+    "portions: one call is one complete portion of writing with a check. Typically a call "
+    "\"test and red = run_tests(...)\", the next call \"code fix and run_tests()\", then docs "
+    "and the finish (ruff, finish) in a short call or together with the last edit.\n"
+    "Do not design the whole solution in one reply: write the first portion, look at the "
+    "result, decide the next portion from it. An extra call is cheaper than long deliberation. "
+    "A three-step task usually takes four to eight calls, as in the example below.\n"
     "\n"
     "## How code runs\n"
     "- Like plain Python, immediately and in order: edit() and write() change the file at once. "
@@ -73,21 +80,25 @@ CODE_MODE_INTRO_EN = (
     "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
     "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
-    "- If a step needs a red test, verify it yourself in the same call: edit the test, "
-    "red = run_tests(...), fix the code, run_tests() - as in call 2 of the example.\n"
+    "- If a step needs a red test, verify it yourself: one call edits the test and runs "
+    "red = run_tests(...), the next call, based on its output, fixes the code and runs "
+    "run_tests() - as in calls 2 and 3 of the example.\n"
     "- ask_owner(\"question\") only when the decision belongs to the owner; the answer comes as "
     "the next message.\n"
     "\n"
-    "## Example: a three-step task in three calls\n"
+    "## Example: a three-step task in four calls\n"
     "Steps: 1 - a test for the new behaviour (fails for now), 2 - code fix, 3 - a note in docs/.\n"
     "\n"
     "Call 1:\n"
     f"{SCRIPT_READ_EXAMPLE_EN}\n"
     "\n"
-    "Call 2 - lines for edit() come from the variables of call 1:\n"
-    f"{SCRIPT_EDIT_EXAMPLE_EN}\n"
+    "Call 2 - the test and a red run; lines for edit() come from the variables of call 1:\n"
+    f"{SCRIPT_TEST_EXAMPLE_EN}\n"
     "\n"
-    "Call 3 - docs, checks and finish in one script (finish closes steps 1-3):\n"
+    "Call 3 - fix the code from the red output and run:\n"
+    f"{SCRIPT_CODE_EXAMPLE_EN}\n"
+    "\n"
+    "Call 4 - docs, checks and finish in one script (finish closes steps 1-3):\n"
     f"{SCRIPT_FINAL_EXAMPLE_EN}\n"
     "\n"
     "If a call failed (EditError, red test, guard rejection), the next call fixes exactly that "
@@ -100,7 +111,7 @@ CODE_MODE_INTRO_EN = (
     "comment is only the first line of the script itself; text that goes into a file "
     "(new_test = '''...''', edit() and write() arguments) has no # and no docstrings. "
     "run_tests() checks changed files for comments itself.\n"
-    "- A docs/ note is usually appended to the end of the file, as in call 3 of the example; "
+    "- A docs/ note is usually appended to the end of the file, as in call 4 of the example; "
     "for a section use grep(heading, path, context=3), not reading the whole file.\n"
     "- ruff checks line length: wrap long signatures, tuples and parametrize right away.\n"
     "- Run tests with run_tests(paths), not run(\"python -m pytest ...\").\n"
@@ -119,8 +130,10 @@ CODE_MODE_SETTING_EN = (
 CODE_MODE_REMINDER_EN = (
     "[Reminder] An execute call is expensive, code inside it is cheap. Make a new call only "
     "when you need judgment about text you have not seen; decide the rest with if r.ok: in the "
-    "same script. A portion of work = two calls: read into variables; then edit() from the "
-    "variables and run_tests(). Finish: last edits, run_tests(), run(\"ruff check ...\") and "
+    "same script. Read in batches, write in portions: one call is one portion of writing "
+    "with a check (test and red = run_tests(...); then code fix and run_tests()). Do not design "
+    "the whole solution at once: first portion, result, next portion from it; an extra call is "
+    "cheaper than long deliberation. Finish: last edits, run_tests(), run(\"ruff check ...\") and "
     "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
 )
 GLM_SETTING_TITLE_EN = "## Setting"
