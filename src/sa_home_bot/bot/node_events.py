@@ -546,7 +546,7 @@ async def _record_and_notify_admins(
     **options,
 ) -> None:
     await store.record_event(name, node_id, text, utc_now())
-    await notify_admins(book, notifier, text, **options)
+    await notify_admins(book, notifier, text, event_type=name, **options)
 
 
 async def _handle_vpn_event(name, data, book, notifier, store, node_link) -> None:

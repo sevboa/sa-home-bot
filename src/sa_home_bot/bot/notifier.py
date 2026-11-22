@@ -167,9 +167,18 @@ def admin_subs(book) -> list[Any]:
 
 
 async def notify_admins(
-    book, notifier: Notifier, text: str, reply_markup: InlineKeyboardMarkup | None = None
+    book,
+    notifier: Notifier,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    event_type: str | None = None,
 ) -> None:
-    await broadcast(admin_subs(book), notifier, text, reply_markup=reply_markup)
+    subs = [
+        sub
+        for sub in admin_subs(book)
+        if event_type is None or event_type not in sub.except_event_types
+    ]
+    await broadcast(subs, notifier, text, reply_markup=reply_markup)
 
 
 class Notifier:

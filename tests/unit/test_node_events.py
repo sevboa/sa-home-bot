@@ -1024,6 +1024,27 @@ async def test_vpn_failed_and_recovered_with_same_targets_are_different_events()
     assert len(notifier.sent) == 2
 
 
+async def test_vpn_check_event_skips_admin_who_excluded_it():
+    book = SubscriptionBook.from_config(
+        [
+            SubscriptionConfig(
+                name="owner",
+                chat_id=999,
+                allowed_commands=["*"],
+                event_types=["*"],
+                except_event_types=[vpn_protocol.EVENT_VPN_CHECK_FAILED],
+            ),
+            SubscriptionConfig(name="admin", chat_id=1000, allowed_commands=["*"]),
+        ]
+    )
+    notifier = FakeNotifier()
+    store = FakeStore()
+    handler = build_node_event_handler(book, notifier, store)
+    await handler(_vpn_event(vpn_protocol.EVENT_VPN_CHECK_FAILED, VPN_FAILED_A))
+    assert [chat_id for chat_id, *_ in notifier.sent] == [1000]
+    assert len(store.recorded_events) == 1
+
+
 async def test_vpn_check_repeat_after_window_shown_again(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(node_events.time, "monotonic", lambda: clock[0])
