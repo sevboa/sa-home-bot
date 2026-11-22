@@ -175,7 +175,10 @@ def test_code_mode_second_call_example_uses_variable_from_first():
 def test_code_mode_intro_names_script_and_control_calls():
     for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
         assert name in CODE_MODE_INTRO
-    assert 'step_done("1–2: тест ловил ошибку, load возвращает 2")' in CODE_MODE_INTRO
+    assert 'step_done("1–2: тест ловил ошибку, load возвращает 2")' not in CODE_MODE_INTRO
+    assert 'step_done("3: docs/pkg.md дополнен")' not in CODE_MODE_INTRO
+    assert "закрывает все шаги задания" in CODE_MODE_INTRO
+    assert "необязательная промежуточная проверка" in CODE_MODE_INTRO
     assert 'finish("load возвращает 2; тесты, ruff и docs готовы")' in CODE_MODE_INTRO
     assert "список — в описании execute" in CODE_MODE_INTRO
 

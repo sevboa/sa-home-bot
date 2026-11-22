@@ -73,7 +73,8 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         CONTROL_STEP_DONE,
         "def step_done(text: str) -> None: ...",
-        "закрыть пронумерованный шаг задания с итогом text; страж прогонит изменённые тесты; "
+        "необязательная промежуточная проверка шага с итогом text (finish() сам закрывает все "
+        "шаги); страж прогонит изменённые тесты; "
         "принят — возвращает управление, скрипт идёт дальше; не принят — StepRejected с "
         "причиной, скрипт останавливается",
     ),
@@ -128,12 +129,9 @@ print("до правки:", "красный" if not red.ok else "зелёный:
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
-print(r)
-if r.ok and not red.ok:
-    step_done("1–2: тест ловил ошибку, load возвращает 2")"""
+print(r)"""
 SCRIPT_FINAL_EXAMPLE = """# Намерение: запись в docs, шаг 3, ruff и финал
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
-step_done("3: docs/pkg.md дополнен")
 r = run("ruff check src/pkg/a.py tests/test_a.py")
 print(r)
 if r.ok:

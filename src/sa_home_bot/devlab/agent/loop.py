@@ -63,9 +63,9 @@ CODE_FINISH_REJECTED = (
 )
 CODE_STEP_REJECTED = (
     f"{STEP_REJECTED_HEAD}: скрипт остановлен (StepRejected); исправь и снова вызови "
-    "step_done() в следующем execute. "
-    "Шаг «написать тест, который пока падает» закрывается вместе со следующим шагом, "
-    "где код его чинит; полный вывод стража ниже:\n"
+    "step_done() в следующем execute либо сразу вызови finish() после правок. "
+    "step_done() необязателен: finish() закроет все шаги сам; "
+    "полный вывод стража ниже:\n"
 )
 STEP_ACCEPTED = "шаг принят"
 CODE_COUNTER = "[вызов {number} · контекст {thousands} тыс. токенов]"
@@ -75,6 +75,12 @@ SCRIPT_REJECTED = re.compile(
     re.MULTILINE,
 )
 TRACE_TEXT_CHARS = 300
+STEPS_HEADING = re.compile(r"^#{1,6}\s*(?:шаги|steps)\b", re.IGNORECASE)
+ANY_HEADING = re.compile(r"^#{1,6}\s")
+STEP_LINE = re.compile(r"^\s*(\d+)[.)]\s+\S")
+STEP_TITLE_NUMBERS = re.compile(r"^\s*(\d+(?:\s*(?:[–-]|,)\s*\d+)*)")
+FINISH_STEP_TITLE = "{number}: закрыт на finish: {summary}"
+FINISH_STEP_SUMMARY_CHARS = 200
 ASK_SKIPPED = "не выполнено: задан вопрос владельцу"
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
@@ -193,6 +199,41 @@ def _rejected(name: str, text: str) -> bool:
     )
 
 
+def _task_text(messages: list[dict[str, Any]]) -> str:
+    for message in messages:
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return ""
+
+
+def _task_steps(task: str) -> list[int]:
+    numbers: list[int] = []
+    inside = False
+    for line in task.splitlines():
+        if ANY_HEADING.match(line):
+            inside = STEPS_HEADING.match(line) is not None
+            continue
+        found = STEP_LINE.match(line) if inside else None
+        if found and int(found.group(1)) not in numbers:
+            numbers.append(int(found.group(1)))
+    return numbers
+
+
+def _title_numbers(title: str) -> set[int]:
+    found = STEP_TITLE_NUMBERS.match(title)
+    if not found:
+        return set()
+    text = found.group(1)
+    numbers: set[int] = set()
+    for part in text.split(","):
+        bounds = [int(n) for n in re.findall(r"\d+", part)]
+        if len(bounds) == 2 and bounds[0] <= bounds[1]:
+            numbers.update(range(bounds[0], bounds[1] + 1))
+        else:
+            numbers.update(bounds)
+    return numbers
+
+
 def _script_code(arguments: str) -> str:
     try:
         code = json.loads(arguments).get("code", "")
@@ -233,6 +274,8 @@ class AgentLoop:
         self._clock = clock
         self._overflow_hint = overflow_hint
         self._script_calls = 0
+        self._task_steps: list[int] = []
+        self._closed_steps: set[int] = set()
 
     def _emit(self, **entry: Any) -> None:
         if self._trace is not None:
@@ -313,6 +356,7 @@ class AgentLoop:
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
         seg = Segment(messages, self._clock())
+        self._task_steps = _task_steps(_task_text(messages))
         self._emit(event="start", resumed=resume is not None)
         tools_tokens = estimate_tokens(self._tools.definitions)
         budget = limits.context_tokens - limits.reply_tokens - tools_tokens
@@ -519,6 +563,7 @@ class AgentLoop:
             rejected = CODE_STEP_REJECTED if self._tools.code_mode else STEP_REJECTED
             return rejected + "\n".join(failures)
         seg.red_runs = 0
+        self._closed_steps |= _title_numbers(title)
         if self._on_step is not None:
             await self._on_step(title.strip())
         return ""
@@ -531,4 +576,15 @@ class AgentLoop:
         if failures:
             rejected = CODE_FINISH_REJECTED if self._tools.code_mode else FINISH_REJECTED
             return rejected + "\n".join(failures), None
+        await self._close_open_steps(summary.strip())
         return "принято", summary.strip()
+
+    async def _close_open_steps(self, summary: str) -> None:
+        if not self._tools.code_mode or self._on_step is None:
+            return
+        head = (summary.splitlines() or [""])[0][:FINISH_STEP_SUMMARY_CHARS]
+        for number in self._task_steps:
+            if number in self._closed_steps:
+                continue
+            self._closed_steps.add(number)
+            await self._on_step(FINISH_STEP_TITLE.format(number=number, summary=head))

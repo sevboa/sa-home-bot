@@ -161,7 +161,7 @@ async def test_project_packages_import_from_src(project):
     assert outcome.text.splitlines()[0] == "пакет"
 
 
-async def execute_loop(tmp_path, code, checks=()):
+async def execute_loop(tmp_path, code, checks=(), task="t"):
     steps = []
 
     async def on_step(title):
@@ -171,7 +171,7 @@ async def execute_loop(tmp_path, code, checks=()):
     model = ScriptedChatModel(tool_reply(TOOL_EXECUTE, "s1", code=code), ModelError("конец"))
     loop, _ = make_loop(tmp_path, model, spec=spec)
     loop._on_step = on_step
-    result = await loop.run("s", "t")
+    result = await loop.run("s", task)
     answer = model.seen[1][-1]["content"] if len(model.seen) > 1 else ""
     return result, answer, steps
 
@@ -205,6 +205,39 @@ async def test_finish_after_accepted_step_done_in_one_script(tmp_path):
     assert result.status is AgentStatus.FINISHED
     assert result.summary == "всё готово"
     assert steps == ["итог шага"]
+
+
+STEPS_TASK = (
+    "# Задача\n\n## Цель\n1. не шаг\n\n## Шаги\n1. тест.\n2. правка.\n3. docs.\n\n"
+    "## Тесты\n1. команда\n"
+)
+
+
+async def test_finish_closes_unclosed_steps_of_the_task(tmp_path):
+    code = EDIT_APP + 'step_done("1–2: тест и правка")\nfinish("всё готово")'
+    result, _, steps = await execute_loop(tmp_path, code, task=STEPS_TASK)
+    assert result.status is AgentStatus.FINISHED
+    assert steps == ["1–2: тест и правка", "3: закрыт на finish: всё готово"]
+
+
+async def test_finish_without_step_done_closes_every_step(tmp_path):
+    result, _, steps = await execute_loop(
+        tmp_path, EDIT_APP + 'finish("итог")', task=STEPS_TASK
+    )
+    assert result.status is AgentStatus.FINISHED
+    assert [s.split(":")[0] for s in steps] == ["1", "2", "3"]
+
+
+async def test_finish_without_parsed_steps_closes_nothing(tmp_path):
+    _, _, steps = await execute_loop(tmp_path, EDIT_APP + 'finish("итог")', task="просто текст")
+    assert steps == []
+
+
+async def test_rejected_finish_closes_no_steps(tmp_path):
+    _, _, steps = await execute_loop(
+        tmp_path, EDIT_APP + 'finish("итог")', checks=(RED_CHECK,), task=STEPS_TASK
+    )
+    assert steps == []
 
 
 async def test_rejected_step_done_counts_red_and_next_call_can_retry(tmp_path):

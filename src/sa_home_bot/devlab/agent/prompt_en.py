@@ -6,7 +6,7 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
-SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, close steps 1-2
+SCRIPT_EDIT_EXAMPLE_EN = """# Intent: test expects 2 (red first), fix load, steps 1-2
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
 red = run_tests(["tests/test_a.py"])
@@ -14,12 +14,9 @@ print("before fix:", "red" if not red.ok else "green: the test does not catch th
 old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
 r = run_tests(["tests/test_a.py"])
-print(r)
-if r.ok and not red.ok:
-    step_done("1-2: the test caught the bug, load returns 2")"""
+print(r)"""
 SCRIPT_FINAL_EXAMPLE_EN = """# Intent: docs note, step 3, ruff and finish
 write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
-step_done("3: docs/pkg.md updated")
 r = run("ruff check src/pkg/a.py tests/test_a.py")
 print(r)
 if r.ok:
@@ -40,13 +37,13 @@ CODE_MODE_INTRO_EN = (
     "## Cost of a call\n"
     "Every execute call is a full round trip: you re-read the whole conversation and write a "
     "new reply. That is the main cost in time and budget. Code inside a call is almost free: "
-    "five read() calls, three edit() calls, tests, ruff and step_done() in one script cost less "
+    "five read() calls, three edit() calls, tests and ruff in one script cost less "
     "than two calls.\n"
     "Make a new call only when the next action needs your judgment about text you have not seen "
     "yet: what exactly to edit after reading a file, how to fix a failing test. Anything a "
     "condition can decide, decide with a condition in the same script: if r.ok: go on, "
     "else print(r). Never come back just to look at a green result.\n"
-    "A typical task step is two calls: read; then edit, check and close the step. A three-step "
+    "A typical portion of work is two calls: read; then edit and check. A three-step "
     "task takes three to six calls, as in the example below.\n"
     "\n"
     "## How code runs\n"
@@ -70,15 +67,14 @@ CODE_MODE_INTRO_EN = (
     "- Processes only via run() and run_tests(); subprocess and os.system are forbidden.\n"
     "\n"
     "## Steps and finishing\n"
-    "- step_done(\"N: summary\") closes a numbered step: the guard immediately runs the changed "
-    "tests. Accepted: the function returns and the script goes on. Rejected: it raises "
+    "- finish(\"summary\") closes all steps of the task and ends it; put it in the same call as "
+    "the last edits, tests and ruff. The guard checks the diff, tests and project rules; a "
+    "rejection comes back as the output of that call.\n"
+    "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
+    "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
-    "- A step \"write a test that fails for now\" and the step that fixes the code are done in "
-    "one call: edit the test, red = run_tests(...) (make sure it is red), fix the code, "
-    "run_tests() and step_done(\"1-2: ...\") - as in call 2 of the example.\n"
-    "- finish(\"summary\") ends the task; put it in the same call as the last step_done() and "
-    "ruff. The guard checks the diff, tests and project rules; a rejection comes back as the "
-    "output of that call.\n"
+    "- If a step needs a red test, verify it yourself in the same call: edit the test, "
+    "red = run_tests(...), fix the code, run_tests() - as in call 2 of the example.\n"
     "- ask_owner(\"question\") only when the decision belongs to the owner; the answer comes as "
     "the next message.\n"
     "\n"
@@ -91,7 +87,7 @@ CODE_MODE_INTRO_EN = (
     "Call 2 - lines for edit() come from the variables of call 1:\n"
     f"{SCRIPT_EDIT_EXAMPLE_EN}\n"
     "\n"
-    "Call 3 - docs, checks and finish in one script:\n"
+    "Call 3 - docs, checks and finish in one script (finish closes steps 1-3):\n"
     f"{SCRIPT_FINAL_EXAMPLE_EN}\n"
     "\n"
     "If a call failed (EditError, red test, guard rejection), the next call fixes exactly that "
@@ -123,9 +119,9 @@ CODE_MODE_SETTING_EN = (
 CODE_MODE_REMINDER_EN = (
     "[Reminder] An execute call is expensive, code inside it is cheap. Make a new call only "
     "when you need judgment about text you have not seen; decide the rest with if r.ok: in the "
-    "same script. A step = two calls: read into variables; then edit() from the variables, "
-    "run_tests(), step_done(\"N: summary\"). Last step: edits, run_tests(), step_done(), "
-    "run(\"ruff check ...\") and finish(\"summary\") - in one call."
+    "same script. A portion of work = two calls: read into variables; then edit() from the "
+    "variables and run_tests(). Finish: last edits, run_tests(), run(\"ruff check ...\") and "
+    "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
 )
 GLM_SETTING_TITLE_EN = "## Setting"
 RULES_TITLE_EN = "Project rules (mandatory):"
@@ -143,8 +139,9 @@ EXECUTE_DESCRIPTION_EN = (
     "variables, imports and functions persist between calls, as in Jupyter; keep what you read "
     "in a variable and do not re-read it. After a timeout or a crash the state is reset. Make a "
     "new call only when you need judgment about text you have not seen; decide the rest with a "
-    "condition in this one. finish() and ask_owner() end the script; step_done() does "
-    "not: accepted - the script goes on, rejected - StepRejected with the reason and a stop. "
+    "condition in this one. finish() closes all task steps; finish() and ask_owner() end the "
+    "script; step_done() is optional and does not: accepted - the script goes on, rejected - "
+    "StepRejected with the reason and a stop. "
     "Functions:\n"
 )
 EXECUTE_CODE_EN = "Python code"
@@ -204,7 +201,8 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
     (
         "step_done",
         "def step_done(text: str) -> None: ...",
-        "close a numbered task step with summary text; the guard runs the changed tests; "
+        "optional intermediate check of a step with summary text (finish() closes all steps "
+        "itself); the guard runs the changed tests; "
         "accepted - control returns and the script goes on; rejected - StepRejected with the "
         "reason, the script stops",
     ),
