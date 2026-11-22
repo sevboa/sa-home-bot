@@ -161,7 +161,11 @@ class MonitorService:
             "now": datetime.now(tz=UTC).isoformat(),
             "uptime_s": uptime.total_seconds() if uptime is not None else None,
             "health": [_health_dict(s) for s in states],
-            "host_health": [_host_state_dict(s) for s in host_states],
+            "host_health": (
+                [_host_state_dict(s) for s in host_states]
+                if self._settings.sensors.host.enabled
+                else []
+            ),
             "disks": [asdict(d) for d in disks],
             "last_outage": _outage_dict(outages[0] if outages else None),
             "job_counts": await self._store.job_run_counts(),

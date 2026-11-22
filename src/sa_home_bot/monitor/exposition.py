@@ -9,7 +9,7 @@ from aiohttp import web
 
 from sa_home_bot.db.store import Store
 from sa_home_bot.devlab.connect import local_tailscale_address
-from sa_home_bot.domain.host import METRICS, HostMetricState
+from sa_home_bot.domain.host import HostMetricState, instance_of, metric_spec
 from sa_home_bot.domain.models import HealthState
 from sa_home_bot.metrics import protocol
 
@@ -48,11 +48,15 @@ def render_metrics(
             by_metric.setdefault(state.metric, []).append(state)
     for metric in sorted(by_metric):
         name = protocol.HOST_METRIC_PREFIX + metric
-        spec = METRICS.get(metric)
+        spec = metric_spec(metric)
         title = f"{spec.label}, {spec.unit}".rstrip(", ") if spec else metric
         lines.append(f"# HELP {name} {title}")
         lines.append(f"# TYPE {name} gauge")
-        lines.extend(_sample(name, {}, state.value) for state in by_metric[metric])
+        label_name = spec.instance_label if spec else None
+        for state in by_metric[metric]:
+            instance = instance_of(state.component_id, metric)
+            labels = {label_name: instance} if label_name and instance is not None else {}
+            lines.append(_sample(name, labels, state.value))
     temperatures = sorted(health, key=lambda s: (s.kind, s.component_id))
     if temperatures:
         lines.append(f"# HELP {protocol.METRIC_TEMPERATURE} температура компонента, °C")

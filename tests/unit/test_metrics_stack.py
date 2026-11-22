@@ -3,7 +3,7 @@ import json
 from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.config import NodeConfig, Settings, SwarmConfig, SwarmNodeConfig, TelegramConfig
-from sa_home_bot.domain.host import HostMetricState
+from sa_home_bot.domain.host import GAUGES, HostMetricState
 from sa_home_bot.domain.models import HealthState
 from sa_home_bot.metrics import protocol
 from sa_home_bot.metrics.dashboard import CATALOG, nodes_dashboard, render_dashboard
@@ -184,3 +184,29 @@ def test_metrics_config_defaults():
         False, False, 9100, 8428, 3000,
     )
     assert cfg.data_dir == "/mnt/data/metrics"
+
+
+def test_render_metrics_instance_labels():
+    states = [
+        HostMetricState("host:disk_pct:/mnt/data", "disk_pct", "d", 55.0, "%", "ok", 0, None),
+        HostMetricState("host:net_rx_bps:enp1s0", "net_rx_bps", "n", 1200.0, "B/s", "ok", 0, None),
+        HostMetricState("host:uptime_s", "uptime_s", "u", 9.0, "s", "ok", 0, None),
+    ]
+    text = render_metrics([], states)
+    assert 'sa_host_disk_pct{mount="/mnt/data"} 55\n' in text
+    assert 'sa_host_net_rx_bps{iface="enp1s0"} 1200\n' in text
+    assert "sa_host_uptime_s 9\n" in text
+
+
+def test_grafana_does_not_fetch_plugins():
+    values = metrics.grafana_ini_values(hub_settings(), "100.64.0.1")
+    assert values["plugins"]["preinstall_disabled"] == "true"
+    assert values["plugins"]["preinstall_auto_update"] == "false"
+    assert values["analytics"]["check_for_plugin_updates"] == "false"
+
+
+def test_dashboard_covers_new_gauges():
+    exprs = " ".join(t["expr"] for p in nodes_dashboard()["panels"] for t in p["targets"])
+    for metric in GAUGES:
+        assert protocol.HOST_METRIC_PREFIX + metric in exprs or metric.startswith("load")
+    assert "{{mount}}" in json.dumps(nodes_dashboard(), ensure_ascii=False)

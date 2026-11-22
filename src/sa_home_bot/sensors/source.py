@@ -38,9 +38,9 @@ class SensorSource:
         )
 
     async def read_host(
-        self, kernel_since: datetime | None = None
+        self, kernel_since: datetime | None = None, export: bool = False
     ) -> list[HostMetricReading]:
-        if not self._config.host.enabled:
+        if not (self._config.host.enabled or export):
             return []
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(

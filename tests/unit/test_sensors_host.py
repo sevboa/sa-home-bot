@@ -283,3 +283,83 @@ def test_host_threshold_override_in_config(tmp_path):
     )
     s = Settings.load(cfg)
     assert s.sensors.host.thresholds["steal_pct"].warn == 5
+
+
+def test_cpu_busy_pct_excludes_idle_and_iowait():
+    busy = host.cpu_busy_pct(parse_proc_stat_cpu(_STAT_1), parse_proc_stat_cpu(_STAT_2))
+    assert busy == pytest.approx(100 * (200 - 100 - 5) / 200)
+    snap = parse_proc_stat_cpu(_STAT_1)
+    assert host.cpu_busy_pct(snap, snap) == 0.0
+
+
+def test_parse_loadavgs_and_uptime():
+    assert host.parse_loadavgs("1.5 0.8 0.4 1/2 3") == (1.5, 0.8, 0.4)
+    assert host.parse_loadavgs("1.5") is None
+    assert host.parse_uptime("123.45 99.0") == pytest.approx(123.45)
+    assert host.parse_uptime("") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "has_device", "expected"),
+    [
+        ("enp1s0", True, True),
+        ("tailscale0", False, True),
+        ("lo", True, False),
+        ("veth12ab", True, False),
+        ("vprobe0", True, False),
+        ("docker0", True, False),
+        ("br-1a2b", True, False),
+        ("awg0", False, False),
+    ],
+)
+def test_metric_iface(name, has_device, expected):
+    assert host.metric_iface(name, has_device) is expected
+
+
+def test_net_rates_per_interface_bytes_per_second():
+    prev = host.parse_net_bytes(_NETDEV_1)
+    cur = host.parse_net_bytes(_NETDEV_2)
+    rates = host.net_rates(prev, cur, 10.0, lambda name: name != "lo")
+    assert rates == {"eth0": (400.0, 400.0)}
+
+
+def test_parse_mount_points_keeps_real_filesystems_under_root_and_mnt():
+    text = (
+        "/dev/mmcblk0p2 / ext4 rw 0 0\n"
+        "tmpfs /run tmpfs rw 0 0\n"
+        "/dev/mmcblk0p1 /boot/efi vfat rw 0 0\n"
+        "/dev/sda1 /mnt/data ext4 rw 0 0\n"
+        "/dev/sdb1 /mnt/my\\040disk ext4 rw 0 0\n"
+        "/dev/sda1 /mnt/data ext4 rw 0 0\n"
+        "/dev/loop0 /snap/x squashfs ro 0 0\n"
+    )
+    assert host.parse_mount_points(text) == ["/", "/mnt/data", "/mnt/my disk"]
+
+
+def test_read_host_sync_emits_gauges_with_instances(monkeypatch):
+    files = {
+        "/proc/stat": _STAT_1,
+        "/proc/net/dev": _NETDEV_1,
+        "/proc/meminfo": _MEMINFO,
+        "/proc/loadavg": "1.0 2.0 3.0 1/2 3",
+        "/proc/uptime": "500.5 1.0",
+        "/proc/mounts": "/dev/x /mnt/data ext4 rw 0 0\n",
+    }
+    monkeypatch.setattr(host, "_read", lambda path: files.get(path, ""))
+    monkeypatch.setattr(host.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(host.os, "cpu_count", lambda: 2)
+    fake_stat = type("S", (), {"f_blocks": 100, "f_bfree": 25})()
+    monkeypatch.setattr(host.os, "statvfs", lambda path: fake_stat)
+    monkeypatch.setattr(host, "_iface_has_device", lambda name: True)
+    monkeypatch.setattr(host, "_count_processes", lambda: 42)
+    monkeypatch.setattr(host, "_read_kernel_stall_count", lambda since, until: None)
+    by_id = {r.component_id: r for r in read_host_sync(NOW, 5.0)}
+    assert by_id["host:disk_pct:/mnt/data"].value == 75.0
+    assert by_id["host:disk_pct:/mnt/data"].metric == "disk_pct"
+    assert by_id["host:mem_used_pct"].value == 80.0
+    assert by_id["host:mem_available_bytes"].value == 800000 * 1024
+    assert (by_id["host:load5"].value, by_id["host:load15"].value) == (2.0, 3.0)
+    assert by_id["host:uptime_s"].value == 500.5
+    assert by_id["host:procs"].value == 42
+    assert {"host:net_rx_bps:eth0", "host:net_tx_bps:eth1"} <= set(by_id)
+    assert "host:cpu_busy_pct" in by_id

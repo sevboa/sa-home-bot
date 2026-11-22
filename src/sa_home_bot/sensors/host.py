@@ -6,9 +6,10 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from sa_home_bot.domain.host import METRICS, HostMetricReading
+from sa_home_bot.domain.host import HostMetricReading, metric_spec
 from sa_home_bot.utils.requirements import (
     Requirement,
     RequirementStatus,
@@ -45,6 +46,13 @@ _STALL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_REAL_FILESYSTEMS = frozenset(
+    {"ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "zfs", "ntfs", "ntfs3", "fuseblk", "exfat"}
+)
+_MOUNT_PREFIX = "/mnt/"
+_NET_OVERLAY_IFACE = "tailscale0"
+_NET_SKIP_PREFIXES = ("lo", "veth", "vprobe", "docker", "br-")
+
 _STAT_FIELDS = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
 
 
@@ -73,6 +81,16 @@ def cpu_deltas(prev: dict[str, int], cur: dict[str, int]) -> tuple[float, float]
     return max(0.0, steal), max(0.0, iowait)
 
 
+def cpu_busy_pct(prev: dict[str, int], cur: dict[str, int]) -> float:
+    total = sum(cur.get(k, 0) - prev.get(k, 0) for k in _STAT_FIELDS)
+    if total <= 0:
+        return 0.0
+    idle = (cur.get("idle", 0) - prev.get("idle", 0)) + (
+        cur.get("iowait", 0) - prev.get("iowait", 0)
+    )
+    return min(100.0, max(0.0, (total - idle) / total * 100))
+
+
 def parse_meminfo(text: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for line in text.splitlines():
@@ -87,6 +105,21 @@ def parse_meminfo(text: str) -> dict[str, int]:
 
 
 def parse_loadavg(text: str) -> float | None:
+    loads = parse_loadavgs(text)
+    return loads[0] if loads else None
+
+
+def parse_loadavgs(text: str) -> tuple[float, float, float] | None:
+    parts = text.split()
+    if len(parts) < 3:
+        return None
+    try:
+        return float(parts[0]), float(parts[1]), float(parts[2])
+    except ValueError:
+        return None
+
+
+def parse_uptime(text: str) -> float | None:
     parts = text.split()
     if not parts:
         return None
@@ -94,6 +127,65 @@ def parse_loadavg(text: str) -> float | None:
         return float(parts[0])
     except ValueError:
         return None
+
+
+def metric_iface(name: str, has_device: bool) -> bool:
+    if name == _NET_OVERLAY_IFACE:
+        return True
+    return has_device and not name.startswith(_NET_SKIP_PREFIXES)
+
+
+def parse_net_bytes(text: str) -> dict[str, tuple[int, int]]:
+    out: dict[str, tuple[int, int]] = {}
+    for line in text.splitlines():
+        name, sep, rest = line.partition(":")
+        nums = rest.split()
+        if not sep or len(nums) < 16:
+            continue
+        try:
+            out[name.strip()] = (int(nums[0]), int(nums[8]))
+        except ValueError:
+            continue
+    return out
+
+
+def net_rates(
+    prev: dict[str, tuple[int, int]],
+    cur: dict[str, tuple[int, int]],
+    window_s: float,
+    include: Callable[[str], bool],
+) -> dict[str, tuple[float, float]]:
+    window = max(window_s, 1e-3)
+    out: dict[str, tuple[float, float]] = {}
+    for iface, (rx, tx) in cur.items():
+        before = prev.get(iface)
+        if before is None or not include(iface):
+            continue
+        out[iface] = (max(0, rx - before[0]) / window, max(0, tx - before[1]) / window)
+    return out
+
+
+def parse_mount_points(text: str) -> list[str]:
+    mounts: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[2] not in _REAL_FILESYSTEMS:
+            continue
+        point = parts[1].replace("\\040", " ")
+        if (point == "/" or point.startswith(_MOUNT_PREFIX)) and point not in mounts:
+            mounts.append(point)
+    return mounts
+
+
+def _iface_has_device(name: str) -> bool:
+    return os.path.exists(f"/sys/class/net/{name}/device")
+
+
+def _count_processes() -> int:
+    try:
+        return sum(1 for entry in os.listdir("/proc") if entry.isdigit())
+    except OSError:
+        return 0
 
 
 def parse_pressure_some_avg60(text: str) -> float | None:
@@ -220,12 +312,16 @@ def _read_kernel_stall_count(since: datetime, until: datetime) -> int | None:
     return count_kernel_stalls(proc.stdout)
 
 
-def _reading(metric: str, value: float, now: datetime) -> HostMetricReading:
-    spec = METRICS[metric]
+def _reading(
+    metric: str, value: float, now: datetime, instance: str | None = None
+) -> HostMetricReading:
+    spec = metric_spec(metric)
+    suffix = f":{instance}" if instance is not None else ""
+    label = f"{spec.label} {instance}" if instance is not None else spec.label
     return HostMetricReading(
-        component_id=f"host:{metric}",
+        component_id=f"host:{metric}{suffix}",
         metric=metric,
-        label=spec.label,
+        label=label,
         value=round(value, 2),
         unit=spec.unit,
         taken_at=now,
@@ -249,19 +345,27 @@ def read_host_sync(
 
     out: list[HostMetricReading] = []
 
-    steal, iowait = cpu_deltas(parse_proc_stat_cpu(stat1), parse_proc_stat_cpu(stat2))
+    cpu1, cpu2 = parse_proc_stat_cpu(stat1), parse_proc_stat_cpu(stat2)
+    steal, iowait = cpu_deltas(cpu1, cpu2)
+    out.append(_reading("cpu_busy_pct", cpu_busy_pct(cpu1, cpu2), now))
     out.append(_reading("steal_pct", steal, now))
     out.append(_reading("iowait_pct", iowait, now))
 
-    load1 = parse_loadavg(_read("/proc/loadavg"))
-    if load1 is not None:
-        out.append(_reading("load_per_core", load1 / (os.cpu_count() or 1), now))
+    loads = parse_loadavgs(_read("/proc/loadavg"))
+    if loads is not None:
+        out.append(_reading("load_per_core", loads[0] / (os.cpu_count() or 1), now))
+        for metric, load in zip(("load1", "load5", "load15"), loads, strict=True):
+            out.append(_reading(metric, load, now))
 
     mi = parse_meminfo(_read("/proc/meminfo"))
     if mi.get("MemTotal"):
         out.append(
             _reading("mem_available_pct", mi.get("MemAvailable", 0) / mi["MemTotal"] * 100, now)
         )
+        available = mi.get("MemAvailable", 0)
+        used_pct = (mi["MemTotal"] - available) / mi["MemTotal"] * 100
+        out.append(_reading("mem_used_pct", used_pct, now))
+        out.append(_reading("mem_available_bytes", available * 1024.0, now))
     if mi.get("SwapTotal"):
         used = mi["SwapTotal"] - mi.get("SwapFree", 0)
         out.append(_reading("swap_used_pct", used / mi["SwapTotal"] * 100, now))
@@ -273,6 +377,20 @@ def read_host_sync(
             out.append(_reading("disk_used_pct", used_blocks / st.f_blocks * 100, now))
     except OSError as exc:
         log.warning("statvfs('/') не сработал: %s", exc)
+
+    for mount in parse_mount_points(_read("/proc/mounts")):
+        try:
+            mst = os.statvfs(mount)
+        except OSError:
+            continue
+        if mst.f_blocks:
+            used = (mst.f_blocks - mst.f_bfree) / mst.f_blocks * 100
+            out.append(_reading("disk_pct", used, now, mount))
+
+    uptime = parse_uptime(_read("/proc/uptime"))
+    if uptime is not None:
+        out.append(_reading("uptime_s", uptime, now))
+    out.append(_reading("procs", float(_count_processes()), now))
 
     for metric, path in (
         ("psi_cpu", "/proc/pressure/cpu"),
@@ -294,6 +412,15 @@ def read_host_sync(
         out.append(_reading("oom_kills", oom / window_min, now))
 
     if netdev1 and netdev2:
+        rates = net_rates(
+            parse_net_bytes(netdev1),
+            parse_net_bytes(netdev2),
+            sample_window_s,
+            lambda name: metric_iface(name, _iface_has_device(name)),
+        )
+        for iface, (rx_bps, tx_bps) in sorted(rates.items()):
+            out.append(_reading("net_rx_bps", rx_bps, now, iface))
+            out.append(_reading("net_tx_bps", tx_bps, now, iface))
         delta = net_err_delta(parse_proc_net_dev(netdev1), parse_proc_net_dev(netdev2))
         out.append(_reading("net_err_rate", delta / window_min, now))
 

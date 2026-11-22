@@ -13,6 +13,7 @@ from sa_home_bot.domain.host import (
     HostMetricReading,
     HostMetricState,
     compute_host_diff,
+    metric_spec,
 )
 from sa_home_bot.domain.models import (
     EVENT_OVERHEAT_CLEARED,
@@ -125,9 +126,11 @@ class SensorScanJob:
         host_cfg = config.sensors.host
 
         def resolve(reading: HostMetricReading) -> HostMetricPolicy:
-            spec = METRICS[reading.metric]
+            spec = metric_spec(reading.metric)
+            if not host_cfg.enabled:
+                spec = spec.without_thresholds()
             override = host_cfg.thresholds.get(reading.metric)
-            if override is not None:
+            if override is not None and spec.warn is not None:
                 spec = spec.with_thresholds(override.warn, override.crit)
             return HostMetricPolicy(
                 spec=spec,
@@ -145,7 +148,9 @@ class SensorScanJob:
                 kernel_since = datetime.fromisoformat(kernel_since_raw)
             except ValueError:
                 kernel_since = None
-        readings = await ctx.sensors.read_host(kernel_since=kernel_since)
+        readings = await ctx.sensors.read_host(
+            kernel_since=kernel_since, export=ctx.config.metrics.export
+        )
         if not readings:
             return 0, 0, 0, 0
         await ctx.store.set_state(KERNEL_SCAN_STATE_KEY, now.isoformat())
