@@ -864,6 +864,18 @@ Android/сайдлоад — на iOS сайдлоада нет вовсе). П�
   правки кода). Пороги гистерезиса — см.
   domain/vpn_check.py::reconcile_vpn_check.
 
+- `check_interval_s: float = 900`, `check_jitter_s: float = 300`
+  Расписание vpn_check (решение владельца 2026-11-23, раньше было 300 без
+  разброса): пауза между раундами = check_interval_s + random.uniform(0,
+  check_jitter_s), то есть раунд раз в 15–20 минут. Цена - аварии замечаются
+  позже. Устаревание результатов считает stale_after_s(): (interval + jitter) * 3.
+
+- `awg_check_min_s: float = 3600`, `awg_check_max_s: float = 10800`
+  Способы awg и awg_alt проверяются отдельно для каждой пары (наблюдатель,
+  сервер, способ) через случайный промежуток uniform(min, max); между
+  проверками слот пропускается, состояние не трогается. Требование: min <= max.
+  Устаревание AWG-строк: awg_check_max_s * 3.
+
 - `mtg_domain: str = "www.microsoft.com"`
   --- Прокси на jeeves (mtg — MTProto, microsocks — SOCKS5), 2026-08-17.
   Секрет mtg НЕ здесь — он в БД (proxy_state, см. vpn/service.py), чтобы

@@ -435,3 +435,23 @@ def test_help_texts_mention_page_and_vpn_check():
 
     joined = " ".join(vpn_facts.ANSWERS.values())
     assert "страниц" in joined and "включён ли VPN" in joined
+
+
+def test_check_schedule_defaults_are_sparse():
+    cfg = VpnConfig()
+    assert (cfg.check_interval_s, cfg.check_jitter_s) == (900.0, 300.0)
+    assert (cfg.awg_check_min_s, cfg.awg_check_max_s) == (3600.0, 10800.0)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"check_jitter_s": -1},
+        {"awg_check_min_s": 0},
+        {"awg_check_max_s": 0},
+        {"awg_check_min_s": 7200, "awg_check_max_s": 3600},
+    ],
+)
+def test_check_schedule_rejects_bad_values(fields):
+    with pytest.raises(ValueError):
+        VpnConfig(**fields)

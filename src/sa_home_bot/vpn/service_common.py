@@ -7,11 +7,13 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
+from sa_home_bot.config import VpnConfig
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     ProtoError,
 )
 from sa_home_bot.vpn.protocol import (
+    AWG_PROBE_TRANSPORTS,
     FLOWER_NAMES,
 )
 
@@ -23,6 +25,13 @@ NODE_SERVICE = "node"
 ACTION_TRIGGER_PEERS = "trigger_peers"
 
 CHECK_STALE_FACTOR = 3
+CHECK_SPREAD_RATIO = 0.5
+
+
+def stale_after_s(cfg: VpnConfig, transport: str | None = None) -> float:
+    if transport in AWG_PROBE_TRANSPORTS:
+        return cfg.awg_check_max_s * CHECK_STALE_FACTOR
+    return (cfg.check_interval_s + cfg.check_jitter_s) * CHECK_STALE_FACTOR
 
 
 def _random_device_label(used: set[str]) -> str:

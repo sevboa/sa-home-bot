@@ -684,6 +684,12 @@ class VpnConfig(BaseModel):
         return _check_h_range(v)
 
     @model_validator(mode="after")
+    def _validate_awg_check_range(self) -> VpnConfig:
+        if self.awg_check_min_s > self.awg_check_max_s:
+            raise ValueError("awg_check_min_s не должен быть больше awg_check_max_s")
+        return self
+
+    @model_validator(mode="after")
     def _validate_awg_alt(self) -> VpnConfig:
         if self.awg_alt is not None:
             if self.awg_alt.interface == self.interface:
@@ -739,7 +745,10 @@ class VpnConfig(BaseModel):
     mtg_public_host: str = ""
     socks_port: int = Field(default=1080, ge=1, le=65535)
     socks_host: str = ""
-    check_interval_s: float = Field(default=300.0, gt=0)
+    check_interval_s: float = Field(default=900.0, gt=0)
+    check_jitter_s: float = Field(default=300.0, ge=0)
+    awg_check_min_s: float = Field(default=3600.0, gt=0)
+    awg_check_max_s: float = Field(default=10800.0, gt=0)
     check_fail_threshold: int = Field(default=2, ge=1)
     check_clear_threshold: int = Field(default=1, ge=1)
     link_stable_threshold: int = Field(default=3, ge=1)

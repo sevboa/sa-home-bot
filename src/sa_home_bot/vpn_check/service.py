@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import ipaddress
 import logging
+import random
 import shutil
 import socket
 import time
@@ -39,6 +40,10 @@ from sa_home_bot.vpn_check.protocol import (
     ACTION_SERIES,
     ACTION_SERIES_STATUS,
     ACTION_SNI_PROBE,
+    ARG_SCHEDULE,
+    SCHEDULE_AWG_MAX_S,
+    SCHEDULE_AWG_MIN_S,
+    SCHEDULE_SPREAD_S,
     SERIES_MODE_BURST,
     SERIES_MODE_SINGLE,
     SERVICE_NAME,
@@ -89,6 +94,7 @@ class VpnCheckService:
         self._slot_locks: dict[str, asyncio.Lock] = {}
         self._series_last: dict[str, dict] = {}
         self._net_targets: dict[str, RawTarget] = {}
+        self._awg_next_at: dict[tuple[str, str], float] = {}
 
     def _slot_lock(self, slot: ProbeSlot) -> asyncio.Lock:
         lock = self._slot_locks.get(slot.netns)
@@ -164,10 +170,30 @@ class VpnCheckService:
                 "skipped": "нет локально настроенного тоннеля к этому серверу",
             }
         self._remember_net_target(server, args.get("net_target"))
+        spread_s = 0.0
+        schedule = args.get(ARG_SCHEDULE)
+        if action == ACTION_CHECK and isinstance(schedule, dict):
+            try:
+                spread_s = max(float(schedule[SCHEDULE_SPREAD_S]), 0.0)
+                awg_min_s = float(schedule[SCHEDULE_AWG_MIN_S])
+                awg_max_s = float(schedule[SCHEDULE_AWG_MAX_S])
+            except (KeyError, ValueError, TypeError):
+                pass
+            else:
+                slots = self._due_slots(slots, awg_min_s, awg_max_s)
+                if not slots:
+                    return {
+                        "accepted": True,
+                        "server": server,
+                        "skipped": "AWG-слоты ждут своего срока",
+                    }
         if action == ACTION_SERIES:
             asyncio.create_task(self._series_run(slots, mode), name="vpn-series-run")
             return {"accepted": True, "server": server, "mode": mode}
-        asyncio.create_task(self._run_and_report(server, slots, targets), name="vpn-check-run")
+        asyncio.create_task(
+            self._run_and_report(server, slots, targets, spread_s=spread_s),
+            name="vpn-check-run",
+        )
         return {"accepted": True, "server": server, "targets": targets}
 
     async def _sni_probe(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -178,13 +204,35 @@ class VpnCheckService:
         results = await probe_many(domains)
         return {"results": [r.model_dump(mode="json") for r in results]}
 
+    def _due_slots(
+        self, slots: list[ProbeSlot], awg_min_s: float, awg_max_s: float
+    ) -> list[ProbeSlot]:
+        now = time.monotonic()
+        due = []
+        for slot in slots:
+            if slot.transport in AWG_PROBE_TRANSPORTS:
+                key = (slot.server, slot.transport)
+                if now < self._awg_next_at.get(key, 0.0):
+                    continue
+                self._awg_next_at[key] = now + random.uniform(awg_min_s, awg_max_s)
+            due.append(slot)
+        return due
+
     async def _run_and_report(
-        self, server: str, slots: list[ProbeSlot], targets: list[str]
+        self,
+        server: str,
+        slots: list[ProbeSlot],
+        targets: list[str],
+        *,
+        spread_s: float = 0.0,
     ) -> None:
         net = await self._net_probe(slots)
         results: list[dict[str, Any]] = []
-        for slot in slots:
-            results.extend(await self._check_slot(slot, targets))
+        order = random.sample(slots, len(slots))
+        for slot in order:
+            if spread_s > 0:
+                await asyncio.sleep(random.uniform(0, spread_s / len(order)))
+            results.extend(await self._check_slot(slot, random.sample(targets, len(targets))))
         extra = {"net": {server: net}} if net is not None else {}
         await self._report_to_vpn(ACTION_REPORT_CHECK, results, extra)
 

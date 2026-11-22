@@ -812,3 +812,102 @@ async def test_entry_name_prefers_sni_from_slot_state(monkeypatch, transport, ex
         PROBE_SERVER, [slot], ["https://1.1.1.1"]
     )
     assert _result_for(node_link, "https://1.1.1.1")["entry"] == expected
+
+
+def _scheduled(**overrides):
+    schedule = {"spread_s": 450.0, "awg_min_s": 3600.0, "awg_max_s": 10800.0}
+    return {
+        "server": PROBE_SERVER,
+        "targets": ["https://1.1.1.1"],
+        "schedule": schedule,
+        **overrides,
+    }
+
+
+def _recording(service):
+    runs = []
+
+    async def fake(server, slots, targets, *, spread_s=0.0):
+        runs.append(([s.transport for s in slots], spread_s))
+
+    service._run_and_report = fake
+    return runs
+
+
+async def test_awg_slot_waits_for_its_own_schedule():
+    service = _service(_FakeNodeLink(), slots=[_slot(), _reality_slot()])
+    runs = _recording(service)
+    await service.run_command("check", _scheduled())
+    await asyncio.sleep(0)
+    await service.run_command("check", _scheduled())
+    await asyncio.sleep(0)
+    assert runs == [(["awg", "reality"], 450.0), (["reality"], 450.0)]
+    for key in service._awg_next_at:
+        service._awg_next_at[key] = 0.0
+    await service.run_command("check", _scheduled())
+    await asyncio.sleep(0)
+    assert runs[-1] == (["awg", "reality"], 450.0)
+
+
+async def test_awg_next_check_is_random_within_range(monkeypatch):
+    service = _service(_FakeNodeLink(), slots=[_slot()])
+    _recording(service)
+    seen = []
+
+    def fake_uniform(low, high):
+        seen.append((low, high))
+        return 5000.0
+
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.random.uniform", fake_uniform)
+    await service.run_command("check", _scheduled())
+    assert seen == [(3600.0, 10800.0)]
+
+
+async def test_only_awg_slots_not_due_skips_whole_check():
+    service = _service(_FakeNodeLink(), slots=[_slot()])
+    runs = _recording(service)
+    await service.run_command("check", _scheduled())
+    await asyncio.sleep(0)
+    result = await service.run_command("check", _scheduled())
+    await asyncio.sleep(0)
+    assert "skipped" in result
+    assert len(runs) == 1
+
+
+async def test_check_without_schedule_runs_all_slots_without_pause():
+    service = _service(_FakeNodeLink(), slots=[_slot(), _reality_slot()])
+    runs = _recording(service)
+    for _ in range(2):
+        await service.run_command("check", {"server": PROBE_SERVER, "targets": ["https://1.1.1.1"]})
+        await asyncio.sleep(0)
+    assert runs == [(["awg", "reality"], 0.0)] * 2
+
+
+async def test_run_and_report_shuffles_slots_and_spreads_pauses(monkeypatch):
+    _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+    service = _service(_FakeNodeLink(), slots=[])
+    order = []
+    pauses = []
+
+    async def fake_check_slot(slot, targets):
+        order.append(slot.transport)
+        return []
+
+    async def fake_sleep(seconds):
+        pauses.append(seconds)
+
+    async def fake_report(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_check_slot", fake_check_slot)
+    monkeypatch.setattr(service, "_report_to_vpn", fake_report)
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "sa_home_bot.vpn_check.service.random.sample", lambda seq, k: list(reversed(seq))
+    )
+    monkeypatch.setattr("sa_home_bot.vpn_check.service.random.uniform", lambda low, high: high)
+    await service._run_and_report(
+        PROBE_SERVER, [_slot(), _reality_slot()], ["https://1.1.1.1"], spread_s=100.0
+    )
+    assert order == ["reality", "awg"]
+    assert pauses == [50.0, 50.0]

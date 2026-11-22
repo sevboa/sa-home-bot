@@ -9,7 +9,13 @@ from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import Address
 from sa_home_bot.vpn import protocol as vpn_protocol
-from sa_home_bot.vpn.service import CHECK_STALE_FACTOR, VpnService
+from sa_home_bot.vpn.service import VpnService
+from sa_home_bot.vpn.service_common import (
+    CHECK_SPREAD_RATIO,
+    CHECK_STALE_FACTOR,
+    stale_after_s,
+)
+from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
 TARGET = "https://1.1.1.1"
 
@@ -238,9 +244,7 @@ async def test_get_state_carries_own_check_rollup(env):
 async def test_stale_observer_drops_out_of_rollup(env):
     svc, _, _ = env
     await _report(svc, "alfred", True, server="jeeves", transport="awg")
-    stale = (
-        datetime.now(UTC) - timedelta(seconds=svc._cfg.check_interval_s * CHECK_STALE_FACTOR + 60)
-    ).isoformat()
+    stale = (datetime.now(UTC) - timedelta(seconds=stale_after_s(svc._cfg, "awg") + 60)).isoformat()
     await svc._db.conn.execute("UPDATE vpn_check_states SET last_seen_at = ?", (stale,))
     await svc._db.conn.commit()
     status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
@@ -310,10 +314,7 @@ async def test_active_problems_excludes_stale_records(env):
     await _report(svc, "alfred", False, "timeout", server="wooster", transport="awg")
     await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
     await _report(svc, "jeeves", False, "timeout", server="jeeves", transport="awg")
-    stale = (
-        datetime.now(UTC)
-        - timedelta(seconds=svc._cfg.check_interval_s * CHECK_STALE_FACTOR + 60)
-    ).isoformat()
+    stale = (datetime.now(UTC) - timedelta(seconds=stale_after_s(svc._cfg, "awg") + 60)).isoformat()
     sql = (
         "UPDATE vpn_check_states SET last_seen_at = ? "
         "WHERE node = ? AND server = ? AND transport = ?"
@@ -356,3 +357,52 @@ async def test_active_problems_partial_group_whole_false(env):
             "whole": False,
         }
     ]
+
+
+def test_stale_after_differs_for_awg_and_other_transports():
+    cfg = VpnConfig(
+        check_interval_s=600, check_jitter_s=200, awg_check_min_s=1000, awg_check_max_s=5000
+    )
+    assert stale_after_s(cfg) == (600 + 200) * CHECK_STALE_FACTOR
+    assert stale_after_s(cfg, "reality") == (600 + 200) * CHECK_STALE_FACTOR
+    assert stale_after_s(cfg, vpn_protocol.TRANSPORT_AWG) == 5000 * CHECK_STALE_FACTOR
+    assert stale_after_s(cfg, vpn_protocol.PROBE_TRANSPORT_AWG_ALT) == 5000 * CHECK_STALE_FACTOR
+
+
+def test_next_check_delay_adds_random_jitter(env, monkeypatch):
+    svc, _, _ = env
+    seen = []
+
+    def fake_uniform(low, high):
+        seen.append((low, high))
+        return 42.0
+
+    monkeypatch.setattr("sa_home_bot.vpn.checks.random.uniform", fake_uniform)
+    assert svc._next_check_delay() == svc._cfg.check_interval_s + 42.0
+    assert seen == [(0, svc._cfg.check_jitter_s)]
+
+
+async def test_scheduled_dispatch_carries_schedule_and_manual_does_not(env):
+    svc, _, node_link = env
+    await svc._dispatch_checks(scheduled=True)
+    await svc._dispatch_checks()
+    scheduled, manual = (call["args"]["args"] for call in node_link.calls)
+    assert scheduled[vpn_check_protocol.ARG_SCHEDULE] == {
+        vpn_check_protocol.SCHEDULE_SPREAD_S: svc._cfg.check_interval_s * CHECK_SPREAD_RATIO,
+        vpn_check_protocol.SCHEDULE_AWG_MIN_S: svc._cfg.awg_check_min_s,
+        vpn_check_protocol.SCHEDULE_AWG_MAX_S: svc._cfg.awg_check_max_s,
+    }
+    assert vpn_check_protocol.ARG_SCHEDULE not in manual
+
+
+async def test_awg_row_outlives_reality_row_between_checks(env):
+    svc, _, _ = env
+    await _report(svc, "alfred", True, server="jeeves", transport=vpn_protocol.TRANSPORT_AWG)
+    await _report(svc, "alfred", True, server="jeeves", transport=vpn_protocol.TRANSPORT_REALITY)
+    age = stale_after_s(svc._cfg) + 60
+    assert age < stale_after_s(svc._cfg, vpn_protocol.TRANSPORT_AWG)
+    old = (datetime.now(UTC) - timedelta(seconds=age)).isoformat()
+    await svc._db.conn.execute("UPDATE vpn_check_states SET last_seen_at = ?", (old,))
+    await svc._db.conn.commit()
+    status = await svc.run_command(vpn_protocol.ACTION_CHECK_STATUS, {})
+    assert [row["transport"] for row in status["rollup"]] == [vpn_protocol.TRANSPORT_AWG]

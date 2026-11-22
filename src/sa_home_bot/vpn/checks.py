@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -51,6 +52,7 @@ from sa_home_bot.proto.messages import (
 from sa_home_bot.reality.client_config import probe_entry_name
 from sa_home_bot.utils.clock import utc_now
 from sa_home_bot.vpn.protocol import (
+    AWG_PROBE_TRANSPORTS,
     EVENT_VPN_CHECK_FAILED,
     EVENT_VPN_CHECK_RECOVERED,
     EVENT_VPN_LINK_CHANGED,
@@ -65,9 +67,10 @@ from sa_home_bot.vpn.protocol import (
 )
 from sa_home_bot.vpn.service_common import (
     ACTION_TRIGGER_PEERS,
-    CHECK_STALE_FACTOR,
+    CHECK_SPREAD_RATIO,
     NODE_SERVICE,
     log,
+    stale_after_s,
 )
 from sa_home_bot.vpn_check import protocol as vpn_check_protocol
 
@@ -115,7 +118,9 @@ def _settle_run(run: dict[str, Any], excluded: set[str]) -> None:
 
 
 class ChecksMixin:
-    async def _dispatch_checks(self, server: str | None = None) -> dict[str, Any]:
+    async def _dispatch_checks(
+        self, server: str | None = None, *, scheduled: bool = False
+    ) -> dict[str, Any]:
         if self._node_link is None:
             log.warning("vpn: node_link не настроен — проверки доступности не разосланы")
             return {"dispatched_to": [], "unreachable": [], "skipped": []}
@@ -129,6 +134,7 @@ class ChecksMixin:
                         "server": server or self._node,
                         "targets": list(self._cfg.check_targets),
                         **({} if server else self._net_target_args()),
+                        **(self._schedule_args() if scheduled else {}),
                     },
                     "timeout_s": self._cfg.check_dispatch_timeout_s,
                 },
@@ -144,6 +150,19 @@ class ChecksMixin:
             "skipped": result.get("skipped", []),
         }
 
+    def _schedule_args(self) -> dict[str, Any]:
+        return {
+            vpn_check_protocol.ARG_SCHEDULE: {
+                vpn_check_protocol.SCHEDULE_SPREAD_S: self._cfg.check_interval_s
+                * CHECK_SPREAD_RATIO,
+                vpn_check_protocol.SCHEDULE_AWG_MIN_S: self._cfg.awg_check_min_s,
+                vpn_check_protocol.SCHEDULE_AWG_MAX_S: self._cfg.awg_check_max_s,
+            }
+        }
+
+    def _next_check_delay(self) -> float:
+        return self._cfg.check_interval_s + random.uniform(0, self._cfg.check_jitter_s)
+
     def _net_target_args(self) -> dict[str, Any]:
         reality = self._cfg.reality
         if reality is None:
@@ -155,9 +174,9 @@ class ChecksMixin:
 
     async def check_loop(self) -> None:
         while True:
-            await asyncio.sleep(self._cfg.check_interval_s)
+            await asyncio.sleep(self._next_check_delay())
             try:
-                await self._dispatch_checks()
+                await self._dispatch_checks(scheduled=True)
                 await self._watch_servers()
                 await self._prune_samples()
             except Exception:
@@ -304,10 +323,10 @@ class ChecksMixin:
 
     async def _resource_bad(self, now: datetime) -> set[str]:
         stale_before = self._stale_before(now)
+        fresh, fresh_params = self._fresh_clause("last_seen_at", now)
         cur = await self._db.conn.execute(
-            "SELECT node, server, transport, target, last_ok FROM vpn_check_states "
-            "WHERE last_seen_at >= ?",
-            (stale_before,),
+            f"SELECT node, server, transport, target, last_ok FROM vpn_check_states WHERE {fresh}",
+            fresh_params,
         )
         rows = await cur.fetchall()
         bad = resource_bad_targets(
@@ -328,10 +347,19 @@ class ChecksMixin:
             await self._db.conn.commit()
         return bad
 
-    def _stale_before(self, now: datetime) -> str:
+    def _stale_before(self, now: datetime, transport: str | None = None) -> str:
+        return (now - timedelta(seconds=stale_after_s(self._cfg, transport))).isoformat()
+
+    def _fresh_clause(self, column: str, now: datetime) -> tuple[str, list[str]]:
+        marks = ", ".join("?" for _ in AWG_PROBE_TRANSPORTS)
         return (
-            now - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
-        ).isoformat()
+            f"{column} >= CASE WHEN transport IN ({marks}) THEN ? ELSE ? END",
+            [
+                *AWG_PROBE_TRANSPORTS,
+                self._stale_before(now, AWG_PROBE_TRANSPORTS[0]),
+                self._stale_before(now),
+            ],
+        )
 
     async def _apply_layer(
         self,
@@ -591,12 +619,10 @@ class ChecksMixin:
         }
 
     async def _scope_levels(self) -> dict[str, dict[str, str]]:
-        stale_before = (
-            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
-        ).isoformat()
+        fresh, fresh_params = self._fresh_clause("updated_at", utc_now())
         cur = await self._db.conn.execute(
-            "SELECT node, server, level FROM vpn_link_states WHERE updated_at >= ?",
-            (stale_before,),
+            f"SELECT node, server, level FROM vpn_link_states WHERE {fresh}",
+            fresh_params,
         )
         rows = await cur.fetchall()
         return scope_levels(
@@ -875,9 +901,7 @@ class ChecksMixin:
         row = await cur.fetchone()
         check: dict[str, Any] | None = None
         if row is not None:
-            stale_before = (
-                utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
-            ).isoformat()
+            stale_before = self._stale_before(utc_now(), TELEGRAM_EGRESS_TRANSPORT)
             check = {
                 "ok": bool(row["last_ok"]),
                 "ms": row["last_latency_ms"],
@@ -893,14 +917,9 @@ class ChecksMixin:
         }
 
     async def _active_check_problems(self) -> list[dict[str, Any]]:
-        stale_before = (
-            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
-        ).isoformat()
-        sql = (
-            "SELECT node, server, transport, target, status "
-            "FROM vpn_check_states WHERE last_seen_at >= ?"
-        )
-        cur = await self._db.conn.execute(sql, (stale_before,))
+        fresh, fresh_params = self._fresh_clause("last_seen_at", utc_now())
+        sql = f"SELECT node, server, transport, target, status FROM vpn_check_states WHERE {fresh}"
+        cur = await self._db.conn.execute(sql, fresh_params)
         rows = await cur.fetchall()
         by_group: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in rows:
@@ -927,14 +946,12 @@ class ChecksMixin:
         return result
 
     async def _check_rollup(self, *, server: str | None = None) -> list[dict[str, Any]]:
-        stale_before = (
-            utc_now() - timedelta(seconds=self._cfg.check_interval_s * CHECK_STALE_FACTOR)
-        ).isoformat()
+        fresh, fresh_params = self._fresh_clause("last_seen_at", utc_now())
         sql = (
             "SELECT node, server, transport, status, entry, last_seen_at "
-            "FROM vpn_check_states WHERE last_seen_at >= ?"
+            f"FROM vpn_check_states WHERE {fresh}"
         )
-        params: list[Any] = [stale_before]
+        params: list[Any] = [*fresh_params]
         if server is not None:
             sql += " AND server = ?"
             params.append(server)

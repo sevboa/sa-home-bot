@@ -11,7 +11,8 @@ from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.vpn import protocol as vpn_protocol
 from sa_home_bot.vpn.protocol import TELEGRAM_EGRESS_TARGET, TELEGRAM_EGRESS_TRANSPORT
-from sa_home_bot.vpn.service import CHECK_STALE_FACTOR, VpnService
+from sa_home_bot.vpn.service import VpnService
+from sa_home_bot.vpn.service_common import stale_after_s
 
 
 class DummyAwg:
@@ -123,7 +124,7 @@ async def test_no_row_gives_null_check(env):
 
 async def test_stale_row_is_marked_stale(env):
     svc, db, cfg = env
-    await _put(db, svc, age_s=cfg.check_interval_s * CHECK_STALE_FACTOR + 60)
+    await _put(db, svc, age_s=stale_after_s(cfg) + 60)
     res = await _ask(svc)
     assert res["check"]["stale"] is True
     assert res["check"]["ok"] is True

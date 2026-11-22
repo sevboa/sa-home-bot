@@ -456,3 +456,7 @@ def test_caption_has_no_observer_line_when_they_agree():
 )
 def test_duration_text(minutes: int, text: str) -> None:
     assert daily._duration(minutes) == text
+
+
+def test_runs_bridge_single_empty_bucket_inside_an_outage():
+    assert daily._runs([False, True, None, True, None, None, True, None]) == [(1, 3), (6, 6)]

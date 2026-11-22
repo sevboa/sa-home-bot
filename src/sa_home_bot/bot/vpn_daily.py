@@ -17,6 +17,7 @@ MAX_EPISODES = 3
 DEFAULT_HOURS = 24
 DEFAULT_BUCKET_MIN = 15
 X_LABEL_STEP_HOURS = 3
+MAX_BRIDGED_EMPTY_SLOTS = 1
 
 SCOPE_TITLE = {vpn_link.SCOPE_GLOBAL: "Глобально", vpn_link.SCOPE_RUSSIA: "Из России"}
 STATUS_TEXT = {
@@ -395,14 +396,20 @@ def _outage_slots(values_by_line: Sequence[tuple[int | None, ...]]) -> list[bool
 def _runs(hits: Sequence[bool | None]) -> list[tuple[int, int]]:
     runs = []
     start = None
+    last_hit = None
     for slot, hit in enumerate(hits):
-        if hit and start is None:
-            start = slot
-        elif not hit and start is not None:
-            runs.append((start, slot - 1))
+        if hit:
+            if start is not None and slot - last_hit - 1 > MAX_BRIDGED_EMPTY_SLOTS:
+                runs.append((start, last_hit))
+                start = None
+            if start is None:
+                start = slot
+            last_hit = slot
+        elif hit is False and start is not None:
+            runs.append((start, last_hit))
             start = None
     if start is not None:
-        runs.append((start, len(hits) - 1))
+        runs.append((start, last_hit))
     return runs
 
 
