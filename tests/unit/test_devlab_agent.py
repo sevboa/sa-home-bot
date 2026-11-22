@@ -17,12 +17,11 @@ from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import (
     CODE_FINISH_REJECTED,
     CODE_NUDGE_TEXT,
+    CODE_REPEAT_TURN,
     FINISH_REJECTED,
     NUDGE_TEXT,
-    REPEAT_GREEN_HINT,
-    REPEAT_HINT,
-    REPEAT_READ_HINT,
     REPEAT_SKIPPED,
+    REPEAT_TURN,
     AgentLimits,
     AgentLoop,
     AgentStatus,
@@ -538,6 +537,31 @@ async def test_quick_params_only_on_first_steps(tmp_path, quick_steps, quick_par
 
 
 @pytest.mark.parametrize(
+    ("params", "quick_params", "expected"),
+    [
+        ({"reasoning": {"enabled": True}}, {}, [{"reasoning": {"enabled": True}}] * 3),
+        (
+            {"reasoning": {"enabled": True}, "temperature": 1.0},
+            {"reasoning": {"enabled": False}},
+            [
+                {"reasoning": {"enabled": False}, "temperature": 1.0},
+                {"reasoning": {"enabled": True}, "temperature": 1.0},
+                {"reasoning": {"enabled": True}, "temperature": 1.0},
+            ],
+        ),
+    ],
+)
+async def test_profile_params_ride_on_every_step(tmp_path, params, quick_params, expected):
+    model = ExtraRecordingModel(
+        *(tool_reply(TOOL_GREP, f"g{n}", pattern=f"p{n}") for n in range(3))
+    )
+    limits = AgentLimits(max_steps=3, quick_steps=1, quick_params=quick_params, params=params)
+    loop, _ = make_loop(tmp_path, model, limits=limits)
+    await loop.run("правила", "задача")
+    assert model.extras == expected
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         {REASONING_FIELD: "план"},
@@ -902,9 +926,7 @@ async def test_trace_has_one_entry_per_step_and_cuts_long_arguments(tmp_path):
         tool_reply(TOOL_FINISH, "f1", summary="готово"),
     )
     ticks = iter(range(1000))
-    loop, _ = make_loop(
-        tmp_path, model, trace=entries.append, clock=lambda: next(ticks) * 0.375
-    )
+    loop, _ = make_loop(tmp_path, model, trace=entries.append, clock=lambda: next(ticks) * 0.375)
     result = await loop.run("правила", "задача")
     assert result.status is AgentStatus.FINISHED
     steps = [entry for entry in entries if "step" in entry]
@@ -993,44 +1015,60 @@ def repeat_spec():
     return AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), allowed_commands=("echo",))
 
 
-async def test_repeat_of_red_check_gets_try_otherwise_hint(tmp_path):
-    model = ScriptedChatModel(*(lint_call(c, "false x.py") for c in "abc"))
-    spec = AgentSpec(
-        test_argv=GREEN_TEST, diff_prefixes=("src/",), allowed_commands=("echo", "false")
+def user_texts(messages):
+    return [m["content"] for m in messages if m["role"] == "user"]
+
+
+def assert_pairs_intact(messages):
+    asked = [
+        c["id"] for m in messages if m["role"] == "assistant" for c in m.get("tool_calls") or ()
+    ]
+    answered = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert answered == asked
+
+
+async def test_repeat_is_collapsed_into_turn_message(tmp_path):
+    model = ScriptedChatModel(
+        lint_call("a"), lint_call("b"), edit(), tool_reply(TOOL_FINISH, summary="ok")
     )
-    loop, _ = make_loop(tmp_path, model, spec=spec)
+    loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
     result = await loop.run("правила", "задача")
-    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
-    assert tool_results[1].endswith(REPEAT_HINT)
+    assert result.status is AgentStatus.FINISHED
+    messages = model.seen[-1]
+    assert REPEAT_TURN.format(number=1) in user_texts(messages)
+    assert_pairs_intact(messages)
+    assert [m["tool_call_id"] for m in messages if m["role"] == "tool"][0] == "a"
 
 
-async def test_repeated_call_gets_hint_then_crane(tmp_path):
+async def test_repeat_crane_after_turn_is_ignored(tmp_path):
     entries = []
-    model = ScriptedChatModel(lint_call("a"), lint_call("b"), lint_call("c"), lint_call("d"))
+    model = ScriptedChatModel(*(lint_call(c) for c in "abcde"), lint_call("f"))
     loop, _ = make_loop(tmp_path, model, spec=repeat_spec(), trace=entries.append)
     result = await loop.run("правила", "задача")
     assert result.status is AgentStatus.ASKED
     assert result.crane is Crane.REPEAT
-    assert result.steps == 3
+    assert result.steps == 5
     assert result.reason == "модель повторяет run_command echo x.py"
     assert result.dialog.call_id is None
-    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
-    assert REPEAT_GREEN_HINT not in tool_results[0]
-    assert tool_results[1].endswith(REPEAT_GREEN_HINT)
-    assert tool_results[2] == REPEAT_SKIPPED
+    messages = result.dialog.messages
+    tool_results = [m["content"] for m in messages if m["role"] == "tool"]
+    assert tool_results[-1] == REPEAT_SKIPPED
+    assert len(tool_results) == 2
+    assert user_texts(messages).count(REPEAT_TURN.format(number=1)) == 1
+    assert_pairs_intact(messages)
     assert entries[-1]["event"] == "end"
     assert entries[-1]["crane"] == "repeat"
+    assert len([e for e in entries if "step" in e]) == 5
 
 
-async def test_repeated_read_gets_read_hint_then_crane(tmp_path):
-    model = ScriptedChatModel(*(tool_reply(TOOL_READ_FILE, c, path="src/app.py") for c in "abc"))
+async def test_repeated_read_is_collapsed_then_crane(tmp_path):
+    model = ScriptedChatModel(*(tool_reply(TOOL_READ_FILE, c, path="src/app.py") for c in "abcde"))
     loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
     result = await loop.run("правила", "задача")
     assert result.crane is Crane.REPEAT
-    tool_results = [m["content"] for m in result.dialog.messages if m["role"] == "tool"]
-    assert REPEAT_READ_HINT not in tool_results[0]
-    assert tool_results[1].endswith(REPEAT_READ_HINT)
-    assert tool_results[2] == REPEAT_SKIPPED
+    assert result.steps == 5
+    assert CODE_REPEAT_TURN.format(number=1) not in user_texts(result.dialog.messages)
+    assert REPEAT_TURN.format(number=1) in user_texts(result.dialog.messages)
 
 
 async def test_repeat_after_file_change_is_not_a_crane(tmp_path):
@@ -1060,43 +1098,34 @@ async def test_different_arguments_are_not_a_repeat(tmp_path):
 
 
 async def test_repeat_counter_resets_after_owner_answer(tmp_path):
-    model = ScriptedChatModel(
-        lint_call("a"),
-        lint_call("b"),
-        lint_call("c"),
-        lint_call("d"),
-        lint_call("e"),
-        lint_call("f"),
-    )
+    model = ScriptedChatModel(*(lint_call(str(i)) for i in range(10)))
     loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
     first = await loop.run("правила", "задача")
     assert first.crane is Crane.REPEAT
     answered = Dialog(messages=first.dialog.messages, question="q", answer="продолжай")
     second = await loop.run("правила", "задача", resume=answered)
     assert second.crane is Crane.REPEAT
-    assert second.steps == 3
+    assert second.steps == 5
 
 
-async def test_third_repeat_skips_siblings_without_dangling_call_ids(tmp_path):
-    ls = ToolCall("s1", TOOL_READ_FILE, json.dumps({"path": "src/app.py"}))
-    rep = ToolCall("s2", TOOL_RUN_COMMAND, json.dumps({"command": "echo x.py"}))
-    single = lint_call("a")
+async def test_last_repeat_skips_siblings_without_dangling_call_ids(tmp_path):
     batch = ModelReply(
-        "", (ls, rep, ToolCall("s3", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})))
+        "",
+        (
+            ToolCall("s1", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})),
+            ToolCall("s2", TOOL_RUN_COMMAND, json.dumps({"command": "echo x.py"})),
+            ToolCall("s3", TOOL_READ_FILE, json.dumps({"path": "src/app.py"})),
+        ),
     )
-    model = ScriptedChatModel(single, lint_call("b"), batch)
+    model = ScriptedChatModel(*(lint_call(c) for c in "abcd"), batch)
     loop, _ = make_loop(tmp_path, model, spec=repeat_spec())
     result = await loop.run("правила", "задача")
     assert result.crane is Crane.REPEAT
     messages = result.dialog.messages
-    asked = {
-        c["id"] for m in messages if m["role"] == "assistant" for c in m.get("tool_calls") or ()
-    }
-    answered = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
-    assert sorted(answered) == sorted(asked)
-    assert {m["tool_call_id"]: m["content"] for m in messages if m["role"] == "tool"}["s3"] == (
-        REPEAT_SKIPPED
-    )
+    assert_pairs_intact(messages)
+    results = {m["tool_call_id"]: m["content"] for m in messages if m["role"] == "tool"}
+    assert results["s2"] == REPEAT_SKIPPED
+    assert results["s3"] == REPEAT_SKIPPED
 
 
 class CountingSandbox(LocalSandbox):

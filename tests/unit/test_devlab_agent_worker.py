@@ -416,13 +416,18 @@ async def test_profile_quick_settings_reach_limits(env, monkeypatch):
     LimitsProbe.seen = []
     await submit_profile(env, "custom")
     params = {"chat_template_kwargs": {"enable_thinking": False}}
-    profiles = {"custom": DevlabProfileConfig(quick_steps=2, quick_params=params)}
+    profiles = {
+        "custom": DevlabProfileConfig(
+            quick_steps=2, quick_params=params, params={"reasoning": {"enabled": True}}
+        )
+    }
     worker = make_worker(env, ScriptedChatModel(WRITE_DONE, FINISH), profiles=profiles)
 
     assert await worker.claim_once()
 
     assert LimitsProbe.seen[0].quick_steps == 2
     assert LimitsProbe.seen[0].quick_params == params
+    assert LimitsProbe.seen[0].params == {"reasoning": {"enabled": True}}
 
 
 async def test_profile_role_text_joins_system_prompt(env):
@@ -626,7 +631,7 @@ def test_step_trace_oversized_entry_is_shortened_not_dropped(tmp_path):
 async def test_repeat_crane_does_not_extend_budget_and_resumes_cleanly(env):
     job_id = await submit(env)
     read = tool_reply("read_file", "r1", path="out.txt")
-    model = ScriptedChatModel(read, read, read, WRITE_DONE, FINISH)
+    model = ScriptedChatModel(read, read, read, read, read, WRITE_DONE, FINISH)
     worker = make_worker(env, model)
 
     assert await worker.claim_once()
