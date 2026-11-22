@@ -61,11 +61,12 @@ tailscale-адрес хаба, VictoriaMetrics — `127.0.0.1`. Если tailsca
 | id | что делает |
 |---|---|
 | `install-victoria-metrics` | пакет `victoria-metrics` |
-| `victoria-metrics-config` | каталог данных `data_dir` (владелец `_victoria-metrics`), `/etc/default/victoria-metrics` (`ARGS=...`: `-storageDataPath`, `-retentionPeriod`, `-httpListenAddr=127.0.0.1:<vm_port>`, `-promscrape.config`), `/etc/victoria-metrics/scrape.yml`, enable --now |
+| `metrics-runtime-dir` | каталог `runtime_dir` (`/var/lib/sa-home-metrics`) с `targets/` и `dashboards/`: владелец — пользователь ноды (тот, кто запустил `nodectl fix`), 0755, чтобы `_victoria-metrics` и `grafana` читали |
+| `victoria-metrics-config` | каталог данных `data_dir` (владелец `_victoria-metrics`), `/etc/default/victoria-metrics` (`ARGS=...`: `-storageDataPath`, `-retentionPeriod`, `-httpListenAddr=127.0.0.1:<vm_port>`, `-promscrape.config`, `-promscrape.fileSDCheckInterval=30s`), статичный `/etc/victoria-metrics/scrape.yml` (job'ы на `file_sd_configs`), enable --now |
 | `grafana-repo` | ключ и `/etc/apt/sources.list.d/grafana.list`, `apt-get update` |
 | `install-grafana` | пакет `grafana` |
 | `grafana-config` | правки `/etc/grafana/grafana.ini` (`http_addr` = tailscale-IP, `http_port`, анонимный вход выкл.), drop-in юнита, enable --now |
-| `grafana-provisioning` | источник данных (uid `vm`), провайдер дашбордов, JSON дашбордов в `/etc/grafana/sa-home-dashboards/` |
+| `grafana-provisioning` | источник данных (uid `vm`) и провайдер дашбордов (путь `runtime_dir/dashboards`); старый каталог `/etc/grafana/sa-home-dashboards/` удаляет (иначе дубли uid). JSON дашбордов фикс-ап не пишет и не сверяет |
 
 Debian-пакет victoria-metrics берёт аргументы из `ARGS` в `/etc/default/victoria-metrics` (проверено по
 файлам пакета 1.112.0+ds1-2), служба работает от `_victoria-metrics`.
@@ -74,15 +75,30 @@ Debian-пакет victoria-metrics берёт аргументы из `ARGS` в 
 Чистая функция `metrics/scrape.py`: цели — все пиры из `[swarm].nodes` и пиры, которых нода узнала сама (`node-state.json`, `NodeState.peers`) (предпочитается tailscale-адрес из
 `endpoint/endpoints`, unix и loopback пропускаются) плюс сама нода (`tailscale ip -4`). Надёжно узнать,
 у кого включён `export`, нельзя, поэтому недоступные цели просто `up = 0` — это нормально. Список
-обновляется при каждом `nodectl fix`; VictoriaMetrics перечитывает файл раз в минуту, рестарт не нужен.
-Новая нода в рое: после того как хаб её увидел (она попала в `node-state.json`), `nodectl fix` на хабе.
+пишется самой нодой-хабом (см. ниже), а не фикс-апом.
+
+### Само-обновление без sudo (решение владельца 2026-11-23)
+После одного финального `nodectl fix` новые ноды и дашборды приезжают сами. `scrape.yml` статичный:
+job'ы `sa-home-nodes` и `sa-home-vpn` читают `runtime_dir/targets/nodes.json` и `vpn.json`
+(Prometheus file_sd, `[{"targets":["host:port"],"labels":{"node":"..."}}]`), VictoriaMetrics перечитывает
+их сама (`-promscrape.fileSDCheckInterval=30s`). Эти файлы и JSON дашбордов из `CATALOG` в
+`runtime_dir/dashboards` раз в 60 с (и при старте) пишет процесс ноды-хаба (`node/metrics_targets.py`,
+`MetricsTargetsWriter`): цели = `scrape_targets` по `[swarm].nodes`, живым пирам из памяти ноды
+(`NodeState.peers`) и себе, VPN-job — пересечение с `known_server_nodes()`. Запись атомарная
+(tmp + rename, `utils/files.atomic_write`, права 0644) и только если содержимое изменилось; ошибка записи
+— warning в журнале ноды. Grafana подхватывает дашборды раз в 30 с. Фикс-ап больше не трогает файлы целей и
+JSON дашбордов.
+
+Находка 2026-11-23: scrape-конфиг и JSON дашбордов писал фикс-ап через sudo, а sudo на alfred с паролем, так
+что владельцу приходилось запускать `nodectl fix` после каждой новой ноды и правки дашборда. Причина —
+динамические данные лежали в root-владении. Теперь динамика живёт в каталоге пользователя ноды.
 
 Находка 2026-11-23: в v0.214–0.216 цели брались только из `[swarm].nodes`, а у alfred там записан один
 arch-t480 — остальные ноды рой находит сам. Grafana видела только alfred, дашборд «VPN» был пуст. С
 v0.216.1 к целям добавлены пиры из `node-state.json`.
 
 ## Дашборды
-Каталог `metrics/dashboard.py::CATALOG` (имя файла → построитель): сейчас `nodes.json` («Ноды», uid
+Каталог `metrics/dashboard.py::CATALOG` (JSON пишет нода-хаб, см. выше) (имя файла → построитель): сейчас `nodes.json` («Ноды», uid
 `sa-home-nodes`; переменная `node` — multi, All). Сводная таблица по нодам (up, CPU %, RAM занято %, диск макс %, steal %, аптайм,
 макс. температура) и графики: CPU %, steal, iowait, load/ядро и load average, RAM занято и доступно, swap,
 диски по точкам монтирования, сеть rx/tx по интерфейсам, аптайм, число процессов, PSI, conntrack, ошибки
@@ -127,8 +143,7 @@ NIC, OOM и стойла, температуры. Дашборд «VPN» — в�
 ### Scrape
 Отдельный job `sa-home-vpn` на `vpn_port` (`metrics/scrape.py::ScrapeJob`, `vpn_scrape_targets`). Список серверов
 берётся из `data/vpn_known_servers.json` (его ведёт бот, `vpn_nodes.known_server_nodes`) в пересечении с
-`[swarm].nodes`; если файла нет или он пуст, опрашиваются все пиры роя, лишние остаются `up = 0`. Файл читается при
-`nodectl fix` на хабе, новый VPN-сервер подхватывается следующим фиксом.
+`[swarm].nodes`; если файла нет или он пуст, опрашиваются все пиры роя, лишние остаются `up = 0`. Файл читается нодой-хабом при каждом обновлении целей (раз в 60 с), новый VPN-сервер подхватывается сам.
 
 ### Дашборд «VPN» (`metrics/vpn_dashboard.py`, uid `sa-home-vpn`)
 - Матрица (status history): ряды «наблюдатель → сервер · способ», значение `ok_ratio`: зелёный 1, красный 0,
@@ -145,5 +160,5 @@ NIC, OOM и стойла, температуры. Дашборд «VPN» — в�
 
 ### Что включить
 - На каждом VPN-сервере: `[metrics] export = true` и перезапуск службы `vpn` (порт `vpn_port`, по умолчанию 9101).
-- На alfred (хаб): `[metrics] grafana_public_url = "https://alfred.tail61d88b.ts.net"`, затем `nodectl fix`
-  (перепишет scrape и добавит `vpn.json`); публикацию Grafana по этому адресу (Tailscale Serve) настраивает владелец.
+- На alfred (хаб): `[metrics] grafana_public_url = "https://alfred.tail61d88b.ts.net"`, затем один `nodectl fix`
+  (каталог, статичный scrape, провайдер) и перезапуск ноды; `vpn.json` и цели появятся сами; публикацию Grafana по этому адресу (Tailscale Serve) настраивает владелец.

@@ -134,12 +134,11 @@ def test_vpn_scrape_targets_filter_known_or_fall_back_to_all():
 
 
 def test_scrape_text_has_vpn_job_on_vpn_port():
-    text = fixup_metrics.vm_scrape_content(hub_settings(), "100.64.0.1", ["jeeves"])
+    text = fixup_metrics.vm_scrape_content(hub_settings())
     assert '  - job_name: "sa-home-nodes"' in text
     vpn_part = text.split('  - job_name: "sa-home-vpn"')[1]
-    assert '"100.64.0.2:9101"' in vpn_part
-    assert "100.64.0.3" not in vpn_part
-    assert "static_configs: []" in scrape_config_text([ScrapeJob("x", 1, [])], "30s")
+    assert "targets/vpn.json" in vpn_part
+    assert "file_sd_configs:" in scrape_config_text([ScrapeJob("x", "/a.json")], "30s")
 
 
 def test_vpn_dashboard_json_is_registered_and_complete():

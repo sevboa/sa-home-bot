@@ -13,13 +13,15 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 PRIVATE_FILE_MODE = 0o600
 
 
-def atomic_write(path: str | Path, data: bytes | str) -> None:
+def atomic_write(path: str | Path, data: bytes | str, mode: int | None = None) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as handle:
             handle.write(data)
+        if mode is not None:
+            os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
         with contextlib.suppress(OSError):

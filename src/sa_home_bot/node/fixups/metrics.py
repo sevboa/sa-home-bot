@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
-from collections.abc import Collection, Sequence
+from getpass import getuser
 from pathlib import Path
 
-from sa_home_bot.bot.vpn_nodes import known_server_nodes
-from sa_home_bot.config import Settings, SwarmNodeConfig
+from sa_home_bot.config import Settings
 from sa_home_bot.devlab.connect import local_tailscale_address
 from sa_home_bot.metrics import protocol
-from sa_home_bot.metrics.dashboard import CATALOG, render_dashboard
-from sa_home_bot.metrics.scrape import (
-    ScrapeJob,
-    scrape_config_text,
-    scrape_targets,
-    vpn_scrape_targets,
+from sa_home_bot.metrics.runtime import (
+    DASHBOARDS_SUBDIR,
+    TARGETS_SUBDIR,
+    dashboards_dir,
+    scrape_jobs,
 )
+from sa_home_bot.metrics.scrape import scrape_config_text
 from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
 from sa_home_bot.node.fixups.privileged import (
@@ -32,7 +33,6 @@ from sa_home_bot.node.fixups.privileged import (
     temp_file,
     unit_is_active,
 )
-from sa_home_bot.node.state import NodeState
 
 VM_PACKAGE = "victoria-metrics"
 VM_UNIT = "victoria-metrics.service"
@@ -49,7 +49,8 @@ GRAFANA_SOURCE_LINE = f"deb [signed-by={GRAFANA_KEY_FILE}] https://apt.grafana.c
 GRAFANA_INI = Path("/etc/grafana/grafana.ini")
 GRAFANA_DATASOURCE_FILE = Path("/etc/grafana/provisioning/datasources/sa-home.yaml")
 GRAFANA_DASHBOARD_PROVIDER_FILE = Path("/etc/grafana/provisioning/dashboards/sa-home.yaml")
-GRAFANA_DASHBOARD_DIR = Path("/etc/grafana/sa-home-dashboards")
+LEGACY_GRAFANA_DASHBOARD_DIR = Path("/etc/grafana/sa-home-dashboards")
+RUNTIME_DIR_MODE = 0o755
 SYSTEMD_DIR = Path("/etc/systemd/system")
 DROPIN_NAME = "50-sa-home-tailscale.conf"
 KEY_FETCH_TIMEOUT_S = 60
@@ -64,6 +65,7 @@ def vm_args(settings: Settings) -> str:
             f"-httpListenAddr=127.0.0.1:{cfg.vm_port}",
             f"-promscrape.config={VM_SCRAPE_FILE}",
             "-promscrape.configCheckInterval=1m",
+            "-promscrape.fileSDCheckInterval=30s",
         ]
     )
 
@@ -72,27 +74,25 @@ def vm_defaults_content(settings: Settings) -> str:
     return f'ARGS="{vm_args(settings)}"\n'
 
 
-def vm_scrape_content(
-    settings: Settings,
-    own_host: str | None,
-    known_vpn_servers: Collection[str] = (),
-    peers: Sequence[SwarmNodeConfig] = (),
-) -> str:
-    cfg = settings.metrics
-    targets = scrape_targets(settings, own_host, peers)
-    jobs = [
-        ScrapeJob(protocol.JOB_NAME, cfg.exporter_port, targets),
-        ScrapeJob(protocol.JOB_VPN, cfg.vpn_port, vpn_scrape_targets(targets, known_vpn_servers)),
-    ]
-    return scrape_config_text(jobs, cfg.scrape_interval)
+def vm_scrape_content(settings: Settings) -> str:
+    return scrape_config_text(scrape_jobs(settings), settings.metrics.scrape_interval)
+
+
+def runtime_subdirs(settings: Settings) -> list[Path]:
+    root = Path(settings.metrics.runtime_dir)
+    return [root / TARGETS_SUBDIR, root / DASHBOARDS_SUBDIR]
+
+
+def _owned_by_current_user(path: Path) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    return info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == RUNTIME_DIR_MODE
 
 
 def _own_host() -> str | None:
     return local_tailscale_address()
-
-
-def _swarm_peers(settings: Settings) -> list[SwarmNodeConfig]:
-    return NodeState.load(settings.node.state_path).peers
 
 
 def tailscale_dropin_content() -> str:
@@ -179,7 +179,7 @@ def grafana_datasource_content(settings: Settings) -> str:
     )
 
 
-def grafana_provider_content() -> str:
+def grafana_provider_content(settings: Settings) -> str:
     return (
         "apiVersion: 1\n"
         "providers:\n"
@@ -188,7 +188,7 @@ def grafana_provider_content() -> str:
         "    allowUiUpdates: false\n"
         "    updateIntervalSeconds: 30\n"
         "    options:\n"
-        f"      path: {GRAFANA_DASHBOARD_DIR}\n"
+        f"      path: {dashboards_dir(settings)}\n"
         "      foldersFromFilesStructure: true\n"
     )
 
@@ -196,10 +196,8 @@ def grafana_provider_content() -> str:
 def grafana_provisioning_files(settings: Settings) -> dict[Path, str]:
     files = {
         GRAFANA_DATASOURCE_FILE: grafana_datasource_content(settings),
-        GRAFANA_DASHBOARD_PROVIDER_FILE: grafana_provider_content(),
+        GRAFANA_DASHBOARD_PROVIDER_FILE: grafana_provider_content(settings),
     }
-    for name, build in CATALOG.items():
-        files[GRAFANA_DASHBOARD_DIR / name] = render_dashboard(build())
     return files
 
 
@@ -236,6 +234,28 @@ INSTALL_VICTORIA_METRICS = Fixup(
 )
 
 
+def make_metrics_runtime_dir_fixup(settings: Settings) -> Fixup:
+    root = Path(settings.metrics.runtime_dir)
+
+    def apply() -> None:
+        user = getuser()
+        run_sudo(["install", "-d", "-m", "0755", "-o", user, "-g", user, str(root)])
+        run_sudo(
+            ["install", "-d", "-m", "0755", "-o", user, "-g", user]
+            + [str(path) for path in runtime_subdirs(settings)]
+        )
+
+    return Fixup(
+        id="metrics-runtime-dir",
+        title=f"Создать каталог целей и дашбордов метрик {root} (владелец — пользователь ноды)",
+        needed=needs.metrics_hub,
+        check=lambda: all(
+            _owned_by_current_user(path) for path in [root, *runtime_subdirs(settings)]
+        ),
+        apply=apply,
+    )
+
+
 def make_victoria_metrics_config_fixup(settings: Settings) -> Fixup:
     data_dir = settings.metrics.data_dir
 
@@ -245,17 +265,13 @@ def make_victoria_metrics_config_fixup(settings: Settings) -> Fixup:
             and file_matches(VM_DEFAULTS_FILE, vm_defaults_content(settings))
             and file_matches(
                 VM_SCRAPE_FILE,
-                vm_scrape_content(
-                    settings, _own_host(), known_server_nodes(), _swarm_peers(settings)
-                ),
+                vm_scrape_content(settings),
             )
             and unit_is_active(VM_UNIT)
         )
 
     def apply() -> None:
-        scrape = vm_scrape_content(
-            settings, _own_host(), known_server_nodes(), _swarm_peers(settings)
-        )
+        scrape = vm_scrape_content(settings)
         run_sudo(["install", "-d", "-m", "0750", "-o", VM_USER, "-g", VM_USER, data_dir])
         install_root_file(VM_SCRAPE_FILE, scrape, mode="0644", make_parents=True)
         previous = read_text_if_exists(VM_DEFAULTS_FILE)
@@ -339,16 +355,22 @@ def make_grafana_config_fixup(settings: Settings) -> Fixup:
 
 
 def make_grafana_provisioning_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        return _all_match(grafana_provisioning_files(settings)) and not path_exists(
+            LEGACY_GRAFANA_DASHBOARD_DIR
+        )
+
     def apply() -> None:
         for path, content in grafana_provisioning_files(settings).items():
             install_root_file(path, content, mode="0644", make_parents=True)
+        run_sudo(["rm", "-rf", "--", str(LEGACY_GRAFANA_DASHBOARD_DIR)])
         run_sudo(["systemctl", "restart", GRAFANA_UNIT])
 
     return Fixup(
         id="grafana-provisioning",
-        title="Выложить источник данных и дашборды grafana",
+        title="Выложить источник данных и провайдер дашбордов grafana",
         needed=needs.metrics_hub,
-        check=lambda: _all_match(grafana_provisioning_files(settings)),
+        check=check,
         apply=apply,
     )
 
@@ -356,6 +378,7 @@ def make_grafana_provisioning_fixup(settings: Settings) -> Fixup:
 def metrics_fixups(settings: Settings) -> list[Fixup]:
     return [
         INSTALL_VICTORIA_METRICS,
+        make_metrics_runtime_dir_fixup(settings),
         make_victoria_metrics_config_fixup(settings),
         GRAFANA_REPO,
         INSTALL_GRAFANA,
