@@ -134,6 +134,10 @@ def remember_servers(answered: list[dict]) -> None:
         log.warning("vpn: не удалось сохранить список известных серверов", exc_info=True)
 
 
+def known_server_nodes() -> list[str]:
+    return sorted(_load_known())
+
+
 def known_server_label(node: str) -> str:
     return _load_known().get(node, "")
 

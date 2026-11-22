@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
 
+from sa_home_bot.bot.vpn_nodes import known_server_nodes
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab.connect import local_tailscale_address
 from sa_home_bot.metrics import protocol
 from sa_home_bot.metrics.dashboard import CATALOG, render_dashboard
-from sa_home_bot.metrics.scrape import scrape_config_text, scrape_targets
+from sa_home_bot.metrics.scrape import (
+    ScrapeJob,
+    scrape_config_text,
+    scrape_targets,
+    vpn_scrape_targets,
+)
 from sa_home_bot.node.fixups import needs
 from sa_home_bot.node.fixups.core import Fixup, FixupError
 from sa_home_bot.node.fixups.privileged import (
@@ -64,10 +71,16 @@ def vm_defaults_content(settings: Settings) -> str:
     return f'ARGS="{vm_args(settings)}"\n'
 
 
-def vm_scrape_content(settings: Settings, own_host: str | None) -> str:
+def vm_scrape_content(
+    settings: Settings, own_host: str | None, known_vpn_servers: Collection[str] = ()
+) -> str:
     cfg = settings.metrics
     targets = scrape_targets(settings, own_host)
-    return scrape_config_text(targets, cfg.scrape_interval, cfg.exporter_port)
+    jobs = [
+        ScrapeJob(protocol.JOB_NAME, cfg.exporter_port, targets),
+        ScrapeJob(protocol.JOB_VPN, cfg.vpn_port, vpn_scrape_targets(targets, known_vpn_servers)),
+    ]
+    return scrape_config_text(jobs, cfg.scrape_interval)
 
 
 def _own_host() -> str | None:
@@ -136,7 +149,12 @@ def grafana_ini_values(settings: Settings, host: str) -> dict[str, dict[str, str
     return {
         "server": {"http_addr": host, "http_port": str(settings.metrics.grafana_port)},
         "auth.anonymous": {"enabled": "false"},
-        "analytics": {"reporting_enabled": "false", "check_for_updates": "false"},
+        "analytics": {
+            "reporting_enabled": "false",
+            "check_for_updates": "false",
+            "check_for_plugin_updates": "false",
+        },
+        "plugins": {"preinstall_disabled": "true", "preinstall_auto_update": "false"},
     }
 
 
@@ -198,9 +216,7 @@ def _all_match(files: dict[Path, str]) -> bool:
 
 def _install_with_group(path: Path, content: str, group: str, mode: str) -> None:
     with temp_file(content) as tmp:
-        run_sudo(
-            ["install", "-D", "-m", mode, "-o", "root", "-g", group, str(tmp), str(path)]
-        )
+        run_sudo(["install", "-D", "-m", mode, "-o", "root", "-g", group, str(tmp), str(path)])
 
 
 INSTALL_VICTORIA_METRICS = Fixup(
@@ -219,12 +235,14 @@ def make_victoria_metrics_config_fixup(settings: Settings) -> Fixup:
         return (
             path_exists(Path(data_dir))
             and file_matches(VM_DEFAULTS_FILE, vm_defaults_content(settings))
-            and file_matches(VM_SCRAPE_FILE, vm_scrape_content(settings, _own_host()))
+            and file_matches(
+                VM_SCRAPE_FILE, vm_scrape_content(settings, _own_host(), known_server_nodes())
+            )
             and unit_is_active(VM_UNIT)
         )
 
     def apply() -> None:
-        scrape = vm_scrape_content(settings, _own_host())
+        scrape = vm_scrape_content(settings, _own_host(), known_server_nodes())
         run_sudo(["install", "-d", "-m", "0750", "-o", VM_USER, "-g", VM_USER, data_dir])
         install_root_file(VM_SCRAPE_FILE, scrape, mode="0644", make_parents=True)
         previous = read_text_if_exists(VM_DEFAULTS_FILE)

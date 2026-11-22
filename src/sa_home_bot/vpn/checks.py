@@ -44,6 +44,7 @@ from sa_home_bot.domain.vpn_series import (
     reconcile_vpn_series,
     series_verdict,
 )
+from sa_home_bot.metrics.vpn import CheckRow, LinkRow, render_vpn_metrics
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     Address,
@@ -617,6 +618,38 @@ class ChecksMixin:
             "bucket_min": bucket_min,
             "series": aggregate(samples, bucket_min * 60),
         }
+
+    async def render_metrics(self) -> str:
+        now = utc_now()
+        fresh, fresh_params = self._fresh_clause("last_seen_at", now)
+        cur = await self._db.conn.execute(
+            "SELECT node, server, transport, target, last_ok, last_latency_ms "
+            f"FROM vpn_check_states WHERE last_ok IS NOT NULL AND {fresh}",
+            fresh_params,
+        )
+        checks = [
+            CheckRow(
+                row["node"],
+                row["server"],
+                row["transport"],
+                row["target"],
+                bool(row["last_ok"]),
+                row["last_latency_ms"],
+            )
+            for row in await cur.fetchall()
+        ]
+        fresh, fresh_params = self._fresh_clause("updated_at", now)
+        cur = await self._db.conn.execute(
+            f"SELECT node, server, transport, level FROM vpn_link_states WHERE {fresh}",
+            fresh_params,
+        )
+        links = [
+            LinkRow(row["node"], row["server"], row["transport"], row["level"])
+            for row in await cur.fetchall()
+        ]
+        return render_vpn_metrics(
+            checks, links, self._cfg.russia_observers, self._cfg.ignored_observers
+        )
 
     async def _scope_levels(self) -> dict[str, dict[str, str]]:
         fresh, fresh_params = self._fresh_clause("updated_at", utc_now())

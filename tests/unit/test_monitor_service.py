@@ -312,6 +312,14 @@ async def test_get_state_carries_host_health_and_thresholds(service):
     ):
         state = await svc.get_state()
 
+    assert state["host_health"] == []
+    svc._settings.sensors.host.enabled = True
+    with (
+        patch("sa_home_bot.monitor.service.read_uptime_sync", return_value=None),
+        patch("sa_home_bot.monitor.service.read_power_events_sync", return_value=([], False)),
+    ):
+        state = await svc.get_state()
+
     assert state["host_health"][0]["metric"] == "steal_pct"
     assert state["host_health"][0]["value"] == 32.0
     assert state["host_thresholds"]["steal_pct"]["warn"] == 10.0

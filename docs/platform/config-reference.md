@@ -277,12 +277,14 @@ instance-конфиге ноды.
 
 Таблица `[metrics]` (см. [metrics.md](metrics.md)).
 
-- `export: bool = false` — служба `monitor` отдаёт `GET /metrics` на tailscale-адресе ноды и порту `exporter_port`.
+- `export: bool = false` — служба `monitor` отдаёт `GET /metrics` на tailscale-адресе ноды и порту `exporter_port`. Включает и снятие host-метрик, даже при `sensors.host.enabled = false` (тогда без алертов, только экспорт).
 - `hub: bool = false` — нода держит VictoriaMetrics и Grafana (`nodectl fix` ставит и настраивает).
 - `data_dir: str = "/mnt/data/metrics"` — данные VictoriaMetrics.
 - `retention: str = "1y"` — срок хранения (`-retentionPeriod`).
 - `scrape_interval: str = "30s"` — период опроса нод.
 - `grafana_port: int = 3000`, `vm_port: int = 8428` (только 127.0.0.1), `exporter_port: int = 9100`.
+- `vpn_port: int = 9101` — порт `GET /metrics` службы `vpn` (проверки VPN) на tailscale-адресе сервера; включается тем же `export = true`.
+- `grafana_public_url: str = ""` — адрес Grafana для кнопки «📊 Grafana» на экране «Проверка сети» (только админ), например `https://alfred.tail61d88b.ts.net`; пусто — кнопки нет.
 
 ## DevlabConfig
 
