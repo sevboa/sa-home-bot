@@ -447,3 +447,47 @@ def test_english_api_matches_russian_names_and_filters():
     assert [name for name, _, _ in SCRIPT_API_EN] == [name for name, _, _ in SCRIPT_API]
     assert "def grep(" in api_stubs("regular", SCRIPT_API_EN)
     assert api_stubs("регулярное", SCRIPT_API_EN) == ""
+
+
+def comment_checker(request):
+    if request["call"] != "check_comments":
+        return {"ok": True, "value": []}
+    return {"ok": True, "value": ["комментарии запрещены: src/a.py:1 # да"]}
+
+
+async def test_edit_with_new_comment_is_rejected(project):
+    _, on_call = recording(comment_checker)
+    run = await run_script(project, "edit('src/a.py', 'alpha = 1', 'alpha = 2')", on_call)
+    assert run.failed
+    assert "EditError: комментарии запрещены: src/a.py:1" in run.output
+    assert (project / "src" / "a.py").read_text().startswith("alpha = 1")
+
+
+async def test_write_with_new_comment_is_rejected(project):
+    _, on_call = recording(comment_checker)
+    run = await run_script(project, "write('src/new.py', 'x = 1')", on_call)
+    assert run.failed
+    assert not (project / "src" / "new.py").exists()
+
+
+async def test_edit_ambiguous_lists_line_numbers(project):
+    (project / "src" / "c.py").write_text("x\ny\nx\n")
+    run = await run_script(project, "edit('src/c.py', 'x', 'z')", recording({"ok": True})[1])
+    assert "строки 1, 3" in run.output
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [("[]", "[]"), ("''", "''"), ("print('a')\nNone", "a")],
+)
+async def test_empty_last_expression_is_shown(project, code, expected):
+    run = await run_script(project, code)
+    assert run.output.strip() == expected
+
+
+async def test_run_tests_notes_base_test_failure(project):
+    (project / "test_bad.py").write_text("def test_bad():\n    assert False\n")
+    seen, on_call = recording(lambda r: {"ok": True, "value": r["call"] == "base_tests" or []})
+    run = await run_script(project, "print(run_tests(['test_bad.py']))", on_call)
+    assert run.output.count("упал тест, существовавший до твоих правок") == 1
+    assert {"call": "base_tests", "args": {"failed": [["test_bad.py", "test_bad"]]}} in seen

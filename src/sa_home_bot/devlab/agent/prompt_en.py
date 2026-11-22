@@ -180,12 +180,14 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
         "edit",
         "def edit(path: str, old: str, new: str) -> None: ...",
         "replace the single occurrence of old with new in the file at once; 0 or more than 1 "
-        "occurrences, or a closed path - EditError",
+        "occurrences (the text lists match line numbers), a closed path, or new comments or "
+        "docstrings in .py under src/ and tests/ - EditError, the edit is not applied",
     ),
     (
         "write",
         "def write(path: str, content: str) -> None: ...",
-        "create or overwrite a file at once; a closed path - EditError",
+        "create or overwrite a file at once; a closed path or new comments or docstrings in .py "
+        "under src/ and tests/ - EditError, the edit is not applied",
     ),
     (
         "run",
@@ -195,7 +197,9 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
     (
         "run_tests",
         "def run_tests(paths: list[str]) -> Result: ...",
-        "pytest over a list of test paths (path::test_name works); returns Result",
+        "pytest over a list of test paths (path::test_name works); returns Result; if a test "
+        "that existed in the task base fails, output gets a line telling to check the code, "
+        "not the test",
     ),
     (
         "step_done",

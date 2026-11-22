@@ -49,13 +49,15 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         "edit",
         "def edit(path: str, old: str, new: str) -> None: ...",
-        "заменить в файле единственное вхождение old на new сразу; 0 или больше 1 вхождения, "
-        "закрытый путь — EditError",
+        "заменить в файле единственное вхождение old на new сразу; 0 или больше 1 вхождения "
+        "(в тексте номера строк совпадений), закрытый путь, новые комментарии или докстринги "
+        "в .py под src/ и tests/ — EditError, правка не применяется",
     ),
     (
         "write",
         "def write(path: str, content: str) -> None: ...",
-        "создать или перезаписать файл сразу; закрытый путь — EditError",
+        "создать или перезаписать файл сразу; закрытый путь или новые комментарии и докстринги "
+        "в .py под src/ и tests/ — EditError, правка не применяется",
     ),
     (
         "run",
@@ -65,7 +67,8 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
         "run_tests",
         "def run_tests(paths: list[str]) -> Result: ...",
-        "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result",
+        "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result; если упал тест, "
+        "существовавший в базе задания, в output строка «сначала проверь код, а не тест»",
     ),
     (
         CONTROL_STEP_DONE,
@@ -315,6 +318,7 @@ def _stats():
 
 
 _BASE = _stats()
+_BASE_TEST_NOTE = "упал тест, существовавший до твоих правок: сначала проверь код, а не тест"
 
 
 def ls(prefix=""):
@@ -408,6 +412,15 @@ def _store(relative, data):
         handle.write(data)
 
 
+def _check_comments(relative, before, after):
+    if not relative.endswith(".py") or not relative.startswith(("src/", "tests/")):
+        return
+    reply = _call("check_comments", {"path": relative, "old": before, "new": after})
+    notes = reply.get("value") if reply.get("ok") else None
+    if isinstance(notes, list) and notes:
+        raise EditError("\n".join(map(str, notes)) + "\n(правка не применена)")
+
+
 def edit(path, old, new):
     relative = _writable(path)
     if not isinstance(old, str) or not isinstance(new, str):
@@ -415,16 +428,32 @@ def edit(path, old, new):
     text = _text(relative)
     found = text.count(old)
     if not old or found != 1:
+        where = ""
+        if found > 1:
+            lines = []
+            position = text.find(old)
+            while position != -1 and len(lines) < 5:
+                lines.append(str(text.count("\n", 0, position) + 1))
+                position = text.find(old, position + 1)
+            where = f" (строки {', '.join(lines)})"
         raise EditError(
-            f"фрагмент old найден {found} раз в {relative}: нужно ровно один, добавь контекста"
+            f"фрагмент old найден {found} раз в {relative}{where}: нужно ровно один, "
+            "добавь контекста"
         )
-    _store(relative, text.replace(old, new, 1).encode())
+    updated = text.replace(old, new, 1)
+    _check_comments(relative, text, updated)
+    _store(relative, updated.encode())
 
 
 def write(path, content):
     relative = _writable(path)
     if not isinstance(content, str):
         raise EditError("content должен быть строкой")
+    try:
+        previous = _text(relative)
+    except EditError:
+        previous = None
+    _check_comments(relative, previous, content)
     _store(relative, content.encode())
 
 
@@ -497,6 +526,12 @@ def run_tests(paths):
     if isinstance(notes, list) and notes:
         output = "\n".join(part for part in [result.output, *map(str, notes)] if part)
         result = Result(result.code or 1, output)
+    failed = [
+        [match.group(1), match.group(2)]
+        for match in re.finditer(r"^FAILED (\S+?)::(?:\S+::)?([^\s\[]+)", result.output, re.M)
+    ]
+    if failed and _call("base_tests", {"failed": failed}).get("value") is True:
+        result = Result(result.code, f"{result.output}\n{_BASE_TEST_NOTE}")
     _STATE["green"] = result.ok
     return result
 
@@ -534,7 +569,9 @@ def _finalize():
 
 _WORKER = r'''
 def _show(value):
-    if isinstance(value, str):
+    if value in ("", [], {}):
+        print(repr(value))
+    elif isinstance(value, str):
         print(value)
     elif isinstance(value, list) and all(isinstance(item, str) for item in value):
         print("\n".join(value))

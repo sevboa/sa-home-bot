@@ -336,9 +336,10 @@ def ruled_project(project):
 async def test_run_tests_flags_comments_in_changed_files_against_base(ruled_project):
     box = toolbox(ruled_project, test_argv=PYTEST_ARGV)
     code = (
-        "edit('src/a.py', 'value = 1', 'value = 2  # поясняю')\n"
+        "open('src/a.py', 'w').write('value = 2  # поясняю\\n')\n"
         "write('src/clean.py', 'x = 1\\n')\n"
-        "write('tests/unit/test_x.py', 'def test_x():\\n    '+chr(34)*3+'док'+chr(34)*3+'\\n')\n"
+        "open('tests/unit/test_x.py', 'w').write("
+        "'def test_x():\\n    '+chr(34)*3+'док'+chr(34)*3+'\\n')\n"
         "r = run_tests(['test_ok.py'])\n"
         "print(r.ok)\nprint(r.output)"
     )
@@ -401,3 +402,18 @@ async def test_english_lang_offers_english_definitions_and_search(project):
     assert "завершить" not in execute
     outcome = await box.call(TOOL_SEARCH, {"query": "finish"})
     assert "finish the task" in outcome.text
+
+
+async def test_edit_rejects_new_comment_but_ignores_old_ones(ruled_project):
+    box = toolbox(ruled_project, test_argv=PYTEST_ARGV)
+    code = (
+        "try:\n"
+        "    edit('src/a.py', 'value = 1', 'value = 2  # поясняю')\n"
+        "except EditError as error:\n"
+        "    print(error)\n"
+        "print(read('src/a.py'))"
+    )
+    outcome = await box.call(TOOL_EXECUTE, {"code": code})
+    await box._sandbox.session_close()
+    assert "комментарии запрещены: src/a.py:1 # поясняю" in outcome.text
+    assert "value = 1" in outcome.text
