@@ -5,11 +5,13 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from sa_home_bot.config import DevlabConfig
 from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.sandbox import (
     IGNORED_DIRS,
+    CallHandler,
     ExecResult,
     LocalSandbox,
     ManagedSandbox,
@@ -49,6 +51,7 @@ class PodmanSandbox:
         pause: PauseClock | None = None,
         cpus: float | None = None,
         memory: str | None = None,
+        base_dir: Path | None = None,
     ) -> None:
         self._cfg = cfg
         self._name = job_name(job_id)
@@ -56,7 +59,7 @@ class PodmanSandbox:
         self._recipe = recipe
         self._spec = spec
         self._wrapper = WrapperClient(cfg, spawn, pause)
-        self._local = LocalSandbox(workdir, baseline)
+        self._local = LocalSandbox(workdir, baseline, base_dir)
         self._lock = asyncio.Lock()
         self._tag = ""
         self._running = False
@@ -146,14 +149,32 @@ class PodmanSandbox:
             result.exit_code, result.output.decode(errors="replace"), timed_out=result.timed_out
         )
 
+    async def diff(self, prefixes: tuple[str, ...] = ()) -> str:
+        return await self._local.diff(prefixes)
+
     async def session_request(
-        self, argv: Sequence[str], payload: bytes, timeout_s: float
+        self,
+        argv: Sequence[str],
+        payload: bytes,
+        timeout_s: float,
+        on_call: CallHandler | None = None,
     ) -> SessionReply:
+        async def bridged(request: dict[str, Any]) -> dict[str, Any]:
+            assert on_call is not None
+            await self._pull()
+            self._lock.release()
+            try:
+                return await on_call(request)
+            finally:
+                await self._lock.acquire()
+
         async with self._lock:
             await self._ready()
             if self._session is None:
                 self._session = self._wrapper.open_session(self._name, argv)
-            reply = await self._wrapper.session_request(self._session, payload, timeout_s)
+            reply = await self._wrapper.session_request(
+                self._session, payload, timeout_s, bridged if on_call else None
+            )
             await self._pull()
             if reply.timed_out:
                 await self._wrapper.remove_container(self._name)
@@ -241,6 +262,7 @@ class SandboxRequest:
     project: ProjectSpec
     spec: AgentSpec
     baseline: dict[str, str]
+    base_dir: Path | None = None
 
 
 SandboxFactory = Callable[[SandboxRequest], ManagedSandbox]
@@ -266,6 +288,7 @@ def podman_sandbox_factory(
             pause,
             cpus,
             memory,
+            request.base_dir,
         )
 
     return make

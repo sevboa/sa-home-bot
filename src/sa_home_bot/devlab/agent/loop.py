@@ -62,13 +62,15 @@ CODE_FINISH_REJECTED = (
     "полный вывод стража ниже:\n"
 )
 CODE_STEP_REJECTED = (
-    f"{STEP_REJECTED_HEAD}: исправь и снова вызови step_done() в execute. "
+    f"{STEP_REJECTED_HEAD}: скрипт остановлен (StepRejected); исправь и снова вызови "
+    "step_done() в следующем execute. "
     "Шаг «написать тест, который пока падает» закрывается вместе со следующим шагом, "
     "где код его чинит; полный вывод стража ниже:\n"
 )
 STEP_ACCEPTED = "шаг принят"
+CODE_COUNTER = "[вызов {number} · контекст {thousands} тыс. токенов]"
 SCRIPT_REJECTED = re.compile(
-    rf"^(?:{TOOL_STEP_DONE}|{TOOL_FINISH}): "
+    rf"^(?:{TOOL_FINISH}: |StepRejected: )"
     rf"(?:{STEP_REJECTED_HEAD}|{FINISH_REJECTED_HEAD})",
     re.MULTILINE,
 )
@@ -172,6 +174,7 @@ class Segment:
     recent_calls: list[tuple[str, str]] = field(default_factory=list)
     repeat_reason: str | None = None
     tree_fingerprint: str | None = None
+    context_tokens: int = 0
 
 
 def _repeat_hint(name: str, text: str, code_mode: bool = False) -> str:
@@ -229,6 +232,7 @@ class AgentLoop:
         self._trace = trace
         self._clock = clock
         self._overflow_hint = overflow_hint
+        self._script_calls = 0
 
     def _emit(self, **entry: Any) -> None:
         if self._trace is not None:
@@ -350,6 +354,7 @@ class AgentLoop:
                 return self._result(AgentStatus.MODEL_FAILED, seg, reason=str(exc))
             model_s = round(self._clock() - asked_at, 2)
             seg.tokens_in += reply.tokens_in
+            seg.context_tokens = reply.tokens_in
             seg.tokens_out += reply.tokens_out
             messages.append(reply.as_message())
             if not reply.tool_calls:
@@ -446,6 +451,12 @@ class AgentLoop:
             seg.tree_fingerprint = None
         if repeats:
             text += _repeat_hint(call.name, text, self._tools.code_mode)
+        if call.name == TOOL_EXECUTE:
+            self._script_calls += 1
+            counter = CODE_COUNTER.format(
+                number=self._script_calls, thousands=round(seg.context_tokens / 1000)
+            )
+            text = f"{text}\n{counter}" if text else counter
         return text, summary
 
     async def _count_repeats(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> int:
@@ -461,7 +472,9 @@ class AgentLoop:
         self, call: ToolCall, args: dict[str, Any], seg: Segment
     ) -> tuple[str, str | None]:
         try:
-            outcome = await self._tools.call(call.name, args)
+            outcome = await self._tools.call(
+                call.name, args, step_gate=lambda step_args: self._check_step(step_args, seg)
+            )
         except ToolError as exc:
             return f"ошибка: {exc}", None
         except Exception as exc:
@@ -470,7 +483,7 @@ class AgentLoop:
         if outcome.green is not None:
             seg.red_runs = 0 if outcome.green else seg.red_runs + 1
         if outcome.mutating and self._on_change is not None:
-            await self._on_change(f"{call.name}: {outcome.text.splitlines()[0]}")
+            await self._on_change(f"{call.name}: {(outcome.text.splitlines() or [''])[0]}")
         if outcome.control is None:
             return outcome.text, None
         return await self._close_from_script(outcome.text, outcome.control, seg)
@@ -481,11 +494,10 @@ class AgentLoop:
         summary = None
         if control.tool == TOOL_FINISH:
             result, summary = await self._finish(control.args)
-        elif control.tool == TOOL_ASK_OWNER:
-            result = self._ask(control.args, seg)
         else:
-            result = await self._step_done(control.args, seg)
-        return (f"{text}\n{control.label}: {result}" if result else text), summary
+            result = self._ask(control.args, seg)
+        parts = [text, f"{control.label}: {result}" if result else ""]
+        return "\n".join(part for part in parts if part), summary
 
     def _ask(self, args: dict[str, Any], seg: Segment) -> str:
         question = args.get("question")
@@ -495,6 +507,9 @@ class AgentLoop:
         return ""
 
     async def _step_done(self, args: dict[str, Any], seg: Segment) -> str:
+        return await self._check_step(args, seg) or STEP_ACCEPTED
+
+    async def _check_step(self, args: dict[str, Any], seg: Segment) -> str:
         title = args.get("title")
         if not isinstance(title, str) or not title.strip():
             return "ошибка: step_done требует непустой title"
@@ -506,7 +521,7 @@ class AgentLoop:
         seg.red_runs = 0
         if self._on_step is not None:
             await self._on_step(title.strip())
-        return STEP_ACCEPTED
+        return ""
 
     async def _finish(self, args: dict[str, Any]) -> tuple[str, str | None]:
         summary = args.get("summary")

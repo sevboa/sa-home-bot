@@ -70,7 +70,7 @@ class FinishGuard:
                 if not result.ok:
                     failures.append(
                         "тесты не зелёные:\n"
-                        + result.summary(spec.output_chars, spec.test_timeout_s)
+                        + result.failure_summary(spec.output_chars, spec.test_timeout_s)
                     )
             failures += await self._checks()
         return failures
@@ -85,7 +85,7 @@ class FinishGuard:
             if not result.ok:
                 failures.append(
                     "изменённые тесты не зелёные:\n"
-                    + result.summary(spec.output_chars, spec.narrow_test_timeout_s)
+                    + result.failure_summary(spec.output_chars, spec.narrow_test_timeout_s)
                 )
         return failures + await self._checks()
 

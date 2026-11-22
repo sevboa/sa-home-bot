@@ -16,6 +16,7 @@ SCRIPT_OUTPUT_CHARS = 8_000
 SCRIPT_CLIPPED_HINT = (
     "; печатай только нужное: grep() и ls() возвращают список строк, срез [:n] режет строки"
 )
+HOST_CLOSED = "хост закрыл канал: вызов из скрипта не выполнен"
 PROCESS_FORBIDDEN = "процессы запускай через run()/run_tests(): subprocess и os.system запрещены"
 SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     (
@@ -68,9 +69,10 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
     ),
     (
         CONTROL_STEP_DONE,
-        "def step_done(text: str) -> NoReturn: ...",
+        "def step_done(text: str) -> None: ...",
         "закрыть пронумерованный шаг задания с итогом text; страж прогонит изменённые тесты; "
-        "завершает скрипт",
+        "принят — возвращает управление, скрипт идёт дальше; не принят — StepRejected с "
+        "причиной, скрипт останавливается",
     ),
     (
         CONTROL_FINISH,
@@ -84,10 +86,23 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "вопрос владельцу; ответ придёт следующим сообщением; завершает скрипт",
     ),
     (
+        "diff",
+        "def diff() -> str: ...",
+        "унифицированный дифф всех твоих правок против базы задания, как его увидит страж "
+        "finish",
+    ),
+    (
         "Result",
         "class Result: ...",
         "итог run()/run_tests(): code: int, output: str (хвост вывода), ok: bool (code == "
-        "0); print(r) печатает «[код N]» и вывод",
+        "0); print(r) печатает «[код N]» и вывод; run_tests() добавляет в output строки "
+        "«комментарии запрещены: путь:строка …» и ставит ok=False, если в изменённых .py "
+        "файлах src/ и tests/ есть комментарии или докстринги",
+    ),
+    (
+        "StepRejected",
+        "class StepRejected(Exception): ...",
+        "страж не принял step_done(): причина в тексте исключения, скрипт останавливается",
     ),
     (
         "EditError",
@@ -178,6 +193,10 @@ class Result:
     __repr__ = __str__
 
 
+class StepRejected(Exception):
+    pass
+
+
 class _Signal(BaseException):
     def __init__(self, tool, args):
         super().__init__(tool)
@@ -191,8 +210,31 @@ def _signal(tool, key, value):
     raise _Signal(tool, {key: value})
 
 
+def _call(name, args):
+    global _START
+    began = time.monotonic()
+    _send({"call": name, "args": args})
+    head = _wire_in.readline()
+    if not head:
+        raise EditError(_CONFIG["host_closed"])
+    reply = json.loads(_wire_in.read(int(head)).decode())
+    _START += time.monotonic() - began
+    return reply
+
+
 def step_done(text):
-    _signal("step_done", "title", text)
+    if not isinstance(text, str):
+        raise TypeError("step_done: аргумент text должен быть строкой")
+    reply = _call("step_done", {"title": text})
+    if not reply.get("ok"):
+        raise StepRejected(str(reply.get("reason", "")))
+
+
+def diff():
+    reply = _call("diff", {})
+    if not reply.get("ok"):
+        raise EditError(str(reply.get("reason", "")))
+    return str(reply.get("value", ""))
 
 
 def finish(summary):
@@ -445,6 +487,10 @@ def run_tests(paths):
         if token.startswith("/") or ".." in token.split("/"):
             return Result(2, f"путь {token!r} недопустим: нужен относительный путь внутри проекта")
     result = _execute([*_CONFIG["test_argv"], *tokens], _CONFIG["test_timeout"])
+    notes = _call("comments", {}).get("value")
+    if isinstance(notes, list) and notes:
+        output = "\n".join(part for part in [result.output, *map(str, notes)] if part)
+        result = Result(result.code or 1, output)
     _STATE["green"] = result.ok
     return result
 
@@ -604,6 +650,7 @@ def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
         **config,
         "ignored": sorted(IGNORED_DIRS),
         "forbidden": PROCESS_FORBIDDEN,
+        "host_closed": HOST_CLOSED,
         "max_bytes": SCRIPT_GREP_MAX_FILE_BYTES,
         "max_matches": SCRIPT_GREP_MAX_MATCHES,
         "names": [name for name, _, _ in SCRIPT_API] + ["Result", "EditError"],

@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 import shlex
+import tokenize
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,7 @@ from sa_home_bot.devlab.agent.script import (
     worker_argv,
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
+from sa_home_bot.utils.code_comments import comment_findings
 
 TOOL_LIST_FILES = "list_files"
 TOOL_READ_FILE = "read_file"
@@ -63,6 +66,14 @@ SCRIPT_STATE_RESET = (
     "потеряны; прочитанное прочитай заново]"
 )
 SCRIPT_BUDGET_MARGIN_S = 20.0
+DIFF_EMPTY = "изменений относительно базы нет"
+STEP_GATE_MISSING = "закрыть шаг из скрипта сейчас нельзя"
+CALL_UNKNOWN = "неизвестный вызов хоста {name!r}"
+COMMENTS_RULE_MARKER = "tests/unit/test_no_comments_in_code.py"
+COMMENTS_ROOTS = ("src/", "tests/")
+COMMENTS_FORBIDDEN = "комментарии запрещены: {path}:{line} {text}"
+COMMENTS_TEXT_CHARS = 80
+StepGate = Callable[[dict[str, Any]], Awaitable[str]]
 PLAIN_TOOLS = frozenset(
     {TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_GREP, TOOL_EDIT_FILE, TOOL_WRITE_FILE}
     | {TOOL_RUN_COMMAND, TOOL_RUN_TESTS, TOOL_STEP_DONE, TOOL_ASK_OWNER, TOOL_FINISH}
@@ -207,7 +218,8 @@ EXECUTE_DEFINITION = _schema(
     "функции сохраняются между вызовами, как в Jupyter; прочитанное держи в переменной и не "
     "перечитывай. После таймаута или падения процесса состояние сбрасывается. Код, которому "
     "нужен ещё не увиденный вывод, — в следующий вызов, всё остальное — в этот. "
-    "step_done(), finish() и ask_owner() завершают скрипт. Функции:\n"
+    "finish() и ask_owner() завершают скрипт; step_done() не завершает: принят — скрипт "
+    "идёт дальше, отклонён — StepRejected с причиной и остановка. Функции:\n"
     + api_stubs(""),
     code=_text("Код Python"),
 )
@@ -244,6 +256,7 @@ class ToolBox:
         self._sandbox = sandbox
         self._spec = spec
         self._read_lines = read_lines
+        self._step_gate: StepGate | None = None
         self._handlers = {
             TOOL_LIST_FILES: self._list_files,
             TOOL_READ_FILE: self._read_file,
@@ -270,7 +283,10 @@ class ToolBox:
         changed = await self._sandbox.changed_digests()
         return hashlib.sha256(json.dumps(changed, sort_keys=True).encode()).hexdigest()
 
-    async def call(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+    async def call(
+        self, name: str, args: dict[str, Any], step_gate: StepGate | None = None
+    ) -> ToolOutcome:
+        self._step_gate = step_gate
         if self._spec.code_mode and name in PLAIN_TOOLS:
             raise ToolError(SCRIPT_ONLY_TEXT)
         handler = self._handlers.get(name)
@@ -418,12 +434,57 @@ class ToolBox:
             "output_chars": spec.output_chars,
         }
 
+    async def _comment_lines(self) -> list[str]:
+        if await self._sandbox.read_bytes(COMMENTS_RULE_MARKER) is None:
+            return []
+        lines = []
+        digests = await self._sandbox.changed_digests()
+        for path in sorted(digests):
+            if not (digests[path] and path.endswith(".py") and path.startswith(COMMENTS_ROOTS)):
+                continue
+            data = await self._sandbox.read_bytes(path)
+            try:
+                findings = comment_findings(data.decode()) if data is not None else []
+            except (SyntaxError, tokenize.TokenError, UnicodeDecodeError):
+                continue
+            lines += [
+                COMMENTS_FORBIDDEN.format(path=path, line=line, text=text[:COMMENTS_TEXT_CHARS])
+                for line, text in findings
+            ]
+        return lines
+
+    async def _serve_call(
+        self, request: dict[str, Any], gate: StepGate | None, accepted: list[str]
+    ) -> dict[str, Any]:
+        name = request.get("call")
+        args = request.get("args")
+        if name == TOOL_STEP_DONE:
+            if gate is None or not isinstance(args, dict):
+                return {"ok": False, "reason": STEP_GATE_MISSING}
+            reason = await gate(args)
+            if reason:
+                return {"ok": False, "reason": reason}
+            accepted.append(str(args.get("title", "")))
+            return {"ok": True}
+        if name == "diff":
+            text = await self._sandbox.diff(self._spec.diff_prefixes)
+            return {"ok": True, "value": text or DIFF_EMPTY}
+        if name == "comments":
+            return {"ok": True, "value": await self._comment_lines()}
+        return {"ok": False, "reason": CALL_UNKNOWN.format(name=name)}
+
     async def _execute(self, args: dict[str, Any]) -> ToolOutcome:
         code = _argument(args, "code", str)
         timeout_s = self._spec.script_timeout_s
         before = await self._sandbox.changed_digests()
+        accepted: list[str] = []
+        gate = self._step_gate
+
+        async def serve(request: dict[str, Any]) -> dict[str, Any]:
+            return await self._serve_call(request, gate, accepted)
+
         reply = await self._sandbox.session_request(
-            worker_argv(self._script_config()), request_payload(code), timeout_s
+            worker_argv(self._script_config()), request_payload(code), timeout_s, serve
         )
         mutating = before != await self._sandbox.changed_digests()
         if reply.timed_out:
@@ -440,7 +501,8 @@ class ToolBox:
             return ToolOutcome(
                 f"{SCRIPT_FAILED_HEAD}\n{output}", mutating=mutating, green=run.green
             )
-        output = clip_head(run.output, limit, SCRIPT_CLIPPED_HINT) or SCRIPT_NO_OUTPUT
+        silent = "" if run.control or accepted else SCRIPT_NO_OUTPUT
+        output = clip_head(run.output, limit, SCRIPT_CLIPPED_HINT) or silent
         control = (
             ControlRequest(run.control.tool, run.control.args, run.control.tool)
             if run.control

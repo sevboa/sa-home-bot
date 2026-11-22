@@ -482,9 +482,10 @@ class AgentWorker(WorkerLoops):
             )
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
+        base_dir = run.root / BASE_DIR
         held = self._parked_sandboxes.pop(job.id, None)
         sandbox = held or self._sandboxes(
-            SandboxRequest(job.id, repo.workdir, project, spec, baseline)
+            SandboxRequest(job.id, repo.workdir, project, spec, baseline, base_dir)
         )
         run.sandbox = sandbox
         await (sandbox.resume() if held else sandbox.start())
@@ -592,9 +593,7 @@ class AgentWorker(WorkerLoops):
         target = run.root / BASE_DIR
         shutil.rmtree(target, ignore_errors=True)
         await run.mirror.export(base, target)
-        snapshot = await asyncio.to_thread(LocalSandbox(target).snapshot)
-        shutil.rmtree(target, ignore_errors=True)
-        return snapshot
+        return await asyncio.to_thread(LocalSandbox(target).snapshot)
 
     async def _rules(
         self, run: JobRun, project: ProjectSpec, base: str, external: Path | None

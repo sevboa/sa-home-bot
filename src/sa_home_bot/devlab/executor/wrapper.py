@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from sa_home_bot.config import DevlabConfig
-from sa_home_bot.devlab.agent.sandbox import PipeSession, SessionReply
+from sa_home_bot.devlab.agent.sandbox import CallHandler, PipeSession, SessionReply
 from sa_home_bot.devlab.executor.runner import RunResult
 from sa_home_bot.devlab.neighbor import NeverFrozen
 from sa_home_bot.node.fixups.devlab import DEVLAB_WRAPPER_PATH
@@ -161,7 +161,11 @@ class WrapperClient:
         return PipeSession([*self._prefix, "session", name, shlex.join(argv)])
 
     async def session_request(
-        self, session: PipeSession, payload: bytes, timeout_s: float
+        self,
+        session: PipeSession,
+        payload: bytes,
+        timeout_s: float,
+        on_call: CallHandler | None = None,
     ) -> SessionReply:
         await self._pause.wait_thawed()
         started = self._clock()
@@ -170,6 +174,7 @@ class WrapperClient:
             payload,
             timeout_s,
             lambda: self._clock() - started - (self._pause.frozen_total() - frozen_before),
+            on_call,
         )
 
     async def _interrupt(self, name: str, call: asyncio.Future[ProcResult]) -> RunResult:

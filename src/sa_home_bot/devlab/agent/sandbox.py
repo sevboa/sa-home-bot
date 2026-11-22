@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
+import json
 import os
+import re
 import signal
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Any, Protocol
 
 from sa_home_bot.utils.process import run
 
@@ -19,6 +22,16 @@ EXIT_HEAD = "[код {code}]"
 OK_HEAD = EXIT_HEAD.format(code=0)
 SESSION_TICK_S = 0.5
 SESSION_CLOSE_GRACE_S = 2.0
+BINARY_MARK = "[файл не текстовый]"
+CALL_KEY = "call"
+CALL_UNAVAILABLE = "вызов хоста из скрипта недоступен"
+CALL_FAILED = "сбой хоста при обработке вызова: {error}"
+FAILED_LINE = re.compile(r"^(?:FAILED|ERROR) \S")
+FAILED_LIST_MAX = 30
+FAILED_LINE_CHARS = 240
+FAILED_LIST_HEAD = "упавшие тесты:"
+FAILED_TAIL_HEAD = "хвост вывода:"
+CallHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class SandboxPathError(Exception):
@@ -29,6 +42,28 @@ def clip_tail(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
+
+
+def frame(data: bytes) -> bytes:
+    return f"{len(data)}\n".encode() + data
+
+
+def call_request(data: bytes) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(data)
+    except ValueError:
+        return None
+    if isinstance(payload, dict) and CALL_KEY in payload and "output" not in payload:
+        return payload
+    return None
+
+
+def failed_tests(output: str) -> list[str]:
+    seen: dict[str, None] = {}
+    for line in output.splitlines():
+        if FAILED_LINE.match(line):
+            seen.setdefault(line[:FAILED_LINE_CHARS], None)
+    return list(seen)[:FAILED_LIST_MAX]
 
 
 def clip_head(text: str, limit: int, hint: str = "") -> str:
@@ -56,6 +91,15 @@ class ExecResult:
         )
         return f"{head}\n{text}".rstrip()
 
+    def failure_summary(self, limit: int, timeout_s: float = 0.0) -> str:
+        failed = [] if self.timed_out else failed_tests(self.output)
+        if not failed:
+            return self.summary(limit, timeout_s)
+        listing = "\n".join([FAILED_LIST_HEAD, *failed])
+        tail = clip_tail(self.output, max(limit - len(listing), limit // 2))
+        head = EXIT_HEAD.format(code=self.exit_code)
+        return f"{head}\n{listing}\n{FAILED_TAIL_HEAD}\n{tail}".rstrip()
+
 
 @dataclass(frozen=True)
 class SessionReply:
@@ -71,7 +115,11 @@ class PipeSession:
         self._proc: asyncio.subprocess.Process | None = None
 
     async def request(
-        self, payload: bytes, timeout_s: float, spent: Callable[[], float] | None = None
+        self,
+        payload: bytes,
+        timeout_s: float,
+        spent: Callable[[], float] | None = None,
+        on_call: CallHandler | None = None,
     ) -> SessionReply:
         if spent is None:
             started = time.monotonic()
@@ -79,34 +127,62 @@ class PipeSession:
             def spent() -> float:
                 return time.monotonic() - started
 
+        held = 0.0
         try:
             proc = await self._ensure()
         except OSError as exc:
             return SessionReply(None, detail=f"{type(exc).__name__}: {exc}")
+        if not await self._send(proc, payload):
+            return await self._died(proc)
+        while True:
+            read = asyncio.ensure_future(self._read_frame(proc))
+            try:
+                while not read.done():
+                    left = timeout_s + held - spent()
+                    if left <= 0:
+                        await self.kill()
+                        return SessionReply(None, timed_out=True)
+                    await asyncio.wait({read}, timeout=min(SESSION_TICK_S, left))
+            except BaseException:
+                self._kill_group()
+                raise
+            finally:
+                if not read.done():
+                    read.cancel()
+            data = read.result()
+            if data is None:
+                return await self._died(proc)
+            call = call_request(data)
+            if call is None:
+                return SessionReply(data)
+            began = time.monotonic()
+            try:
+                answer = await self._answer(on_call, call)
+            except BaseException:
+                self._kill_group()
+                raise
+            held += time.monotonic() - began
+            if not await self._send(proc, json.dumps(answer).encode()):
+                return await self._died(proc)
+
+    @staticmethod
+    async def _answer(on_call: CallHandler | None, call: dict[str, Any]) -> dict[str, Any]:
+        if on_call is None:
+            return {"ok": False, "reason": CALL_UNAVAILABLE}
+        try:
+            return await on_call(call)
+        except Exception as exc:
+            return {"ok": False, "reason": CALL_FAILED.format(error=f"{type(exc).__name__}: {exc}")}
+
+    @staticmethod
+    async def _send(proc: asyncio.subprocess.Process, data: bytes) -> bool:
         assert proc.stdin is not None
         try:
-            proc.stdin.write(f"{len(payload)}\n".encode() + payload)
+            proc.stdin.write(frame(data))
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
-            return await self._died(proc)
-        read = asyncio.ensure_future(self._read_frame(proc))
-        try:
-            while not read.done():
-                left = timeout_s - spent()
-                if left <= 0:
-                    await self.kill()
-                    return SessionReply(None, timed_out=True)
-                await asyncio.wait({read}, timeout=min(SESSION_TICK_S, left))
-        except BaseException:
-            self._kill_group()
-            raise
-        finally:
-            if not read.done():
-                read.cancel()
-        data = read.result()
-        if data is None:
-            return await self._died(proc)
-        return SessionReply(data)
+            return False
+        return True
 
     async def _ensure(self) -> asyncio.subprocess.Process:
         if self._proc is None or self._proc.returncode is not None:
@@ -178,10 +254,16 @@ class Sandbox(Protocol):
     async def exec(self, argv: Sequence[str], timeout_s: float) -> ExecResult: ...
 
     async def session_request(
-        self, argv: Sequence[str], payload: bytes, timeout_s: float
+        self,
+        argv: Sequence[str],
+        payload: bytes,
+        timeout_s: float,
+        on_call: CallHandler | None = None,
     ) -> SessionReply: ...
 
     async def session_close(self) -> None: ...
+
+    async def diff(self, prefixes: tuple[str, ...] = ()) -> str: ...
 
     async def changed_paths(self) -> list[str]: ...
 
@@ -206,8 +288,11 @@ def safe_relative(path: str) -> str:
 
 
 class LocalSandbox:
-    def __init__(self, root: Path, baseline: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, root: Path, baseline: dict[str, str] | None = None, base_root: Path | None = None
+    ) -> None:
         self._root = root
+        self._base_root = base_root
         self._baseline = baseline if baseline is not None else self._snapshot()
         self._session: PipeSession | None = None
 
@@ -269,11 +354,15 @@ class LocalSandbox:
         return ExecResult(result.returncode, result.stdout_text)
 
     async def session_request(
-        self, argv: Sequence[str], payload: bytes, timeout_s: float
+        self,
+        argv: Sequence[str],
+        payload: bytes,
+        timeout_s: float,
+        on_call: CallHandler | None = None,
     ) -> SessionReply:
         if self._session is None:
             self._session = PipeSession(argv, cwd=str(self._root))
-        return await self._session.request(payload, timeout_s)
+        return await self._session.request(payload, timeout_s, on_call=on_call)
 
     async def session_close(self) -> None:
         session, self._session = self._session, None
@@ -288,3 +377,38 @@ class LocalSandbox:
 
     async def changed_paths(self) -> list[str]:
         return sorted(await self.changed_digests())
+
+    def _text_of(self, root: Path | None, relative: str) -> list[str] | None:
+        if root is None:
+            return None
+        target = root / relative
+        if not target.is_file():
+            return None
+        try:
+            return target.read_text().splitlines()
+        except UnicodeDecodeError:
+            return [BINARY_MARK]
+
+    def _render_diff(self, paths: list[str]) -> str:
+        parts = []
+        for relative in paths:
+            old = self._text_of(self._base_root, relative)
+            new = self._text_of(self._root, relative)
+            if old == new:
+                continue
+            parts.extend(
+                difflib.unified_diff(
+                    old or [],
+                    new or [],
+                    fromfile="/dev/null" if old is None else f"a/{relative}",
+                    tofile="/dev/null" if new is None else f"b/{relative}",
+                    lineterm="",
+                )
+            )
+        return "\n".join(parts)
+
+    async def diff(self, prefixes: tuple[str, ...] = ()) -> str:
+        paths = await self.changed_paths()
+        if prefixes:
+            paths = [p for p in paths if p.startswith(prefixes)]
+        return await asyncio.to_thread(self._render_diff, paths)

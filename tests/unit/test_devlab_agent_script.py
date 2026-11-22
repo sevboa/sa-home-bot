@@ -1,3 +1,4 @@
+import asyncio
 import sys
 
 import pytest
@@ -28,18 +29,20 @@ class Session:
         self.sandbox = LocalSandbox(root)
         self.argv = worker_argv({**CONFIG, **config}, python=sys.executable)
 
-    async def run(self, code, timeout_s=120):
-        reply = await self.sandbox.session_request(self.argv, request_payload(code), timeout_s)
+    async def run(self, code, timeout_s=120, on_call=None):
+        reply = await self.sandbox.session_request(
+            self.argv, request_payload(code), timeout_s, on_call
+        )
         return reply if reply.data is None else parse_reply(reply.data)
 
     async def close(self):
         await self.sandbox.session_close()
 
 
-async def run_script(root, code, **config):
+async def run_script(root, code, on_call=None, **config):
     session = Session(root, **config)
     try:
-        return await session.run(code)
+        return await session.run(code, on_call=on_call)
     finally:
         await session.close()
 
@@ -141,7 +144,6 @@ def test_search_lists_matching_stubs(query, count):
 @pytest.mark.parametrize(
     ("code", "tool", "args"),
     [
-        ("step_done('шаг')", "step_done", {"title": "шаг"}),
         ("finish('итог')", "finish", {"summary": "итог"}),
         ("ask_owner('вопрос?')", "ask_owner", {"question": "вопрос?"}),
     ],
@@ -229,7 +231,7 @@ async def test_edit_in_second_call_uses_variable_from_first(session, project):
     assert run.output.strip() == "alpha = 7"
 
 
-@pytest.mark.parametrize("code", ["finish('готово')", "step_done('шаг')", "ask_owner('вопрос?')"])
+@pytest.mark.parametrize("code", ["finish('готово')", "ask_owner('вопрос?')"])
 async def test_state_survives_control_signal(session, code):
     await session.run("kept = 41")
     signalled = await session.run(code)
@@ -340,3 +342,89 @@ async def test_sandbox_stop_and_aclose_close_the_session(project):
     proc = session.sandbox._session._proc
     await session.sandbox.aclose()
     assert proc.returncode is not None
+
+
+def recording(reply):
+    seen = []
+
+    async def on_call(request):
+        seen.append(request)
+        return reply(request) if callable(reply) else reply
+
+    return seen, on_call
+
+
+async def test_step_done_accepted_returns_and_script_continues(project):
+    seen, on_call = recording({"ok": True})
+    run = await run_script(
+        project, "print(step_done('1: шаг'))\nprint('после')\nfinish('итог')", on_call
+    )
+    assert not run.failed
+    assert run.output.splitlines() == ["None", "после"]
+    assert seen == [{"call": "step_done", "args": {"title": "1: шаг"}}]
+    assert (run.control.tool, run.control.args) == ("finish", {"summary": "итог"})
+
+
+async def test_step_done_rejected_raises_step_rejected_and_stops(project):
+    _, on_call = recording({"ok": False, "reason": "шаг не принят: красный тест"})
+    run = await run_script(project, "print('до')\nstep_done('шаг')\nprint('после')", on_call)
+    assert run.failed
+    assert "до" in run.output and "после" not in run.output
+    assert "StepRejected: шаг не принят: красный тест" in run.output
+    assert run.control is None
+
+
+async def test_step_rejected_can_be_caught_by_script(project):
+    _, on_call = recording({"ok": False, "reason": "нет"})
+    code = "try:\n    step_done('шаг')\nexcept StepRejected as e:\n    print('поймано', e)"
+    run = await run_script(project, code, on_call)
+    assert run.output == "поймано нет"
+
+
+async def test_host_call_without_handler_is_refused(project):
+    run = await run_script(project, "step_done('шаг')")
+    assert run.failed
+    assert "StepRejected" in run.output
+
+
+async def test_diff_asks_host_and_returns_text(project):
+    seen, on_call = recording({"ok": True, "value": "--- a/x\n+++ b/x"})
+    run = await run_script(project, "print(diff())", on_call)
+    assert run.output == "--- a/x\n+++ b/x"
+    assert seen == [{"call": "diff", "args": {}}]
+
+
+async def test_diff_failure_is_edit_error(project):
+    _, on_call = recording({"ok": False, "reason": "нет базы"})
+    run = await run_script(project, "diff()", on_call)
+    assert run.failed
+    assert "EditError: нет базы" in run.output
+
+
+async def test_run_tests_appends_comment_notes_and_turns_red(project):
+    (project / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    _, on_call = recording({"ok": True, "value": ["комментарии запрещены: src/a.py:2 # да"]})
+    code = "r = run_tests(['test_ok.py'])\nprint(r.ok, r.code)\nprint(r)"
+    run = await run_script(project, code, on_call)
+    lines = run.output.splitlines()
+    assert lines[0] == "False 1"
+    assert lines[-1] == "комментарии запрещены: src/a.py:2 # да"
+    assert run.green is False
+
+
+async def test_run_tests_without_notes_keeps_result(project):
+    (project / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    _, on_call = recording({"ok": True, "value": []})
+    run = await run_script(project, "print(run_tests(['test_ok.py']).ok)", on_call)
+    assert run.output == "True"
+    assert run.green is True
+
+
+async def test_host_wait_does_not_eat_script_budget(project):
+    async def slow(request):
+        await asyncio.sleep(1.5)
+        return {"ok": True}
+
+    code = f"step_done('шаг')\nprint(run({sys.executable + ' -c print(5)'!r}).ok)"
+    run = await run_script(project, code, slow, budget=2.2)
+    assert run.output == "True"
