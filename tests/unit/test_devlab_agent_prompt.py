@@ -20,6 +20,7 @@ from sa_home_bot.devlab.agent.prompt import (
     with_flow_reminder,
 )
 from sa_home_bot.devlab.agent.tools import (
+    EXECUTE_DEFINITION,
     TOOL_ASK_OWNER,
     TOOL_EDIT_FILE,
     TOOL_EXECUTE,
@@ -149,6 +150,20 @@ def test_code_mode_texts_name_no_hidden_tools(text):
 def test_code_mode_texts_have_no_queue_after_script(text):
     assert "очеред" not in text
     assert "после скрипта" not in text
+
+
+@pytest.mark.parametrize(
+    "text", [CODE_MODE_INTRO, CODE_MODE_REMINDER, EXECUTE_DEFINITION["function"]["description"]]
+)
+def test_code_mode_texts_say_state_persists_between_calls(text):
+    assert "не сохраняются" not in text
+    assert "новый процесс" not in text
+    assert "Jupyter" in text or "Переменные держатся" in text
+
+
+def test_code_mode_second_call_example_uses_variable_from_first():
+    assert 'src = read("src/pkg/a.py"' in CODE_MODE_INTRO
+    assert "src.splitlines" in CODE_MODE_INTRO
 
 
 def test_code_mode_intro_names_script_and_control_calls():
