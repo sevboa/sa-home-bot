@@ -153,7 +153,7 @@ def test_code_mode_texts_have_no_queue_after_script(text):
 
 
 @pytest.mark.parametrize(
-    "text", [CODE_MODE_INTRO, CODE_MODE_REMINDER, EXECUTE_DEFINITION["function"]["description"]]
+    "text", [CODE_MODE_INTRO, EXECUTE_DEFINITION["function"]["description"]]
 )
 def test_code_mode_texts_say_state_persists_between_calls(text):
     assert "не сохраняются" not in text
@@ -169,7 +169,7 @@ def test_code_mode_second_call_example_uses_variable_from_first():
 def test_code_mode_intro_names_script_and_control_calls():
     for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
         assert name in CODE_MODE_INTRO
-    assert 'step_done("1: load возвращает 2")' in CODE_MODE_INTRO
-    assert 'finish("load возвращает 2, тесты и ruff зелёные")' in CODE_MODE_INTRO
-    assert "не отдельные инструменты" in CODE_MODE_INTRO
+    assert 'step_done("1–2: load возвращает 2, тест зелёный")' in CODE_MODE_INTRO
+    assert 'finish("load возвращает 2; тесты, ruff и docs готовы")' in CODE_MODE_INTRO
+    assert "список — в описании execute" in CODE_MODE_INTRO
 

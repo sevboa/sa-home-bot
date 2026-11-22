@@ -1,14 +1,16 @@
+import dataclasses
 import sys
 
 import pytest
 
 from sa_home_bot.devlab.agent import tools as tools_module
-from sa_home_bot.devlab.agent.loop import AgentStatus
+from sa_home_bot.devlab.agent.loop import CODE_COUNTER, AgentStatus
 from sa_home_bot.devlab.agent.model import ModelError
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.script import PROCESS_FORBIDDEN, SCRIPT_FAILED_HEAD, worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
+    DIFF_EMPTY,
     SCRIPT_ONLY_TEXT,
     SCRIPT_STATE_RESET,
     TOOL_ASK_OWNER,
@@ -176,12 +178,83 @@ async def execute_loop(tmp_path, code, checks=()):
 
 @pytest.mark.parametrize(("check", "accepted"), [(GREEN_CHECK, True), (RED_CHECK, False)])
 async def test_step_done_from_script_goes_through_the_guard(tmp_path, check, accepted):
-    code = EDIT_APP + 'step_done("итог шага")'
+    code = EDIT_APP + 'step_done("итог шага")\nprint("после шага")'
     result, answer, steps = await execute_loop(tmp_path, code, checks=(check,))
     assert result.status is AgentStatus.MODEL_FAILED
     assert (steps == ["итог шага"]) is accepted
-    assert ("step_done: шаг принят" in answer) is accepted
-    assert ("step_done: шаг не принят" in answer) is not accepted
+    assert ("после шага" in answer) is accepted
+    assert ("StepRejected: шаг не принят" in answer) is not accepted
+    assert answer.startswith(SCRIPT_FAILED_HEAD) is not accepted
+
+
+async def test_accepted_step_done_prints_no_noise_and_counts_the_call(tmp_path):
+    result, answer, steps = await execute_loop(tmp_path, EDIT_APP + 'step_done("итог шага")')
+    assert steps == ["итог шага"]
+    assert "ничего не напечатал" not in answer
+    assert answer == CODE_COUNTER.format(number=1, thousands=0)
+
+
+async def test_silent_script_without_step_or_signal_keeps_hint(tmp_path):
+    _, answer, _ = await execute_loop(tmp_path, "x = 1")
+    assert "ничего не напечатал" in answer
+
+
+async def test_finish_after_accepted_step_done_in_one_script(tmp_path):
+    code = EDIT_APP + 'step_done("итог шага")\nfinish("всё готово")'
+    result, _, steps = await execute_loop(tmp_path, code)
+    assert result.status is AgentStatus.FINISHED
+    assert result.summary == "всё готово"
+    assert steps == ["итог шага"]
+
+
+async def test_rejected_step_done_counts_red_and_next_call_can_retry(tmp_path):
+    spec = AgentSpec(
+        test_argv=GREEN_TEST, checks=(RED_CHECK,), diff_prefixes=("src/",), code_mode=True
+    )
+    model = ScriptedChatModel(
+        tool_reply(TOOL_EXECUTE, "s1", code=EDIT_APP + 'step_done("шаг")'),
+        tool_reply(TOOL_EXECUTE, "s2", code='step_done("шаг")'),
+        ModelError("конец"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    await loop.run("s", "t")
+    first, second = model.seen[1][-1]["content"], model.seen[2][-1]["content"]
+    assert "StepRejected: шаг не принят" in first
+    assert "StepRejected: шаг не принят" in second
+    assert second.endswith(CODE_COUNTER.format(number=2, thousands=0))
+
+
+async def test_counter_shows_call_number_and_context_in_thousands(tmp_path):
+    spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
+    big = dataclasses.replace(tool_reply(TOOL_EXECUTE, "s1", code="print(1)"), tokens_in=25400)
+    model = ScriptedChatModel(big, tool_reply(TOOL_EXECUTE, "s2", code="print(2)"), ModelError("x"))
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    await loop.run("s", "t")
+    assert model.seen[1][-1]["content"] == "1\n[вызов 1 · контекст 25 тыс. токенов]"
+    assert model.seen[2][-1]["content"] == "2\n[вызов 2 · контекст 0 тыс. токенов]"
+
+
+@pytest.mark.parametrize(
+    ("through", "first_failed"),
+    [("finish", "test_bad.py::test_bad"), ("step_done", "test_new_bad.py::test_new")],
+)
+async def test_guard_rejection_lists_failed_tests_before_tail(tmp_path, through, first_failed):
+    spec = AgentSpec(test_argv=PYTEST_ARGV, diff_prefixes=("src/",), code_mode=True)
+    files = {
+        "src/app.py": "VALUE = 1\n",
+        "test_bad.py": "def test_bad():\n    assert False\n",
+        "test_ok.py": "def test_ok():\n    assert True\n",
+    }
+    call = 'finish("готово")' if through == "finish" else 'step_done("шаг")'
+    new_test = "write('test_new_bad.py', 'def test_new():\\n    assert False\\n')\n"
+    model = ScriptedChatModel(
+        tool_reply(TOOL_EXECUTE, "s1", code=EDIT_APP + new_test + call), ModelError("конец")
+    )
+    loop, _ = make_loop(tmp_path, model, spec=spec, files=files)
+    await loop.run("s", "t")
+    answer = model.seen[1][-1]["content"]
+    assert f"упавшие тесты:\nFAILED {first_failed}" in answer
+    assert answer.index("упавшие тесты:") < answer.index("хвост вывода:")
 
 
 @pytest.mark.parametrize(
@@ -251,3 +324,57 @@ async def test_process_death_reports_state_reset(project):
     assert died.text.startswith(SCRIPT_FAILED_HEAD)
     assert "код 3" in died.text
     assert SCRIPT_STATE_RESET in died.text
+
+
+@pytest.fixture
+def ruled_project(project):
+    (project / "tests" / "unit").mkdir(parents=True)
+    (project / "tests" / "unit" / "test_no_comments_in_code.py").write_text("")
+    return project
+
+
+async def test_run_tests_flags_comments_in_changed_files_against_base(ruled_project):
+    box = toolbox(ruled_project, test_argv=PYTEST_ARGV)
+    code = (
+        "edit('src/a.py', 'value = 1', 'value = 2  # поясняю')\n"
+        "write('src/clean.py', 'x = 1\\n')\n"
+        "write('tests/unit/test_x.py', 'def test_x():\\n    '+chr(34)*3+'док'+chr(34)*3+'\\n')\n"
+        "r = run_tests(['test_ok.py'])\n"
+        "print(r.ok)\nprint(r.output)"
+    )
+    outcome = await box.call(TOOL_EXECUTE, {"code": code})
+    await box._sandbox.session_close()
+    lines = outcome.text.splitlines()
+    assert lines[0] == "False"
+    assert "комментарии запрещены: src/a.py:1 # поясняю" in lines
+    assert not any("src/clean.py" in line for line in lines)
+    assert any(line.startswith("комментарии запрещены: tests/unit/test_x.py:2") for line in lines)
+    assert outcome.green is False
+
+
+async def test_run_tests_ignores_comments_when_project_has_no_such_rule(project):
+    box = toolbox(project, test_argv=PYTEST_ARGV)
+    code = "edit('src/a.py', 'value = 1', 'value = 2  # ок')\nprint(run_tests(['test_ok.py']).ok)"
+    outcome = await box.call(TOOL_EXECUTE, {"code": code})
+    await box._sandbox.session_close()
+    assert outcome.text == "True"
+
+
+async def test_diff_shows_changes_against_base_tree(project, tmp_path_factory):
+    base = tmp_path_factory.mktemp("base")
+    (base / "src").mkdir()
+    (base / "src" / "a.py").write_text("value = 1\n")
+    sandbox = LocalSandbox(project, LocalSandbox(project).snapshot(), base)
+    box = ToolBox(sandbox, AgentSpec(code_mode=True))
+    code = "edit('src/a.py', 'value = 1', 'value = 3')\nprint(diff())"
+    outcome = await box.call(TOOL_EXECUTE, {"code": code})
+    await sandbox.session_close()
+    assert "--- a/src/a.py\n+++ b/src/a.py" in outcome.text
+    assert "-value = 1\n+value = 3" in outcome.text
+
+
+async def test_diff_of_clean_tree_says_so(project):
+    box = toolbox(project)
+    outcome = await box.call(TOOL_EXECUTE, {"code": "print(diff())"})
+    await box._sandbox.session_close()
+    assert outcome.text == DIFF_EMPTY

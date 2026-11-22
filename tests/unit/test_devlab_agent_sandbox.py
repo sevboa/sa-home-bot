@@ -7,7 +7,12 @@ import tarfile
 import pytest
 
 from sa_home_bot.config import DevlabConfig
-from sa_home_bot.devlab.agent.sandbox import LocalSandbox, PipeSession, SandboxPathError
+from sa_home_bot.devlab.agent.sandbox import (
+    ExecResult,
+    LocalSandbox,
+    PipeSession,
+    SandboxPathError,
+)
 from sa_home_bot.devlab.agent.script import parse_reply, request_payload, worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import ToolBox, ToolError
@@ -394,3 +399,139 @@ async def test_stop_closes_session_process(work, monkeypatch):
     await box.stop()
     assert proc.returncode is not None
     assert box._session is None
+
+
+PIPE_HELPERS = (
+    "import json,sys\n"
+    "def send(o):\n"
+    "    d=json.dumps(o).encode()\n"
+    "    sys.stdout.buffer.write(str(len(d)).encode()+b'\\n'+d)\n"
+    "    sys.stdout.buffer.flush()\n"
+    "def get():\n"
+    "    n=int(sys.stdin.buffer.readline())\n"
+    "    return json.loads(sys.stdin.buffer.read(n))\n"
+)
+PYTEST_FAILED = (
+    "FAILED tests/test_a.py::test_one - assert 1 == 2\n"
+    "ERROR tests/test_b.py::test_two - RuntimeError: boom\n"
+    "FAILED tests/test_a.py::test_one - assert 1 == 2\n"
+)
+
+
+def test_failure_summary_lists_failed_tests_before_tail():
+    output = "x" * 3000 + "\n" + PYTEST_FAILED + "2 failed in 0.1s"
+    text = ExecResult(1, output).failure_summary(1000)
+    lines = text.splitlines()
+    assert lines[0] == "[код 1]"
+    assert lines[1:4] == [
+        "упавшие тесты:",
+        "FAILED tests/test_a.py::test_one - assert 1 == 2",
+        "ERROR tests/test_b.py::test_two - RuntimeError: boom",
+    ]
+    assert "хвост вывода:" in lines
+    assert text.endswith("2 failed in 0.1s")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [ExecResult(1, "просто падение\n"), ExecResult(-1, PYTEST_FAILED, timed_out=True)],
+)
+def test_failure_summary_falls_back_to_plain_summary(result):
+    assert result.failure_summary(500, 7) == result.summary(500, 7)
+
+
+async def test_local_diff_against_base_tree(tmp_path):
+    base = tmp_path / "base"
+    work = tmp_path / "work"
+    for root in (base, work):
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "a.py").write_text("x = 1\n")
+        (root / "src" / "gone.py").write_text("old\n")
+    (base / "docs").mkdir()
+    (base / "docs" / "n.md").write_text("a\n")
+    box = LocalSandbox(work, base_root=base)
+    baseline = box.snapshot()
+    box = LocalSandbox(work, baseline, base)
+    (work / "src" / "a.py").write_text("x = 2\n")
+    (work / "src" / "gone.py").unlink()
+    (work / "src" / "new.py").write_text("n = 1\n")
+    text = await box.diff()
+    assert "--- a/src/a.py\n+++ b/src/a.py" in text
+    assert "-x = 1\n+x = 2" in text
+    assert "--- a/src/gone.py\n+++ /dev/null" in text
+    assert "--- /dev/null\n+++ b/src/new.py" in text
+    assert "+n = 1" in text
+    assert await box.diff(("docs/",)) == ""
+
+
+async def test_pipe_session_answers_calls_until_final_frame(tmp_path):
+    code = PIPE_HELPERS + (
+        "get()\n"
+        "send({'call':'a','args':{}}); first=get()\n"
+        "send({'call':'b','args':{}}); second=get()\n"
+        "send({'output': [first, second]})\n"
+    )
+    seen = []
+
+    async def on_call(request):
+        seen.append(request["call"])
+        return {"ok": True, "n": len(seen)}
+
+    session = PipeSession([sys.executable, "-c", code])
+    reply = await session.request(b"{}", 10, on_call=on_call)
+    await session.close()
+    assert seen == ["a", "b"]
+    assert json.loads(reply.data) == {"output": [{"ok": True, "n": 1}, {"ok": True, "n": 2}]}
+
+
+async def test_pipe_session_handler_time_is_not_counted_in_timeout():
+    code = PIPE_HELPERS + (
+        "get()\n"
+        "send({'call':'a','args':{}})\n"
+        "get()\n"
+        "send({'output': 'done'})\n"
+    )
+
+    async def slow(request):
+        await asyncio.sleep(1.5)
+        return {"ok": True}
+
+    session = PipeSession([sys.executable, "-c", code])
+    reply = await session.request(b"{}", 1.2, on_call=slow)
+    await session.close()
+    assert not reply.timed_out
+    assert json.loads(reply.data) == {"output": "done"}
+
+
+async def test_pipe_session_without_handler_refuses_calls():
+    code = PIPE_HELPERS + (
+        "get()\n"
+        "send({'call':'a','args':{}})\n"
+        "answer = get()\n"
+        "send({'output': answer})\n"
+    )
+    session = PipeSession([sys.executable, "-c", code])
+    reply = await session.request(b"{}", 10)
+    await session.close()
+    assert json.loads(reply.data)["output"]["ok"] is False
+
+
+async def test_podman_session_call_pulls_first_and_does_not_deadlock_on_exec(work, monkeypatch):
+    local_session(work, monkeypatch)
+    box, fake = await started(work)
+    fake.files["src/a.py"] = b"print(5)\n"
+    seen = []
+
+    async def on_call(request):
+        seen.append((request["call"], (work / "src" / "a.py").read_bytes()))
+        result = await box.exec(["pytest"], 5)
+        return {"ok": result.ok}
+
+    reply = await box.session_request(
+        ["python"], request_payload("print(step_done('шаг'))"), 30, on_call
+    )
+    run = parse_reply(reply.data)
+    await box.aclose()
+    assert seen == [("step_done", b"print(5)\n")]
+    assert run.output == "None"
+    assert fake.commands().index("sync-out") < fake.commands().index("exec")
