@@ -96,21 +96,28 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "путь закрыт",
     ),
 )
-SCRIPT_READ_EXAMPLE = """src = read("src/pkg/a.py", 40, 90)
+SCRIPT_READ_EXAMPLE = """# Намерение: прочитать load и его тест в переменные, найти описание в docs
+src = read("src/pkg/a.py", 40, 90)
+test = read("tests/test_a.py")
 print(src)
-print("\\n".join(grep(r"def load", "src/pkg/", context=3)))
-print("\\n".join(grep(r"def test_load", "tests/", context=8)))"""
-SCRIPT_EDIT_EXAMPLE = """old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
+print(test)
+print("\\n".join(grep(r"load", "docs/pkg.md")))"""
+SCRIPT_EDIT_EXAMPLE = """# Намерение: тест на 2, правка load, прогон, закрыть шаги 1–2
+old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
+edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
 edit("src/pkg/a.py", old, old.replace("1", "2"))
-edit("tests/test_a.py", "assert load() == 1", "assert load() == 2")
 r = run_tests(["tests/test_a.py"])
 print(r)
 if r.ok:
-    step_done("1: load возвращает 2")"""
-SCRIPT_FINAL_EXAMPLE = """r = run("ruff check src/pkg/a.py tests/test_a.py")
+    step_done("1–2: load возвращает 2, тест зелёный")"""
+SCRIPT_FINAL_EXAMPLE = """# Намерение: запись в docs, шаг 3, ruff и финал
+write("docs/pkg.md", read("docs/pkg.md") + "\\n- 2026-11-22: load возвращает 2.\\n")
+step_done("3: docs/pkg.md дополнен")
+r = run("ruff check src/pkg/a.py tests/test_a.py")
 print(r)
 if r.ok:
-    finish("load возвращает 2, тесты и ruff зелёные")"""
+    finish("load возвращает 2; тесты, ruff и docs готовы")"""
 
 PROLOGUE = r'''import ast
 import builtins
