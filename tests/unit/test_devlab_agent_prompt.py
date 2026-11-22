@@ -172,6 +172,28 @@ def test_code_mode_second_call_example_uses_variable_from_first():
     assert "src.splitlines" in CODE_MODE_INTRO
 
 
+@pytest.mark.parametrize(
+    ("text", "portions", "stale"),
+    [
+        (CODE_MODE_INTRO, "Пиши порциями", "от трёх до шести"),
+        (CODE_MODE_INTRO_EN, "Write in portions", "three to six"),
+        (CODE_MODE_REMINDER, "пиши порциями", "Порция работы = два вызова"),
+        (CODE_MODE_REMINDER_EN, "write in portions", "A portion of work = two calls"),
+    ],
+)
+def test_code_mode_texts_write_in_portions(text, portions, stale):
+    assert portions in text
+    assert stale not in text
+    assert "в том же вызове: правка теста" not in text
+
+
+@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_INTRO_EN])
+def test_code_mode_example_splits_test_and_code_calls(text):
+    assert text.count('red = run_tests(["') == 1
+    assert text.index('red = run_tests(["') < text.index('r = run_tests(["')
+    assert text.index("old_test = next") < text.index('old = next(r for r in src')
+
+
 def test_code_mode_intro_names_script_and_control_calls():
     for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
         assert name in CODE_MODE_INTRO
