@@ -435,6 +435,102 @@ def read_many(paths):
     return {path: read(path) for path in paths}
 
 
+def _window(path, lines, offset, limit):
+    start = 1 if offset is None else max(1, offset)
+    if start > max(1, len(lines)):
+        raise EditError(f"в файле {path} {len(lines)} строк")
+    end = len(lines) if limit is None else min(len(lines), start + max(0, limit) - 1)
+    return start, end
+
+
+def _unchanged(path, text, start, end, total):
+    if end < start:
+        return None
+    digest = hashlib.sha1(text.encode()).hexdigest()
+    reply = _call(
+        "seen",
+        {"path": _relative(path), "digest": digest, "start": start, "end": end, "total": total},
+    )
+    value = reply.get("value") if reply.get("ok") else None
+    return value if isinstance(value, str) and value else None
+
+
+def _read_offset(path, offset=None, limit=None):
+    text = _text(path)
+    lines = text.splitlines(keepends=True)
+    start, end = _window(path, lines, offset, limit)
+    return _unchanged(path, text, start, end, len(lines)) or "".join(lines[start - 1 : end])
+
+
+def _read_numbered_offset(path, offset=None, limit=None):
+    text = _text(path)
+    lines = text.splitlines()
+    start, end = _window(path, lines, offset, limit)
+    shown = "\n".join(f"{n}\t{lines[n - 1]}" for n in range(start, end + 1))
+    return _unchanged(path, text, start, end, len(lines)) or shown
+
+
+if _CONFIG.get("claude_read"):
+    read = _read_offset
+    read_numbered = _read_numbered_offset
+
+
+def _glob_regex(pattern):
+    out = ""
+    index = 0
+    pattern = pattern[2:] if pattern.startswith("./") else pattern
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            out += "(?:.*/)?"
+            index += 3
+        elif pattern.startswith("**", index):
+            out += ".*"
+            index += 2
+        elif pattern[index] == "*":
+            out += "[^/]*"
+            index += 1
+        elif pattern[index] == "?":
+            out += "[^/]"
+            index += 1
+        else:
+            out += re.escape(pattern[index])
+            index += 1
+    return re.compile(out + r"\Z")
+
+
+def glob(pattern):
+    compiled = _glob_regex(pattern)
+    return sorted(relative for relative in _walk() if compiled.match(relative))
+
+
+def _todo_send(op, items):
+    reply = _call("todo", {"op": op, "items": items})
+    if not reply.get("ok"):
+        print(str(reply.get("reason", "")))
+        return None
+    return str(reply.get("value", ""))
+
+
+def todo(items=None):
+    if items is None:
+        return _todo_send("get", []) or ""
+    if isinstance(items, str):
+        items = [items]
+    entries = []
+    for item in items:
+        if isinstance(item, str):
+            entries.append([item, "pending"])
+        elif (
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+            and all(isinstance(part, str) for part in item)
+        ):
+            entries.append([item[0], item[1]])
+        else:
+            raise TypeError("todo: элементы — строки или пары (текст, статус)")
+    _todo_send("set", entries)
+
+
 def grep(pattern, prefix="", context=0):
     compiled = re.compile(pattern)
     found = []
@@ -774,7 +870,9 @@ def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
         "host_closed": HOST_CLOSED,
         "max_bytes": SCRIPT_GREP_MAX_FILE_BYTES,
         "max_matches": SCRIPT_GREP_MAX_MATCHES,
-        "names": [name for name, _, _ in SCRIPT_API] + ["Result", "EditError"],
+        "names": [name for name, _, _ in SCRIPT_API]
+        + ["Result", "EditError"]
+        + (["glob", "todo"] if config.get("claude_read") else []),
         "filename": SCRIPT_FILENAME,
     }
     source = f"_CONFIG = json.loads({json.dumps(full)!r})\n"

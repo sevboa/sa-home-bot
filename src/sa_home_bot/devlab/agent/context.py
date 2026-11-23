@@ -275,10 +275,13 @@ def fold_old_results(
     budget_tokens: int,
     keep_recent: int,
     notes_text: Callable[[], str] | None = None,
+    on_fold: Callable[[], None] | None = None,
 ) -> int:
     window = _Window(messages, budget_tokens)
     if window.fits():
         return window.tokens()
+    if on_fold is not None:
+        on_fold()
     if notes_text is not None and set_notes_block(messages, notes_text()):
         window.reset()
         if window.fits():

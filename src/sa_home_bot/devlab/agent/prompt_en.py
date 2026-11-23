@@ -456,3 +456,104 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
         "start beyond the end of the file, closed path",
     ),
 )
+
+_API_V5_READ = (
+    (
+        "read",
+        "def read(path: str, offset: int | None = None, limit: int | None = None) -> str: ...",
+        "file text; offset is the first line (1-based), limit is how many lines; without them "
+        "the whole file; exact text, suitable for old in edit(); a repeated read of an "
+        "unchanged range that is already above in this conversation returns a short "
+        "[unchanged since call N] mark instead of the text; missing file or offset beyond the "
+        "end - EditError",
+    ),
+    (
+        "read_numbered",
+        "def read_numbered(path: str, offset: int | None = None, "
+        "limit: int | None = None) -> str: ...",
+        "same as read() with numbers \"n<TAB>line\", for viewing; not suitable for old in edit()",
+    ),
+)
+_API_V5_GLOB = (
+    "glob",
+    "def glob(pattern: str) -> list[str]: ...",
+    "paths of project files matching a pattern: * within a directory, ** across directories, "
+    "? one character",
+)
+_API_V5_TODO = (
+    "todo",
+    "def todo(items: list[str | tuple[str, str]] | None = None) -> str | None: ...",
+    "your own task list: replaces it with items, each a string or a (text, status) pair, "
+    "status is pending, in_progress or done; todo() without items returns the current list; "
+    "it survives history folding and restarts and is shown to you with the notes",
+)
+
+
+def _api_cb_v5() -> tuple[tuple[str, str, str], ...]:
+    replaced = {entry[0]: entry for entry in _API_V5_READ}
+    api: list[tuple[str, str, str]] = []
+    for entry in SCRIPT_API_EN:
+        if entry[0] == "note":
+            api.append(_API_V5_TODO)
+        api.append(replaced.get(entry[0], entry))
+        if entry[0] == "ls":
+            api.append(_API_V5_GLOB)
+    return tuple(api)
+
+
+SCRIPT_API_CB_V5_EN = _api_cb_v5()
+EXECUTE_DESCRIPTION_CB_V5_EN = (
+    "Runs Python in the project root (src is in sys.path, project packages import). The "
+    "functions below are already defined; do not import them. One process per task: variables "
+    "and imports persist between calls, as in a Jupyter kernel. You see what print() prints "
+    "and the value of the last expression. Functions:\n"
+)
+SCRIPT_CLIPPED_HINT_CB_V5_EN = "; print less or read a narrower range with offset and limit"
+SCRIPT_CB_V5_EXAMPLE_EN = """src = read("src/pkg/a.py")
+print(src)
+edit("src/pkg/a.py", "return 1", "return 2")
+r = run_tests(["tests/test_a.py"])
+print(r)
+if r.ok:
+    finish("load returns 2; tests pass")"""
+CODE_MODE_INTRO_CB_V5_EN = (
+    "You are an agent working with the user toward their goals, using your own judgment along "
+    "the way.\n"
+    "\n"
+    "## The task and its limits\n"
+    "The task is the first user message (task.md): the goal, steps and checks. Hard limits come "
+    "from the task and the project rules below: allowed paths, forbidden actions, code and docs "
+    "conventions. Follow them exactly; everything else is your call. The task, docs and rules "
+    "are in Russian: write docs/ entries and the finish() summary in Russian.\n"
+    "\n"
+    "## How you work\n"
+    "You act through execute(code), which runs Python in the project root. The functions "
+    "listed in its description (read, write, edit, grep, glob, ls, todo, note, run, run_tests, "
+    "finish and others) are already defined. One process lives for the whole task: variables "
+    "and imports persist between calls. What you see is what the script printed. search(query) "
+    "lists the functions matching a word. Several steps fit in one call when you do not need to "
+    "see an intermediate result.\n"
+    "A read of a file range that has not changed and is already in this conversation returns a "
+    "short [unchanged since call N] mark: use the text above or your variables.\n"
+    "Keep your own work list with todo([...]) and save facts worth keeping with note(\"...\"); "
+    "both survive history folding and restarts and are shown at the start of the task.\n"
+    "\n"
+    "Example:\n"
+    "```\n"
+    f"{SCRIPT_CB_V5_EXAMPLE_EN}\n"
+    "```\n"
+    "\n"
+    "## Finishing work\n"
+    "- Do not stop until the task is done. When a call fails or returns nothing useful, find out "
+    "why and work around it instead of giving up or repeating it unchanged.\n"
+    "- Check your work with tests (run_tests) and the project checks (run) before finish(). "
+    "finish(summary) closes all steps; the guard checks the diff, tests and project rules, and "
+    "if it rejects, the output says why: fix it and call again. step_done() is optional.\n"
+    "- Ask the owner (ask_owner) only for a real blocker: a decision only the owner can make.\n"
+    "- Do not create planning, decision or analysis documents: work from the context, your "
+    "todo list and notes. Write only the docs the task asks for.\n"
+)
+CODE_MODE_REMINDER_CB_V5_EN = (
+    "[Reminder] Keep going until the task is done: diagnose failures and work around them, "
+    "check with tests before finish(), ask the owner only for a real blocker."
+)

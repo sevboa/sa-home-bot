@@ -358,7 +358,11 @@ class AgentLoop:
                 return self._crane_result(seg, messages, *crane)
             before = estimate_tokens(messages) if self._trace is not None else 0
             window = fold_old_results(
-                messages, budget, limits.keep_recent, self._tools.notes_text
+                messages,
+                budget,
+                limits.keep_recent,
+                self._tools.notes_text,
+                self._tools.reset_reads,
             )
             if window > budget:
                 return self._result(

@@ -507,6 +507,7 @@ class AgentWorker(WorkerLoops):
                 spec,
                 read_max_lines(limits.context_tokens),
                 self._notes_of(job.id),
+                limits.context_tokens,
             ),
             FinishGuard(sandbox, spec, self._settings.slots.heavy),
             limits,

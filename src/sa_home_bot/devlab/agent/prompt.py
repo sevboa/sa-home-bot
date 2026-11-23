@@ -11,16 +11,19 @@ from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_CB_V2_EN,
     CODE_MODE_INTRO_CB_V3_EN,
     CODE_MODE_INTRO_CB_V4_EN,
+    CODE_MODE_INTRO_CB_V5_EN,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_CB_V1_EN,
     CODE_MODE_REMINDER_CB_V2_EN,
     CODE_MODE_REMINDER_CB_V3_EN,
+    CODE_MODE_REMINDER_CB_V5_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
     GLM_SETTING_TITLE_EN,
     RULES_TITLE_EN,
 )
+from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_CODE_EXAMPLE,
     SCRIPT_EDIT_EXAMPLE,
@@ -423,12 +426,14 @@ CODE_MODE_TEXTS = {
         STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2, CODE_MODE_REMINDER_CB_V2),
         STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3, CODE_MODE_REMINDER_CB_V3),
         STYLE_CB_V4: (CODE_MODE_INTRO_CB_V4, CODE_MODE_REMINDER_CB_V3),
+        STYLE_CB_V5: (CODE_MODE_INTRO_CB_V5_EN, CODE_MODE_REMINDER_CB_V5_EN),
     },
     EN: {
         STYLE_CB_V1: (CODE_MODE_INTRO_CB_V1_EN, CODE_MODE_REMINDER_CB_V1_EN),
         STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2_EN, CODE_MODE_REMINDER_CB_V2_EN),
         STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3_EN, CODE_MODE_REMINDER_CB_V3_EN),
         STYLE_CB_V4: (CODE_MODE_INTRO_CB_V4_EN, CODE_MODE_REMINDER_CB_V3_EN),
+        STYLE_CB_V5: (CODE_MODE_INTRO_CB_V5_EN, CODE_MODE_REMINDER_CB_V5_EN),
     },
 }
 CODE_MODE_REMOTE_TEXTS = {
@@ -483,6 +488,8 @@ def build_system(
     lang: str = "ru",
     style: str = DEFAULT_STYLE,
 ) -> str:
+    if style == STYLE_CB_V5:
+        lang = EN
     english = code_mode and lang == EN
     parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]
     if code_mode:
