@@ -76,6 +76,16 @@ async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
     return result.returncode, result.stdout_text, result.stderr.decode(errors="replace")
 
 
+def _slot_result(slot: ProbeSlot, entry: str, target: str, one: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "server": slot.server,
+        "transport": slot.transport,
+        "entry": entry,
+        "target": target,
+        **one,
+    }
+
+
 class VpnCheckService:
     def __init__(
         self,
@@ -228,11 +238,23 @@ class VpnCheckService:
     ) -> None:
         net = await self._net_probe(slots)
         results: list[dict[str, Any]] = []
-        order = random.sample(slots, len(slots))
-        for slot in order:
-            if spread_s > 0:
-                await asyncio.sleep(random.uniform(0, spread_s / len(order)))
-            results.extend(await self._check_slot(slot, random.sample(targets, len(targets))))
+        if net is not None and net["ok"] is False:
+            log.warning(
+                "vpn_check: %s — VPN-проверки пропущены, %s", server, net.get("error") or "нет TCP"
+            )
+            reason = f"пропущено: {net.get('error') or 'нет TCP'}"
+            for slot in slots:
+                entry = self._entry_name(slot)
+                results.extend(
+                    _slot_result(slot, entry, target, {"ok": False, "ms": None, "error": reason})
+                    for target in targets
+                )
+        else:
+            order = random.sample(slots, len(slots))
+            for slot in order:
+                if spread_s > 0:
+                    await asyncio.sleep(random.uniform(0, spread_s / len(order)))
+                results.extend(await self._check_slot(slot, random.sample(targets, len(targets))))
         extra = {"net": {server: net}} if net is not None else {}
         await self._report_to_vpn(ACTION_REPORT_CHECK, results, extra)
 
@@ -315,15 +337,7 @@ class VpnCheckService:
                         if gate is not None
                         else (await self._check_one(slot, target))
                     )
-                    results.append(
-                        {
-                            "server": slot.server,
-                            "transport": slot.transport,
-                            "entry": entry,
-                            "target": target,
-                            **one,
-                        }
-                    )
+                    results.append(_slot_result(slot, entry, target, one))
                 failed = [r for r in results if not r["ok"]]
                 if failed:
                     log.warning(

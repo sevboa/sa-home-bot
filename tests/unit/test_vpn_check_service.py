@@ -708,6 +708,50 @@ async def test_report_carries_net_probe_from_reality_netns(monkeypatch, probe, o
     assert (net["ok"], net["ms"]) == (ok, ms)
 
 
+async def test_no_tcp_skips_tunnels_and_reports_all_failed(monkeypatch):
+    node_link = _FakeNodeLink()
+    service = _net_service(monkeypatch, node_link, (b"0.000000", b"", 28))
+    touched: list[str] = []
+
+    async def _boom(*args: Any, **kwargs: Any) -> None:
+        touched.append("called")
+
+    monkeypatch.setattr(service, "_tunnel_up", _boom)
+    monkeypatch.setattr(service, "_check_slot", _boom)
+    await service._run_and_report(
+        PROBE_SERVER, service._slots, ["https://1.1.1.1", "https://example.org"], spread_s=60
+    )
+    assert touched == []
+    args = node_link.calls[0]["args"]
+    assert args["net"][PROBE_SERVER]["ok"] is False
+    assert len(args["results"]) == 4
+    for r in args["results"]:
+        assert r["ok"] is False and r["ms"] is None
+        assert r["error"] == "пропущено: нет TCP до 203.0.113.5:8443"
+        assert {"server", "transport", "entry", "target"} <= set(r)
+
+
+@pytest.mark.parametrize("with_net", [True, False])
+async def test_slots_checked_when_tcp_ok_or_net_unknown(monkeypatch, with_net):
+    node_link = _FakeNodeLink()
+    if with_net:
+        service = _net_service(monkeypatch, node_link, (b"0.045000", b"", 52))
+    else:
+        _patch_curl(monkeypatch, {"https://1.1.1.1": (b"200", b"", 0)})
+        service = _service(node_link, slots=[_slot(), _reality_slot()])
+    checked: list[str] = []
+    original = service._check_slot
+
+    async def _spy(slot: ProbeSlot, targets: list[str]) -> list[dict[str, Any]]:
+        checked.append(slot.transport)
+        return await original(slot, targets)
+
+    monkeypatch.setattr(service, "_check_slot", _spy)
+    await service._run_and_report(PROBE_SERVER, service._slots, ["https://1.1.1.1"])
+    assert sorted(checked) == ["awg", "reality"]
+    assert ("net" in node_link.calls[0]["args"]) is with_net
+
+
 async def test_net_probe_runs_in_netns_without_socks(monkeypatch):
     node_link = _FakeNodeLink()
     service = _net_service(monkeypatch, node_link, (b"0.045000", b"", 52))
