@@ -426,6 +426,7 @@ async def test_watch_prints_only_messages_after_start(hub, tmp_path, capsys):
     await finish(store, first)
     second = await queue_test_job(store)
     await finish(store, second)
+    await store.queue.ack(CLIENT, await store.queue.max_seq())
     third = await queue_test_job(store)
     calls = []
     inbox_calls = []
@@ -724,3 +725,41 @@ async def test_call_status_does_not_follow_redirects():
         with pytest.raises(snapshot.HubUnavailable):
             await asyncio.to_thread(snapshot.call_status, url, "secret", "j")
     assert seen == []
+
+
+def test_watch_prints_unread_backlog_of_wanted_kinds(tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text("t\n")
+    backlog = [
+        {"seq": 1, "job_id": "j1", "kind": protocol.MSG_QUESTION, "payload": {}, "read": False},
+        {"seq": 2, "job_id": "j1", "kind": protocol.MSG_QUESTION, "payload": {}, "read": True},
+        {"seq": 3, "job_id": "j1", "kind": protocol.MSG_STARTED, "payload": {}, "read": False},
+    ]
+    acks = []
+
+    def call(url, tok, name, arguments):
+        if name == protocol.TOOL_ACK:
+            acks.append(arguments)
+            return {protocol.FIELD_OK: True}
+        if arguments["since"] == 0:
+            return {protocol.FIELD_MESSAGES: backlog, protocol.FIELD_CURSOR: 3}
+        return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: arguments["since"]}
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    code = snapshot.watch_command(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        timeout=0.1,
+        token_path=str(token_file),
+        call=call,
+        sleep=lambda seconds: None,
+        clock=clock,
+    )
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line)["seq"] for line in lines] == [1]
+    assert acks == [{"upto": 1}]

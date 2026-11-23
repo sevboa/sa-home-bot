@@ -437,6 +437,10 @@ def watch_line(message: dict[str, Any]) -> str:
     )
 
 
+def watch_wants(kind: str, kinds: Collection[str] | None) -> bool:
+    return kind in kinds if kinds is not None else kind not in WATCH_DEFAULT_SKIP
+
+
 def watch_command(
     settings: Settings,
     *,
@@ -459,6 +463,7 @@ def watch_command(
     deadline = clock() + timeout
     failures = 0
     cursor = 0
+    printed_upto = 0
     while True:
         try:
             reply = call(url, token, protocol.TOOL_INBOX, {"since": cursor})
@@ -476,11 +481,20 @@ def watch_command(
             cursor = reply.get(protocol.FIELD_CURSOR, cursor)
             if not messages:
                 break
+            for message in messages:
+                if not message.get("read") and watch_wants(message["kind"], kinds):
+                    print(watch_line(message), flush=True)
+                    printed_upto = message["seq"]
             continue
         remaining = deadline - clock()
         if remaining <= 0:
             return 0
         sleep(min(interval, remaining))
+    if printed_upto:
+        try:
+            call(url, token, protocol.TOOL_ACK, {"upto": printed_upto})
+        except (HubUnavailable, SnapshotError):
+            pass
     while True:
         try:
             reply = call(url, token, protocol.TOOL_INBOX, {"since": cursor})
@@ -488,8 +502,7 @@ def watch_command(
             fresh = reply.get(protocol.FIELD_CURSOR, cursor)
             if messages:
                 for message in messages:
-                    kind = message["kind"]
-                    if kind in kinds if kinds is not None else kind not in WATCH_DEFAULT_SKIP:
+                    if watch_wants(message["kind"], kinds):
                         print(watch_line(message), flush=True)
                 call(url, token, protocol.TOOL_ACK, {"upto": fresh})
                 cursor = fresh

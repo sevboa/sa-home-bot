@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import socket
 from pathlib import Path
@@ -34,6 +35,9 @@ log = logging.getLogger(__name__)
 
 EXECUTOR_DIR = "executor"
 RUNNER_CLOSE_TIMEOUT_S = 20.0
+LOCK_FILE = "executor.lock"
+LOCK_LOG_INTERVAL_S = 30.0
+LOCK_POLL_INTERVAL_S = 1.0
 
 
 def build_runner(cfg: DevlabConfig, pause: PauseClock | None = None) -> TestRunner:
@@ -42,6 +46,22 @@ def build_runner(cfg: DevlabConfig, pause: PauseClock | None = None) -> TestRunn
 
 def work_dir_of(cfg: DevlabConfig) -> Path:
     return Path(cfg.work_dir) if cfg.work_dir else Path(cfg.root) / EXECUTOR_DIR
+
+
+async def acquire_work_lock(work_dir: Path):
+    handle = (work_dir / LOCK_FILE).open("a")
+    waited = 0.0
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if waited % LOCK_LOG_INTERVAL_S < LOCK_POLL_INTERVAL_S:
+                log.warning(
+                    "Каталог %s занят другим исполнителем, жду замок (%.0f с)", work_dir, waited
+                )
+            await asyncio.sleep(LOCK_POLL_INTERVAL_S)
+            waited += LOCK_POLL_INTERVAL_S
 
 
 def agent_limits(cfg: DevlabConfig) -> AgentLimits:
@@ -87,6 +107,7 @@ async def run_executor(
     runner = runner or build_runner(cfg, gate)
     work_dir = work_dir_of(cfg)
     work_dir.mkdir(parents=True, exist_ok=True)
+    work_lock = await acquire_work_lock(work_dir)
     hub = ExecutorHub(cfg.hub_url, cfg.hub_token)
     catalog = ModelCatalog(hub)
     gateways = GatewayModels(catalog, cfg.hub_token)
@@ -171,6 +192,7 @@ async def run_executor(
         await server.stop()
         await hub.close()
         log.info("Служба devlab остановлена чисто")
+        work_lock.close()
 
 
 async def beat_forever(

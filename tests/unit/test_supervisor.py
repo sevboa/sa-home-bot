@@ -291,3 +291,36 @@ def test_terminate_gracefully_ctrl_break_on_windows(monkeypatch):
     proc = _FakeProc()
     terminate_gracefully(proc)
     assert proc.calls == [("signal", 21)]
+
+
+async def test_stop_all_terminates_in_parallel_and_kills_stubborn():
+    events = Events()
+    ignoring = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    sup = Supervisor.__new__(Supervisor)
+    stubborn = _service(events, ignoring, stop_timeout_s=0.5)
+    polite = _service(events, "import time; time.sleep(60)")
+    sup.services = {"a": stubborn, "b": polite}
+    await stubborn.start()
+    await polite.start()
+    await events.wait_for(EVENT_SERVICE_STARTED, count=2)
+    await asyncio.sleep(1.0)
+    procs = [stubborn._proc, polite._proc]
+    await sup.stop_all()
+    assert all(proc.returncode is not None for proc in procs)
+
+
+async def test_cancelled_stop_kills_child():
+    events = Events()
+    ignoring = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    svc = _service(events, ignoring, stop_timeout_s=30)
+    await svc.start()
+    await events.wait_for(EVENT_SERVICE_STARTED)
+    proc = svc._proc
+    await asyncio.sleep(1.0)
+    task = asyncio.create_task(svc.stop())
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(proc.wait(), 5)
+    assert proc.returncode is not None

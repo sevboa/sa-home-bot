@@ -281,3 +281,13 @@ async def test_agent_slot_models_creates_workers_with_different_kinds(env, rig, 
 )
 def test_split_memory(memory, slots, expected):
     assert executor_app.split_memory(memory, slots) == expected
+
+
+async def test_work_lock_blocks_second_holder(tmp_path):
+    first = await executor_app.acquire_work_lock(tmp_path)
+    second = asyncio.create_task(executor_app.acquire_work_lock(tmp_path))
+    await asyncio.sleep(0.3)
+    assert not second.done()
+    first.close()
+    handle = await asyncio.wait_for(second, 5)
+    handle.close()

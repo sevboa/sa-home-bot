@@ -123,15 +123,27 @@ class SupervisedService:
                 self.name, exc_info=exc,
             )
 
-    async def stop(self) -> None:
+    def signal_stop(self) -> bool:
         if not self._desired_running:
-            return
+            return False
         self._desired_running = False
         proc = self._proc
         if proc is not None and proc.returncode is None:
             terminate_gracefully(proc)
+        return True
+
+    async def stop(self) -> None:
+        if self.signal_stop():
+            await self.finish_stop()
+
+    async def finish_stop(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self._stop_timeout)
+            except asyncio.CancelledError:
+                proc.kill()
+                raise
             except TimeoutError:
                 log.warning("Служба %s не остановилась за %.0f с — SIGKILL",
                             self.name, self._stop_timeout)
@@ -298,9 +310,15 @@ class Supervisor:
             await svc.start()
 
     async def stop_all(self) -> None:
-        for svc in reversed(list(self.services.values())):
-            with contextlib.suppress(Exception):
-                await svc.stop()
+        pending = [svc for svc in reversed(list(self.services.values())) if svc.signal_stop()]
+        if not pending:
+            return
+        results = await asyncio.gather(
+            *(svc.finish_stop() for svc in pending), return_exceptions=True
+        )
+        for svc, result in zip(pending, results, strict=True):
+            if isinstance(result, Exception):
+                log.warning("Служба %s: ошибка при останове: %r", svc.name, result)
 
     def get(self, name: str) -> SupervisedService | None:
         return self.services.get(name)
