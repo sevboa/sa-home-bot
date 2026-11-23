@@ -477,6 +477,23 @@ async def test_gateway_chat_reminder_follows_prompt_style(model, style, expected
     assert seen["body"]["messages"] == [{"role": "user", "content": f"x\n\n{expected}"}]
 
 
+async def test_gateway_chat_reminder_override_replaces_code_mode_reminder():
+    seen = {}
+
+    async def handler(request):
+        seen["body"] = await request.json()
+        return web.json_response(reply_body("ок", [], {}))
+
+    server, chat = await run_gateway(handler, reminder="файловое напоминание")
+    tools = ToolBox(LocalSandbox(Path(".")), AgentSpec(code_mode=True)).definitions
+    try:
+        await chat.complete([{"role": "user", "content": "x"}], tools)
+    finally:
+        await chat.close()
+        await server.close()
+    assert seen["body"]["messages"] == [{"role": "user", "content": "x\n\nфайловое напоминание"}]
+
+
 async def test_gateway_chat_uses_english_reminder_for_english_definitions():
     seen = {}
 

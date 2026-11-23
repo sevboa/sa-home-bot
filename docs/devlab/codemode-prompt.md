@@ -221,3 +221,22 @@ GLM трижды прочитала исходник прототипа (18 ты
 
 ## Команды в task.md запрещены (2026-11-23)
 Задание jqxqyy (Nemotron, r2) и uswsv8 (r1): в task.md стояло «Команда тестов шага: `python -m pytest -q …`. Финальный прогон: `python -m pytest -q tests/monitor` и `ruff check src tests`». Промпт требует `run_tests`/`check()` и запрещает отдельные вызовы ruff, но задание — сообщение пользователя, и модель слушается его больше: в uswsv8 последние 8 вызовов — отдельные pytest, ruff, git diff. Решение владельца: команд в задании нет. Шаблон `hub/resources/task-template.md` в разделе «Тесты» просит только тестовые файлы, скил `devlab` и `usage.md` запрещают писать `pytest …`, `ruff …`, `python -m …` в шагах, критериях и тестах.
+
+## Промпт файлом, без релиза (2026-11-24)
+
+Вариант промпта Code Mode подключается без выката: профиль исполнителя с `code_mode = true` получает поля
+`intro_file` и `reminder_file` (`DevlabProfileConfig`, пути на ноде исполнителя):
+
+```toml
+[devlab.agent_profiles.executor-code]
+code_mode = true
+intro_file = "/models/sa-home/devlab/prompts/intro.md"
+reminder_file = "/models/sa-home/devlab/prompts/reminder.md"
+```
+
+- `intro_file` целиком заменяет вводный текст Code Mode, который иначе выбирают `remote_style`/`prompt_style`/`prompt_lang` и модель (`build_system(..., intro=)`). Блок «Обстановка» (дата и список команд), правила проекта и текст роли из `prompt_file` добавляются после него как обычно.
+- `reminder_file` заменяет напоминание, которое `GatewayChat` дописывает к сообщениям в Code Mode (фабрика моделей получает его четвёртым аргументом).
+- Файл читается при старте каждого задания: правка действует на следующее задание без рестарта ноды и релиза. Нет файла или не читается: задание падает на старте с понятной причиной, откат к встроенному тексту не делается.
+- Плейсхолдеров нет: встроенные вводный текст и напоминание тоже не форматируются (подстановка `{today}`/`{commands}` относится только к блоку «Обстановка», он остаётся встроенным и добавляется отдельно). Текст файла уходит как есть.
+- Поля не заменяют `prompt_style`/`remote_style`: они определяют определения инструментов и поведение хоста (cb_v4 разметка, r2 `check`), файлы меняют только два текста.
+- Код: `executor/agent_worker.py` (`read_profile_file`, `_code_mode_overrides`), `agent/prompt.py`, `agent/model.py`; тесты: `tests/unit/test_devlab_agent_worker.py`, `tests/unit/test_devlab_agent.py`.

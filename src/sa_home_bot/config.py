@@ -167,6 +167,8 @@ CPUSET_PATTERN = r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
 
 class DevlabProfileConfig(BaseModel):
     prompt_file: str = ""
+    intro_file: str = ""
+    reminder_file: str = ""
     max_steps: int | None = Field(default=None, ge=1)
     max_wall_s: float | None = Field(default=None, gt=0)
     write_prefixes: list[str] = Field(default_factory=list)

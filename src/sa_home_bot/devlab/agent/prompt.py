@@ -574,11 +574,15 @@ def build_system(
     code_mode: bool = False,
     lang: str = "ru",
     style: str = DEFAULT_STYLE,
+    intro: str | None = None,
 ) -> str:
     if style == STYLE_CB_V5:
         lang = EN
     english = code_mode and lang == EN
-    parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]
+    if code_mode:
+        parts = [intro if intro is not None else code_mode_intro_for(model, lang, style)]
+    else:
+        parts = [intro_for(model)]
     if code_mode:
         parts.append(code_mode_setting(commands, today or date.today(), lang))
     elif is_glm(model):

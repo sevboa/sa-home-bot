@@ -102,7 +102,9 @@ class GatewayChat:
         temperature: float | None = None,
         session: aiohttp.ClientSession | None = None,
         prompt_style: str = DEFAULT_STYLE,
+        reminder: str | None = None,
     ) -> None:
+        self._reminder = reminder
         self._url = base_url.rstrip("/") + protocol.HTTP_CHAT_PATH
         self._headers = {"Authorization": f"Bearer {token}", protocol.HEADER_JOB: job_id}
         self._model = model
@@ -124,17 +126,16 @@ class GatewayChat:
         *,
         extra: dict[str, Any] | None = None,
     ) -> ModelReply:
+        code_mode = _has_execute(tools)
+        if code_mode and self._reminder is not None:
+            reminder = self._reminder
+        else:
+            reminder = reminder_for(
+                self._model, code_mode, _prompt_lang(tools), self._prompt_style
+            )
         body: dict[str, Any] = {
             "model": self._model,
-            "messages": with_flow_reminder(
-                messages,
-                reminder_for(
-                    self._model,
-                    _has_execute(tools),
-                    _prompt_lang(tools),
-                    self._prompt_style,
-                ),
-            ),
+            "messages": with_flow_reminder(messages, reminder),
             "tools": tools,
             "user": f"devlab {self._job_id}",
         }
@@ -256,4 +257,4 @@ def parse_reply(data: Any, step: int = 0) -> ModelReply:
     raise failure
 
 
-ModelFactory = Callable[[str, str, str], ChatModel]
+ModelFactory = Callable[[str, str, str, str | None], ChatModel]

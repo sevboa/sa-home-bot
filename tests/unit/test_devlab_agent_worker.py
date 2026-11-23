@@ -94,7 +94,7 @@ def make_worker(
     env.hubs.append(hub)
     return AgentWorker(
         hub,
-        lambda model_name, job_id, style="cb_v3": model,
+        lambda model_name, job_id, style="cb_v3", reminder=None: model,
         sandboxes or (lambda request: LocalSandbox(request.workdir, request.baseline)),
         AgentSettings(
             hub_url=env.hub_url,
@@ -479,7 +479,7 @@ async def test_profile_fields_reach_toolbox_spec(
         },
     )
     styles = []
-    worker._models = lambda name, jid, style: styles.append(style) or model
+    worker._models = lambda name, jid, style, reminder: styles.append(style) or model
     monkeypatch.setattr(agent_worker_module, "AgentLoop", CaptureLoop)
 
     assert await worker.claim_once()
@@ -490,6 +490,50 @@ async def test_profile_fields_reach_toolbox_spec(
     assert captured_spec["spec"].prompt_lang == prompt_lang
     assert captured_spec["spec"].prompt_style == prompt_style
     assert styles == [prompt_style]
+
+
+async def test_profile_intro_and_reminder_files_replace_code_mode_texts(env):
+    intro = env.tmp_path / "intro.md"
+    intro.write_text("свой вводный\n", encoding="utf-8")
+    reminder = env.tmp_path / "reminder.md"
+    reminder.write_text("своё напоминание\n", encoding="utf-8")
+    job_id = await submit_profile(env, "custom")
+    model = ScriptedChatModel()
+    worker = make_worker(
+        env,
+        model,
+        profiles={
+            "custom": DevlabProfileConfig(
+                code_mode=True, intro_file=str(intro), reminder_file=str(reminder)
+            )
+        },
+    )
+    reminders = []
+    worker._models = lambda name, jid, style, rem: reminders.append(rem) or model
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) is not None
+    assert reminders == ["своё напоминание"]
+    assert model.seen[0][0]["content"].startswith("свой вводный")
+
+
+@pytest.mark.parametrize("field", ["intro_file", "reminder_file"])
+async def test_missing_intro_or_reminder_file_fails_job(env, field):
+    job_id = await submit_profile(env, "custom")
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(
+        env,
+        model,
+        profiles={"custom": DevlabProfileConfig(code_mode=True, **{field: "missing-text.md"})},
+    )
+
+    assert await worker.claim_once()
+
+    assert await env.status(job_id) == protocol.STATUS_FAILED
+    failed = await env.store.queue.last_message(job_id, protocol.MSG_FAILED)
+    assert "missing-text.md" in failed.payload[protocol.PAYLOAD_TEXT]
+    assert not model.seen
 
 
 async def test_unreadable_profile_role_fails_job_with_profile_name(env):

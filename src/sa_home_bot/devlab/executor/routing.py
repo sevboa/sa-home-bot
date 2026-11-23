@@ -255,14 +255,26 @@ class GatewayModels:
         self._token = token
         self._session: aiohttp.ClientSession | None = None
 
-    def __call__(self, model: str, job_id: str, prompt_style: str = DEFAULT_STYLE) -> ChatModel:
+    def __call__(
+        self,
+        model: str,
+        job_id: str,
+        prompt_style: str = DEFAULT_STYLE,
+        reminder: str | None = None,
+    ) -> ChatModel:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         session = self._session
 
         def make(entry: CatalogEntry) -> GatewayChat:
             return GatewayChat(
-                entry.url, self._token, model, job_id, session=session, prompt_style=prompt_style
+                entry.url,
+                self._token,
+                model,
+                job_id,
+                session=session,
+                prompt_style=prompt_style,
+                reminder=reminder,
             )
 
         return FailoverChat(self._catalog, make, model, silence=self._silence)
