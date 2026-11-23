@@ -7,11 +7,13 @@ import pytest
 
 from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab.agent.prompt import (
-    CODE_MODE_INTRO,
-    CODE_MODE_INTRO_FAST,
+    CODE_MODE_INTRO_CB_V1,
+    CODE_MODE_INTRO_CB_V2,
+    CODE_MODE_INTRO_CB_V3,
     CODE_MODE_INTRO_REMOTE,
-    CODE_MODE_REMINDER,
-    CODE_MODE_REMINDER_FAST,
+    CODE_MODE_REMINDER_CB_V1,
+    CODE_MODE_REMINDER_CB_V2,
+    CODE_MODE_REMINDER_CB_V3,
     CODE_MODE_REMINDER_REMOTE,
     FLOW_REMINDER,
     GLM_FLOW_REMINDER,
@@ -26,11 +28,13 @@ from sa_home_bot.devlab.agent.prompt import (
     with_flow_reminder,
 )
 from sa_home_bot.devlab.agent.prompt_en import (
-    CODE_MODE_INTRO_EN,
-    CODE_MODE_INTRO_FAST_EN,
+    CODE_MODE_INTRO_CB_V1_EN,
+    CODE_MODE_INTRO_CB_V2_EN,
+    CODE_MODE_INTRO_CB_V3_EN,
     CODE_MODE_INTRO_REMOTE_EN,
-    CODE_MODE_REMINDER_EN,
-    CODE_MODE_REMINDER_FAST_EN,
+    CODE_MODE_REMINDER_CB_V1_EN,
+    CODE_MODE_REMINDER_CB_V2_EN,
+    CODE_MODE_REMINDER_CB_V3_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     RULES_TITLE_EN,
 )
@@ -136,7 +140,7 @@ def test_glm_reminder_is_russian_and_rides_on_step_end():
 @pytest.mark.parametrize(
     ("model", "intro", "reminder"),
     [
-        *[(model, CODE_MODE_INTRO, CODE_MODE_REMINDER) for model in GLM_MODELS],
+        *[(model, CODE_MODE_INTRO_CB_V3, CODE_MODE_REMINDER_CB_V3) for model in GLM_MODELS],
         *[(model, CODE_MODE_INTRO_REMOTE, CODE_MODE_REMINDER_REMOTE) for model in OTHER_MODELS],
     ],
 )
@@ -158,9 +162,9 @@ def test_without_code_mode_build_system_and_reminder_are_unchanged(model):
 
 
 RU_CODE_MODE_TEXTS = [
-    CODE_MODE_INTRO,
+    CODE_MODE_INTRO_CB_V3,
     CODE_MODE_INTRO_REMOTE,
-    CODE_MODE_REMINDER,
+    CODE_MODE_REMINDER_CB_V3,
     CODE_MODE_REMINDER_REMOTE,
 ]
 
@@ -182,7 +186,7 @@ def test_code_mode_texts_have_no_queue_after_script(text):
 
 @pytest.mark.parametrize(
     "text",
-    [CODE_MODE_INTRO, CODE_MODE_INTRO_REMOTE, EXECUTE_DEFINITION["function"]["description"]],
+    [CODE_MODE_INTRO_CB_V3, CODE_MODE_INTRO_REMOTE, EXECUTE_DEFINITION["function"]["description"]],
 )
 def test_code_mode_texts_say_state_persists_between_calls(text):
     assert "не сохраняются" not in text
@@ -191,28 +195,28 @@ def test_code_mode_texts_say_state_persists_between_calls(text):
 
 
 def test_code_mode_second_call_example_uses_variable_from_first():
-    assert 'src = read("src/pkg/a.py"' in CODE_MODE_INTRO
-    assert "src.splitlines" in CODE_MODE_INTRO
+    assert 'src = read("src/pkg/a.py"' in CODE_MODE_INTRO_CB_V3
+    assert "src.splitlines" in CODE_MODE_INTRO_CB_V3
 
 
 @pytest.mark.parametrize(
     ("text", "portions", "stale", "plan"),
     [
-        (CODE_MODE_INTRO, "Пиши порциями", "от трёх до шести", "Код в размышлении не пиши"),
+        (CODE_MODE_INTRO_CB_V3, "Пиши порциями", "от трёх до шести", "Код в размышлении не пиши"),
         (
-            CODE_MODE_INTRO_EN,
+            CODE_MODE_INTRO_CB_V3_EN,
             "Write in portions",
             "three to six",
             "Do not write code in your thinking",
         ),
         (
-            CODE_MODE_REMINDER,
+            CODE_MODE_REMINDER_CB_V3,
             "пиши порциями",
             "Порция работы = два вызова",
             "короткий план без кода",
         ),
         (
-            CODE_MODE_REMINDER_EN,
+            CODE_MODE_REMINDER_CB_V3_EN,
             "write in portions",
             "A portion of work = two calls",
             "short plan without code",
@@ -226,14 +230,14 @@ def test_code_mode_texts_write_in_portions(text, portions, stale, plan):
     assert "в том же вызове: правка теста" not in text
 
 
-@pytest.mark.parametrize("text", [CODE_MODE_INTRO, CODE_MODE_INTRO_EN])
+@pytest.mark.parametrize("text", [CODE_MODE_INTRO_CB_V3, CODE_MODE_INTRO_CB_V3_EN])
 def test_code_mode_example_splits_test_and_code_calls(text):
     assert text.count('red = run_tests(["') == 1
     assert text.index('red = run_tests(["') < text.index('r = run_tests(["')
     assert text.index("old_test = next") < text.index('old = next(r for r in src')
 
 
-@pytest.mark.parametrize("intro", [CODE_MODE_INTRO, CODE_MODE_INTRO_REMOTE])
+@pytest.mark.parametrize("intro", [CODE_MODE_INTRO_CB_V3, CODE_MODE_INTRO_REMOTE])
 def test_code_mode_intro_names_script_and_control_calls(intro):
     for name in (TOOL_SEARCH, TOOL_EXECUTE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
         assert name in intro
@@ -291,14 +295,14 @@ def test_remote_code_mode_example_edits_test_and_code_in_one_script(intro, heade
 
 def test_english_lang_swaps_code_mode_texts_and_titles():
     system = build_system(RULES, "glm", COMMANDS, TODAY, code_mode=True, lang="en")
-    assert system.startswith(CODE_MODE_INTRO_EN)
+    assert system.startswith(CODE_MODE_INTRO_CB_V3_EN)
     remote = build_system(RULES, "other", COMMANDS, TODAY, code_mode=True, lang="en")
     assert remote.startswith(CODE_MODE_INTRO_REMOTE_EN)
     assert reminder_for("other", code_mode=True, lang="en") == CODE_MODE_REMINDER_REMOTE_EN
     assert "## Setting\n- Today is 2026-11-16." in system
     assert f"\n\n{RULES_TITLE_EN}\n\n=== CLAUDE.md ===" in system
     assert RULES_TITLE not in system
-    assert reminder_for("glm", code_mode=True, lang="en") == CODE_MODE_REMINDER_EN
+    assert reminder_for("glm", code_mode=True, lang="en") == CODE_MODE_REMINDER_CB_V3_EN
     assert "## Setting" in code_mode_setting((), TODAY, "en")
     setting = code_mode_setting((), TODAY, "en")
     assert "- run(command) accepts commands starting with: none." in setting
@@ -311,11 +315,23 @@ def test_english_lang_without_code_mode_changes_nothing():
 
 
 STYLE_TEXTS = {
-    ("ru", "full"): (CODE_MODE_INTRO, CODE_MODE_REMINDER),
-    ("ru", "fast"): (CODE_MODE_INTRO_FAST, CODE_MODE_REMINDER_FAST),
-    ("en", "full"): (CODE_MODE_INTRO_EN, CODE_MODE_REMINDER_EN),
-    ("en", "fast"): (CODE_MODE_INTRO_FAST_EN, CODE_MODE_REMINDER_FAST_EN),
+    ("ru", "cb_v1"): (CODE_MODE_INTRO_CB_V1, CODE_MODE_REMINDER_CB_V1),
+    ("ru", "cb_v2"): (CODE_MODE_INTRO_CB_V2, CODE_MODE_REMINDER_CB_V2),
+    ("ru", "cb_v3"): (CODE_MODE_INTRO_CB_V3, CODE_MODE_REMINDER_CB_V3),
+    ("en", "cb_v1"): (CODE_MODE_INTRO_CB_V1_EN, CODE_MODE_REMINDER_CB_V1_EN),
+    ("en", "cb_v2"): (CODE_MODE_INTRO_CB_V2_EN, CODE_MODE_REMINDER_CB_V2_EN),
+    ("en", "cb_v3"): (CODE_MODE_INTRO_CB_V3_EN, CODE_MODE_REMINDER_CB_V3_EN),
 }
+NEIGHBORS_MARKS = {
+    "ru": "Перед записью найди через grep(), как это уже сделано рядом",
+    "en": "Before writing, use grep() to find how it is already done nearby",
+}
+CALC_MARKS = {
+    "ru": ("Ожидаемые значения для теста", "ожидаемые значения тестов тоже считай скриптом"),
+    "en": ("Expected values for a test", "compute the expected test values with a script too"),
+}
+HAS_NEIGHBORS = {"cb_v1": False, "cb_v2": True, "cb_v3": True}
+HAS_CALC = {"cb_v1": False, "cb_v2": False, "cb_v3": True}
 
 
 @pytest.mark.parametrize(("lang", "style"), list(STYLE_TEXTS))
@@ -326,35 +342,44 @@ def test_glm_style_picks_intro_and_reminder(lang, style):
     assert reminder_for("glm", code_mode=True, lang=lang, style=style) == reminder
 
 
-@pytest.mark.parametrize(
-    ("lang", "needle"),
-    [
-        ("ru", "Перед записью найди через grep(), как это уже сделано рядом"),
-        ("en", "Before writing, use grep() to find how it is already done nearby"),
-    ],
-)
-def test_full_glm_has_neighbors_rule_and_fast_does_not(lang, needle):
-    full_intro, full_reminder = STYLE_TEXTS[lang, "full"]
-    fast_intro, fast_reminder = STYLE_TEXTS[lang, "fast"]
-    assert needle in full_intro
-    assert needle not in fast_intro
-    assert "schema.sql" in full_intro
-    assert "schema.sql" not in fast_intro
-    assert "schema.sql" in full_reminder
-    assert "schema.sql" not in fast_reminder
-
-
 @pytest.mark.parametrize(("lang", "style"), list(STYLE_TEXTS))
-def test_fast_text_is_full_text_without_neighbors_block(lang, style):
+def test_style_texts_carry_their_frozen_rules(lang, style):
     intro, reminder = STYLE_TEXTS[lang, style]
-    fast_intro, fast_reminder = STYLE_TEXTS[lang, "fast"]
-    assert len(fast_intro) <= len(intro)
-    assert len(fast_reminder) <= len(reminder)
-    assert reminder.startswith(fast_reminder.split("Финал:")[0].split("Finish:")[0])
+    calc_intro, calc_reminder = CALC_MARKS[lang]
+    assert (NEIGHBORS_MARKS[lang] in intro) is HAS_NEIGHBORS[style]
+    assert ("schema.sql" in reminder) is HAS_NEIGHBORS[style]
+    assert (calc_intro in intro) is HAS_CALC[style]
+    assert (calc_reminder in reminder) is HAS_CALC[style]
+    assert ("tests/fixtures/x/in.json" in intro) is HAS_CALC[style]
 
 
 @pytest.mark.parametrize("lang", ["ru", "en"])
-@pytest.mark.parametrize("style", ["full", "fast"])
+def test_each_style_extends_the_previous_one(lang):
+    v1, v2, v3 = (STYLE_TEXTS[lang, style] for style in ("cb_v1", "cb_v2", "cb_v3"))
+    for older, newer in ((v1, v2), (v2, v3)):
+        assert len(older[0]) < len(newer[0])
+        assert len(older[1]) < len(newer[1])
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_calc_example_uses_only_script_api(lang):
+    intro = STYLE_TEXTS[lang, "cb_v3"][0]
+    block = intro.split("```")[1]
+    assert "import json" in block
+    assert 'read("tests/fixtures/x/in.json")' in block
+    assert "print(" in block
+
+
+def test_default_style_is_cb_v3():
+    assert reminder_for("glm", code_mode=True) == CODE_MODE_REMINDER_CB_V3
+    assert build_system((), "glm", COMMANDS, TODAY, code_mode=True).startswith(
+        CODE_MODE_INTRO_CB_V3
+    )
+    assert DevlabProfileConfig().prompt_style == "cb_v3"
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+@pytest.mark.parametrize("style", ["cb_v1", "cb_v2", "cb_v3"])
 def test_remote_prompt_ignores_style(lang, style):
     remote_intro = CODE_MODE_INTRO_REMOTE_EN if lang == "en" else CODE_MODE_INTRO_REMOTE
     remote_reminder = CODE_MODE_REMINDER_REMOTE_EN if lang == "en" else CODE_MODE_REMINDER_REMOTE
@@ -364,14 +389,18 @@ def test_remote_prompt_ignores_style(lang, style):
 
 @pytest.mark.parametrize("model", ["glm", "flint"])
 def test_style_does_not_touch_non_code_mode(model):
-    assert build_system(RULES, model, COMMANDS, TODAY, style="fast") == build_system(
+    assert build_system(RULES, model, COMMANDS, TODAY, style="cb_v1") == build_system(
         RULES, model, COMMANDS, TODAY
     )
-    assert reminder_for(model, False, "ru", "fast") == reminder_for(model)
+    assert reminder_for(model, False, "ru", "cb_v1") == reminder_for(model)
 
 
-def test_profile_prompt_style_defaults_to_full_and_rejects_unknown():
-    assert DevlabProfileConfig().prompt_style == "full"
-    assert DevlabProfileConfig(prompt_style="fast").prompt_style == "fast"
+@pytest.mark.parametrize("style", ["cb_v1", "cb_v2", "cb_v3"])
+def test_profile_accepts_prompt_style(style):
+    assert DevlabProfileConfig(prompt_style=style).prompt_style == style
+
+
+@pytest.mark.parametrize("style", ["full", "fast", "slow"])
+def test_profile_rejects_unknown_prompt_style(style):
     with pytest.raises(ValueError):
-        DevlabProfileConfig(prompt_style="slow")
+        DevlabProfileConfig(prompt_style=style)

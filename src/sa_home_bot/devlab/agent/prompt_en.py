@@ -86,6 +86,19 @@ _CODE_MODE_NEIGHBORS_EN = (
     "it instead of writing your own; never write one thing twice. Look for the example in "
     "the same read call, batched with read(), not in a separate call.\n"
 )
+_CODE_MODE_CALC_EN = (
+    "Expected values for a test (counter deltas, percentages, sums, dates, parsing a "
+    "reference) are not to be worked out in your thinking: compute them with a script from "
+    "the input data or the reference and print them, and put the result into the test. "
+    "For example:\n"
+    "```\n"
+    "import json\n"
+    "data = json.loads(read(\"tests/fixtures/x/in.json\"))\n"
+    "a, b = data[\"before\"], data[\"after\"]\n"
+    "print({k: b[k] - a[k] for k in a})\n"
+    "```\n"
+    "A minute in a script instead of ten in thinking.\n"
+)
 _CODE_MODE_RUNS_EN = (
     "\n"
     "## How code runs\n"
@@ -181,7 +194,7 @@ _CODE_MODE_TAIL_EN = (
     "Every reply is a tool call, usually execute. Start the code with a comment stating "
     "the intent: what this whole call will do."
 )
-CODE_MODE_INTRO_FAST_EN = (
+CODE_MODE_INTRO_CB_V1_EN = (
     _CODE_MODE_HEAD_EN
     + _CODE_MODE_COST_GLM_EN
     + _CODE_MODE_RUNS_EN
@@ -190,9 +203,20 @@ CODE_MODE_INTRO_FAST_EN = (
     + _CODE_MODE_EXAMPLE_GLM_EN
     + _CODE_MODE_TAIL_EN
 )
-CODE_MODE_INTRO_EN = (
+CODE_MODE_INTRO_CB_V2_EN = (
     _CODE_MODE_HEAD_EN
     + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_NEIGHBORS_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_GLM_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_GLM_EN
+    + _CODE_MODE_TAIL_EN
+)
+CODE_MODE_INTRO_CB_V3_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_CALC_EN
     + _CODE_MODE_NEIGHBORS_EN
     + _CODE_MODE_RUNS_EN
     + _CODE_MODE_RED_GLM_EN
@@ -235,8 +259,15 @@ _REMINDER_GLM_FINISH_EN = (
     "Finish: last edits, run_tests(), run(\"ruff check ...\") and "
     "finish(\"summary\") - in one call; finish closes all steps, step_done() is optional."
 )
-CODE_MODE_REMINDER_FAST_EN = _REMINDER_GLM_HEAD_EN + _REMINDER_GLM_FINISH_EN
-CODE_MODE_REMINDER_EN = (
+_REMINDER_GLM_HEAD_CB_V3_EN = (
+    _REMINDER_GLM_HEAD_EN.removesuffix("with a script. ")
+    + "with a script, and compute the expected test values with a script too. "
+)
+CODE_MODE_REMINDER_CB_V1_EN = _REMINDER_GLM_HEAD_EN + _REMINDER_GLM_FINISH_EN
+CODE_MODE_REMINDER_CB_V3_EN = (
+    _REMINDER_GLM_HEAD_CB_V3_EN + _REMINDER_GLM_NEIGHBORS_EN + _REMINDER_GLM_FINISH_EN
+)
+CODE_MODE_REMINDER_CB_V2_EN = (
     _REMINDER_GLM_HEAD_EN + _REMINDER_GLM_NEIGHBORS_EN + _REMINDER_GLM_FINISH_EN
 )
 CODE_MODE_REMINDER_REMOTE_EN = (
