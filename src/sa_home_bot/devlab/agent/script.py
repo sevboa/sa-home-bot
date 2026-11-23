@@ -172,6 +172,53 @@ print(r)
 if r.ok:
     finish("load возвращает 2; тесты, ruff и docs готовы")"""
 
+SCRIPT_RUN_TESTS_R2_ABOUT = (
+    "pytest по списку путей тестов (можно путь::имя_теста); вернёт Result; зелёный прогон — одна "
+    "строка итога, красный — только упавшие тесты с коротким трейсом; если упал тест, "
+    "существовавший в базе задания, в output строка «сначала проверь код, а не тест»"
+)
+SCRIPT_CHECK_R2 = (
+    "check",
+    "def check(paths: list[str] | None = None) -> Result: ...",
+    "одним вызовом: узкие тесты (paths или изменённые тестовые файлы задания) и стражи проекта "
+    "(ruff и др.); Result со сводкой «OK …» или «FAIL …» по каждой проверке",
+)
+
+
+def with_check_api(
+    api: tuple[tuple[str, str, str], ...],
+    run_tests_about: str,
+    check: tuple[str, str, str],
+) -> tuple[tuple[str, str, str], ...]:
+    result: list[tuple[str, str, str]] = []
+    for name, stub, about in api:
+        if name == "run_tests":
+            result.append((name, stub, run_tests_about))
+            result.append(check)
+        else:
+            result.append((name, stub, about))
+    return tuple(result)
+
+
+SCRIPT_API_R2 = with_check_api(SCRIPT_API, SCRIPT_RUN_TESTS_R2_ABOUT, SCRIPT_CHECK_R2)
+SCRIPT_R2_READ_EXAMPLE = """# Намерение: прочитать всё нужное для задачи за один вызов
+files = read_many(["src/pkg/a.py", "tests/test_a.py", "docs/pkg.md"])
+for path, text in files.items():
+    print(f"=== {path} ===")
+    print(text)
+print("\\n".join(grep(r"load", "src/pkg", context=2)))"""
+SCRIPT_R2_EDIT_EXAMPLE = """# Намерение: тест, правка load, docs, проверка и finish одним вызовом
+src, test = files["src/pkg/a.py"], files["tests/test_a.py"]
+old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
+edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
+edit("src/pkg/a.py", old, old.replace("1", "2"))
+write("docs/pkg.md", files["docs/pkg.md"] + "\\n- 2026-11-23: load возвращает 2.\\n")
+r = check(["tests/test_a.py"])
+print(r)
+if r.ok:
+    finish("load возвращает 2; тесты, ruff и стражи зелёные")"""
+
 PROLOGUE = r'''import ast
 import builtins
 import fnmatch
@@ -638,7 +685,36 @@ def _clip(text):
     return f"[показан конец: {limit} симв. из {len(text)}]\n{text[-limit:]}"
 
 
+_PROGRESS = re.compile(r"^[.FEsxX]+(\s*\[\s*\d+%\])?\s*$")
+
+
+def _is_pytest(argv):
+    return argv[:1] == ["pytest"] or argv[1:3] == ["-m", "pytest"]
+
+
+def _compact_flags(argv):
+    flags = []
+    if not any(arg.startswith("--tb") for arg in argv):
+        flags.append("--tb=short")
+    if not any(arg == "--quiet" or re.match(r"-q+$", arg) for arg in argv):
+        flags.append("-q")
+    if "no:cacheprovider" not in argv:
+        flags += ["-p", "no:cacheprovider"]
+    return flags
+
+
+def _compact_pytest(text, code):
+    lines = text.splitlines()
+    if code == 0:
+        filled = [line for line in lines if line.strip()]
+        return filled[-1] if filled else ""
+    return "\n".join(line for line in lines if not _PROGRESS.match(line))
+
+
 def _execute(argv, limit):
+    compact = bool(_CONFIG.get("compact_tests")) and _is_pytest(argv)
+    if compact:
+        argv = [*argv, *_compact_flags(argv)]
     left = _CONFIG["budget"] - (time.monotonic() - _START)
     timeout = min(limit, left)
     if timeout < 1:
@@ -667,7 +743,10 @@ def _execute(argv, limit):
     finally:
         _BASE.clear()
         _BASE.update({k: v for k, v in _stats().items() if k not in _BACKUPS})
-    return Result(process.returncode, _clip(output.decode(errors="replace")))
+    text = output.decode(errors="replace")
+    if compact:
+        text = _compact_pytest(text, process.returncode)
+    return Result(process.returncode, _clip(text))
 
 
 def run(command):
@@ -708,6 +787,33 @@ def run_tests(paths):
         result = Result(result.code, f"{result.output}\n{_BASE_TEST_NOTE}")
     _STATE["green"] = result.ok
     return result
+
+
+def _section(label, result):
+    if result.ok:
+        filled = [line for line in result.output.splitlines() if line.strip()]
+        return f"OK {label}: {filled[-1] if filled else 'ок'}"
+    return f"FAIL {label}:\n{result.output}"
+
+
+def check(paths=None):
+    tests = [paths] if isinstance(paths, str) else list(paths or [])
+    if not tests:
+        tests = _call("changed_tests", {}).get("value") or []
+    sections = []
+    ok = True
+    if tests and _CONFIG["test_argv"]:
+        result = run_tests(tests)
+        ok = ok and result.ok
+        sections.append(_section("тесты " + " ".join(tests), result))
+    for argv in _CONFIG.get("checks", []):
+        result = _execute(argv, _CONFIG["command_timeout"])
+        ok = ok and result.ok
+        sections.append(_section(" ".join(argv), result))
+    _STATE["green"] = ok
+    if not sections:
+        return Result(0, "нечего проверять: изменённых тестов и стражей нет")
+    return Result(0 if ok else 1, "\n".join(sections))
 
 
 def _finalize():
@@ -872,7 +978,8 @@ def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
         "max_matches": SCRIPT_GREP_MAX_MATCHES,
         "names": [name for name, _, _ in SCRIPT_API]
         + ["Result", "EditError"]
-        + (["glob", "todo"] if config.get("claude_read") else []),
+        + (["glob", "todo"] if config.get("claude_read") else [])
+        + (["check"] if config.get("compact_tests") else []),
         "filename": SCRIPT_FILENAME,
     }
     source = f"_CONFIG = json.loads({json.dumps(full)!r})\n"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 
+from sa_home_bot.devlab.agent.remote import REMOTE_R1, REMOTE_R2
 from sa_home_bot.devlab.executor.spec import (
     DEFAULT_COMMAND_TIMEOUT_S,
     DEFAULT_NARROW_TEST_TIMEOUT_S,
@@ -28,10 +29,15 @@ class AgentSpec:
     code_mode: bool = False
     prompt_lang: str = "ru"
     prompt_style: str = "cb_v3"
+    remote_style: str = REMOTE_R1
     command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S
     test_timeout_s: float = DEFAULT_TEST_TIMEOUT_S
     narrow_test_timeout_s: float = DEFAULT_NARROW_TEST_TIMEOUT_S
     output_chars: int = DEFAULT_OUTPUT_CHARS
+
+    @property
+    def chat_style(self) -> str:
+        return REMOTE_R2 if self.remote_style == REMOTE_R2 else self.prompt_style
 
     @property
     def script_timeout_s(self) -> float:

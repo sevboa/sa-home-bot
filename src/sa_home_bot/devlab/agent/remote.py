@@ -1,0 +1,6 @@
+from __future__ import annotations
+
+REMOTE_R1 = "r1"
+REMOTE_R2 = "r2"
+SCRIPT_OUTPUT_MAX_CHARS_R2 = 70_000
+SCRIPT_RUN_OUTPUT_CHARS_R2 = 20_000

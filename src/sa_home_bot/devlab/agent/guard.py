@@ -1,27 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from pathlib import PurePosixPath
 
 from sa_home_bot.devlab.agent.sandbox import Sandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
-from sa_home_bot.devlab.agent.tools import without_xdist
+from sa_home_bot.devlab.agent.tools import changed_test_files, without_xdist
 
 VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
 VERDICT_REWORK = "ВЕРДИКТ: доработать"
-
-
-def changed_test_files(digests: Mapping[str, str]) -> list[str]:
-    return sorted(
-        path
-        for path, digest in digests.items()
-        if digest and _is_test_file(PurePosixPath(path).name)
-    )
-
-
-def _is_test_file(name: str) -> bool:
-    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 
 class FinishGuard:

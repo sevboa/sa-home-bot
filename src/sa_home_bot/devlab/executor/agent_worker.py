@@ -21,7 +21,8 @@ from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus, Crane
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.agent.notes import NOTES_SUFFIX, AgentNotes, prune_notes
-from sa_home_bot.devlab.agent.prompt import build_system, build_task
+from sa_home_bot.devlab.agent.prompt import build_system, build_task, is_glm
+from sa_home_bot.devlab.agent.remote import REMOTE_R1
 from sa_home_bot.devlab.agent.repo import PUSH_INTERVAL_S, AgentRepo, agent_author
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, ManagedSandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -485,6 +486,7 @@ class AgentWorker(WorkerLoops):
                 code_mode=profile.code_mode,
                 prompt_lang=profile.prompt_lang,
                 prompt_style=profile.prompt_style,
+                remote_style=REMOTE_R1 if is_glm(job.model) else profile.remote_style,
             )
         role_text = self._role_text(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
@@ -501,7 +503,7 @@ class AgentWorker(WorkerLoops):
         rules = await self._rules(run, project, repo.base, external)
         limits = self._limits_for(spend, entries, profile)
         loop = AgentLoop(
-            MeteredChat(self._models(job.model, job.id, spec.prompt_style), spend),
+            MeteredChat(self._models(job.model, job.id, spec.chat_style), spend),
             ToolBox(
                 sandbox,
                 spec,
@@ -524,7 +526,7 @@ class AgentWorker(WorkerLoops):
             spec.allowed_commands,
             code_mode=spec.code_mode,
             lang=spec.prompt_lang,
-            style=spec.prompt_style,
+            style=spec.chat_style,
         )
         if role_text is not None:
             system = system + "\n\n" + role_text

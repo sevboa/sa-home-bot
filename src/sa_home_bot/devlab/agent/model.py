@@ -15,6 +15,7 @@ from sa_home_bot.devlab.agent.prompt_en import EN
 from sa_home_bot.devlab.agent.tools import (
     EXECUTE_DEFINITION_CB_V5,
     EXECUTE_DEFINITION_EN,
+    EXECUTE_DEFINITION_R2_EN,
     TOOL_EXECUTE,
 )
 from sa_home_bot.devlab.usage import usage_cost
@@ -33,7 +34,8 @@ def _has_execute(tools: list[dict[str, Any]]) -> bool:
 
 
 def _prompt_lang(tools: list[dict[str, Any]]) -> str:
-    return EN if EXECUTE_DEFINITION_EN in tools or EXECUTE_DEFINITION_CB_V5 in tools else "ru"
+    english = (EXECUTE_DEFINITION_EN, EXECUTE_DEFINITION_CB_V5, EXECUTE_DEFINITION_R2_EN)
+    return EN if any(definition in tools for definition in english) else "ru"
 
 
 class ModelError(Exception):

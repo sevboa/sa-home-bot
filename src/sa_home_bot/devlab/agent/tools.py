@@ -6,8 +6,9 @@ import re
 import shlex
 import tokenize
 from collections import Counter
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from typing import Any
 
 from sa_home_bot.devlab.agent.context import CHARS_PER_TOKEN
@@ -21,11 +22,17 @@ from sa_home_bot.devlab.agent.prompt_en import (
     EXECUTE_DESCRIPTION_EN,
     SCRIPT_API_CB_V5_EN,
     SCRIPT_API_EN,
+    SCRIPT_API_R2_EN,
     SCRIPT_CLIPPED_HINT_CB_V5_EN,
     SEARCH_DESCRIPTION_EN,
     SEARCH_QUERY_EN,
 )
 from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5, RepeatLog
+from sa_home_bot.devlab.agent.remote import (
+    REMOTE_R2,
+    SCRIPT_OUTPUT_MAX_CHARS_R2,
+    SCRIPT_RUN_OUTPUT_CHARS_R2,
+)
 from sa_home_bot.devlab.agent.sandbox import (
     Sandbox,
     SandboxPathError,
@@ -35,6 +42,7 @@ from sa_home_bot.devlab.agent.sandbox import (
 )
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_API,
+    SCRIPT_API_R2,
     SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
     SCRIPT_OUTPUT_CHARS,
@@ -102,9 +110,23 @@ def read_max_lines(window_tokens: int) -> int:
     return max(READ_MIN_LINES, min(READ_MAX_LINES_CAP, window_tokens // READ_TOKENS_PER_LINE))
 
 
-def script_output_chars(window_tokens: int, floor: int) -> int:
+def script_output_chars(
+    window_tokens: int, floor: int, ceiling: int = SCRIPT_OUTPUT_MAX_CHARS
+) -> int:
     scaled = int(window_tokens * CHARS_PER_TOKEN * SCRIPT_OUTPUT_WINDOW_SHARE)
-    return max(floor, min(SCRIPT_OUTPUT_MAX_CHARS, scaled))
+    return max(floor, min(ceiling, scaled))
+
+
+def changed_test_files(digests: Mapping[str, str]) -> list[str]:
+    return sorted(
+        path
+        for path, digest in digests.items()
+        if digest and _is_test_file(PurePosixPath(path).name)
+    )
+
+
+def _is_test_file(name: str) -> bool:
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 
 def _with_final_newline(data: bytes) -> bytes | None:
@@ -264,6 +286,25 @@ EXECUTE_DEFINITION_EN = _schema(
 )
 
 
+_EXECUTE_HEAD_RU = EXECUTE_DEFINITION["function"]["description"].removesuffix(api_stubs(""))
+EXECUTE_DEFINITION_R2 = _schema(
+    TOOL_EXECUTE,
+    _EXECUTE_HEAD_RU.replace(
+        f"до {SCRIPT_OUTPUT_CHARS} симв.", f"до {SCRIPT_OUTPUT_MAX_CHARS_R2} симв."
+    )
+    + api_stubs("", SCRIPT_API_R2),
+    code=_text("Код Python"),
+)
+EXECUTE_DEFINITION_R2_EN = _schema(
+    TOOL_EXECUTE,
+    EXECUTE_DESCRIPTION_EN.replace(
+        f"up to {SCRIPT_OUTPUT_CHARS} chars", f"up to {SCRIPT_OUTPUT_MAX_CHARS_R2} chars"
+    )
+    + api_stubs("", SCRIPT_API_R2_EN),
+    code=_text(EXECUTE_CODE_EN),
+)
+
+
 def _argument(args: dict[str, Any], key: str, kind: type, default: Any = None) -> Any:
     value = args.get(key, default)
     if value is None and default is None and kind is not int:
@@ -303,8 +344,10 @@ class ToolBox:
         self._window_tokens = window_tokens
         self._sandbox = sandbox
         self._spec = spec
-        self._markup = Markup() if spec.code_mode and spec.prompt_style == STYLE_CB_V4 else None
-        cb_v5 = spec.code_mode and spec.prompt_style == STYLE_CB_V5
+        self._remote_r2 = spec.code_mode and spec.remote_style == REMOTE_R2
+        cb_v4 = spec.code_mode and spec.prompt_style == STYLE_CB_V4 and not self._remote_r2
+        self._markup = Markup() if cb_v4 else None
+        cb_v5 = spec.code_mode and spec.prompt_style == STYLE_CB_V5 and not self._remote_r2
         self._repeats = RepeatLog() if cb_v5 else None
         self._calls = 0
         self._read_lines = read_lines
@@ -345,6 +388,10 @@ class ToolBox:
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
+        if self._remote_r2:
+            if self._spec.prompt_lang == EN:
+                return [SEARCH_DEFINITION_EN, EXECUTE_DEFINITION_R2_EN]
+            return [SEARCH_DEFINITION, EXECUTE_DEFINITION_R2]
         if self._repeats is not None:
             return [SEARCH_DEFINITION_EN, EXECUTE_DEFINITION_CB_V5]
         if self._spec.code_mode:
@@ -494,13 +541,15 @@ class ToolBox:
 
     async def _search(self, args: dict[str, Any]) -> str:
         api = SCRIPT_API_EN if self._spec.prompt_lang == EN else SCRIPT_API
-        if self._repeats is not None:
+        if self._remote_r2:
+            api = SCRIPT_API_R2_EN if self._spec.prompt_lang == EN else SCRIPT_API_R2
+        elif self._repeats is not None:
             api = SCRIPT_API_CB_V5_EN
         return api_stubs(_argument(args, "query", str, ""), api) or SEARCH_EMPTY
 
     def _script_config(self) -> dict[str, Any]:
         spec = self._spec
-        return {
+        config = {
             "closed": list(spec.forbidden_paths + spec.secret_paths),
             "write_prefixes": list(spec.write_prefixes),
             "allowed": self._allowed(),
@@ -512,6 +561,13 @@ class ToolBox:
             "markup": self._markup is not None,
             "claude_read": self._repeats is not None,
         }
+        if self._remote_r2:
+            config.update(
+                compact_tests=True,
+                checks=[list(argv) for argv in spec.checks],
+                output_chars=max(spec.output_chars, SCRIPT_RUN_OUTPUT_CHARS_R2),
+            )
+        return config
 
     async def _comment_lines(self) -> list[str]:
         if await self._sandbox.read_bytes(COMMENTS_RULE_MARKER) is None:
@@ -644,6 +700,8 @@ class ToolBox:
             return self._serve_todo(args)
         if name == "reads" and isinstance(args, dict):
             return self._serve_reads(args)
+        if name == "changed_tests":
+            return {"ok": True, "value": changed_test_files(await self._sandbox.changed_digests())}
         if name == "diff":
             text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
@@ -692,7 +750,9 @@ class ToolBox:
         run = parse_reply(reply.data)
         limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
         hint = SCRIPT_CLIPPED_HINT
-        if self._repeats is not None:
+        if self._remote_r2:
+            limit = script_output_chars(self._window_tokens, limit, SCRIPT_OUTPUT_MAX_CHARS_R2)
+        elif self._repeats is not None:
             limit = script_output_chars(self._window_tokens, limit)
             hint = SCRIPT_CLIPPED_HINT_CB_V5_EN
         if run.failed:

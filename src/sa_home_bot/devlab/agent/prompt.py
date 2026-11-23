@@ -12,11 +12,13 @@ from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_CB_V3_EN,
     CODE_MODE_INTRO_CB_V4_EN,
     CODE_MODE_INTRO_CB_V5_EN,
+    CODE_MODE_INTRO_R2_EN,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_CB_V1_EN,
     CODE_MODE_REMINDER_CB_V2_EN,
     CODE_MODE_REMINDER_CB_V3_EN,
     CODE_MODE_REMINDER_CB_V5_EN,
+    CODE_MODE_REMINDER_R2_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
@@ -24,12 +26,15 @@ from sa_home_bot.devlab.agent.prompt_en import (
     RULES_TITLE_EN,
 )
 from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5
+from sa_home_bot.devlab.agent.remote import REMOTE_R2, SCRIPT_OUTPUT_MAX_CHARS_R2
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_CODE_EXAMPLE,
     SCRIPT_EDIT_EXAMPLE,
     SCRIPT_FINAL_EXAMPLE,
     SCRIPT_MARKUP_EXAMPLE,
     SCRIPT_OUTPUT_CHARS,
+    SCRIPT_R2_EDIT_EXAMPLE,
+    SCRIPT_R2_READ_EXAMPLE,
     SCRIPT_READ_EXAMPLE,
     SCRIPT_TEST_EXAMPLE,
 )
@@ -357,6 +362,84 @@ CODE_MODE_INTRO_REMOTE = (
     + _CODE_MODE_EXAMPLE_REMOTE
     + _CODE_MODE_TAIL
 )
+_CODE_MODE_COST_R2 = (
+    "Запросов к модели в сутки мало: каждый вызов execute расходует суточный лимит. "
+    "Размышление и токены бесплатны. Цель — как можно меньше вызовов на задание, обычно "
+    "три–четыре. Прежде чем писать вызов, продумай решение целиком.\n"
+    "Правила:\n"
+    "1. Первый вызов — разведка. Прочитай сразу ВСЁ нужное для задачи одним скриптом: все "
+    "файлы из task.md, эталоны, соседние образцы (grep() по соседним модулям и тестам). Файлы "
+    "печатай целиком: вывод до ~"
+    f"{SCRIPT_OUTPUT_MAX_CHARS_R2} симв. Не читай по файлу на вызов.\n"
+    "2. Каждый вызов, который правит код, в том же скрипте сразу гоняет тесты и печатает "
+    "итог. Правка и прогон никогда не разносятся по разным вызовам.\n"
+    "3. Несколько правок одного файла, а также правки нескольких файлов и тестов — одним "
+    "вызовом.\n"
+    "4. Тесты зелёные — сразу finish(): он сам проверит ruff, стражи и полный набор и вернёт "
+    "списком всё, что не так. ruff, diff() и git diff отдельными вызовами не гоняй.\n"
+    "5. Не перепроверяй уже проверенное: прочитанное бери из переменных, зелёный прогон не "
+    "повторяй.\n"
+    "Вызов упал или тесты красные: следующий вызов чинит именно это по выводу и снова в том "
+    "же скрипте прогоняет тесты.\n"
+)
+_CODE_MODE_RUNS_R2 = (
+    "\n"
+    "## Как исполняется код\n"
+    "- Как обычный Python, сразу и по порядку: edit() и write() меняют файл немедленно. "
+    "Если фрагмент не найден, edit() бросает EditError и скрипт останавливается на этой "
+    "строке; правки до неё уже применены.\n"
+    "- run_tests(paths), run(command) и check() запускают процесс сразу и возвращают Result: "
+    "r.ok, r.code, r.output. Вывод pytest сжат: зелёный — одна строка итога, красный — только "
+    "упавшие тесты с коротким трейсом.\n"
+    "- check(paths=None) за один вызов гоняет узкие тесты (paths или изменённые тестовые "
+    "файлы задания) и стражи проекта (ruff и др.) и печатает сводку «OK»/«FAIL» по каждой "
+    "проверке.\n"
+    "- Процесс один на задание, как ядро Jupyter: переменные, импорты и функции из прошлых "
+    "вызовов сохраняются. Читай в переменные (files = read_many(...)) и бери строки для "
+    "edit() из переменных. После таймаута или падения процесса состояние сбрасывается, об "
+    "этом скажет вывод; файлы на диске остаются.\n"
+    "- Ты видишь print() и значение последнего выражения. Вывод длиннее "
+    f"{SCRIPT_OUTPUT_MAX_CHARS_R2} симв. (меньше при малом окне) обрезается, видно начало.\n"
+    "- После edit() файл не перечитывай: ошибку покажет EditError. diff() не нужен.\n"
+    "- Процессы — только через run(), run_tests() и check(); subprocess и os.system "
+    "запрещены.\n"
+    "\n"
+    "## Шаги и завершение\n"
+    "- finish(\"итог\") закрывает все шаги задания и завершает его; ставь его в тот же вызов, "
+    "что последние правки и проверку, под условием if r.ok. Страж проверит дифф, тесты и "
+    "правила проекта; при отказе он вернёт сразу все замечания списком: исправь их все одним "
+    "вызовом и снова вызови finish().\n"
+    "- step_done() не нужен.\n"
+)
+_CODE_MODE_EXAMPLE_R2 = (
+    "## Пример задания из трёх шагов: два вызова (третий — только при красном)\n"
+    "Шаги: 1 — тест на новое поведение, 2 — правка кода, 3 — запись в docs/.\n"
+    "\n"
+    "Вызов 1 — разведка, всё нужное сразу:\n"
+    f"{SCRIPT_R2_READ_EXAMPLE}\n"
+    "\n"
+    "Вызов 2 — все правки, проверка и finish в одном скрипте; строки для edit() берутся из "
+    "переменных вызова 1:\n"
+    f"{SCRIPT_R2_EDIT_EXAMPLE}\n"
+    "\n"
+    "Вызов 3 — только если проверка красная: правки по выводу, снова check() и finish() в "
+    "том же скрипте.\n"
+    "\n"
+)
+CODE_MODE_INTRO_R2 = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_R2
+    + _CODE_MODE_RUNS_R2
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_R2
+    + _CODE_MODE_TAIL
+)
+CODE_MODE_REMINDER_R2 = (
+    "[Напоминание] Запросов в сутки мало, токены бесплатны. Читай всё нужное одним "
+    "скриптом; правку и прогон тестов делай в одном вызове (check() или run_tests()); "
+    "зелёное — сразу finish(), он сам проверит ruff и стражи; ruff и diff отдельными "
+    "вызовами не гоняй; проверенное не перепроверяй."
+)
 CODE_MODE_SETTING = (
     "- Сегодня {today}. Эту дату ставь у новых находок в `docs/`.\n"
     "- run(команда) принимает команды, которые начинаются так: {commands}. Команда пишется "
@@ -412,12 +495,12 @@ REMARKS_TITLE = "Замечания владельца к этой работе:
 CONTINUATION_LIMIT = 100
 
 
-def _is_glm(model: str) -> bool:
+def is_glm(model: str) -> bool:
     return "glm" in model.lower()
 
 
 def intro_for(model: str) -> str:
-    return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
+    return GLM_INTRO if is_glm(model) else SYSTEM_INTRO
 
 
 CODE_MODE_TEXTS = {
@@ -436,6 +519,10 @@ CODE_MODE_TEXTS = {
         STYLE_CB_V5: (CODE_MODE_INTRO_CB_V5_EN, CODE_MODE_REMINDER_CB_V5_EN),
     },
 }
+CODE_MODE_R2_TEXTS = {
+    "ru": (CODE_MODE_INTRO_R2, CODE_MODE_REMINDER_R2),
+    EN: (CODE_MODE_INTRO_R2_EN, CODE_MODE_REMINDER_R2_EN),
+}
 CODE_MODE_REMOTE_TEXTS = {
     "ru": (CODE_MODE_INTRO_REMOTE, CODE_MODE_REMINDER_REMOTE),
     EN: (CODE_MODE_INTRO_REMOTE_EN, CODE_MODE_REMINDER_REMOTE_EN),
@@ -444,8 +531,8 @@ CODE_MODE_REMOTE_TEXTS = {
 
 def _code_mode_texts(model: str, lang: str, style: str) -> tuple[str, str]:
     key = EN if lang == EN else "ru"
-    if not _is_glm(model):
-        return CODE_MODE_REMOTE_TEXTS[key]
+    if not is_glm(model):
+        return CODE_MODE_R2_TEXTS[key] if style == REMOTE_R2 else CODE_MODE_REMOTE_TEXTS[key]
     return CODE_MODE_TEXTS[key][style]
 
 
@@ -458,7 +545,7 @@ def reminder_for(
 ) -> str:
     if code_mode:
         return _code_mode_texts(model, lang, style)[1]
-    return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
+    return GLM_FLOW_REMINDER if is_glm(model) else FLOW_REMINDER
 
 
 def _setting(
@@ -494,7 +581,7 @@ def build_system(
     parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]
     if code_mode:
         parts.append(code_mode_setting(commands, today or date.today(), lang))
-    elif _is_glm(model):
+    elif is_glm(model):
         parts.append(glm_setting(commands, today or date.today()))
     if rules:
         parts.append(RULES_TITLE_EN if english else RULES_TITLE)
