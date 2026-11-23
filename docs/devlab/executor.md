@@ -375,5 +375,6 @@
 (`guard`); отмена превращается в `ModelError(silence=True, transient=True)`: агент ждёт
 `SILENCE_WAIT_S` и повторяет шаг, раунд не тратится. Разрыв соединения с локальной моделью при
 действующей тишине тоже считается тишиной, а не отказом шлюза. Удалённые модели не затрагиваются.
-Отмену самого задания (`Task.cancelling()`) `guard` не перехватывает. Нужен рестарт службы
-исполнителя devlab (sa-home-devlab-executor на mycraft) и процесса strata-switch.
+Отмену самого задания (`Task.cancelling()`) `guard` не перехватывает. При выкате нужен рестарт
+ноды mycraft (`restart_node`: исполнитель живёт в службе `devlab` внутри `sa-home-node.service`) и
+пользовательского юнита `strata-switch.service`.
