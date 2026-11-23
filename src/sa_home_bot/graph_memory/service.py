@@ -5,6 +5,9 @@ import logging
 import socket
 from typing import Any
 
+import openai
+from pydantic import ValidationError
+
 from sa_home_bot import __version__
 from sa_home_bot.chat_scope import require_chat_id
 from sa_home_bot.config import LlmConfig, Settings
@@ -43,6 +46,9 @@ from sa_home_bot.utils.clock import utc_now
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
+NO_WAKE_HEADERS = {"X-No-Wake": "1"}
+COMPANION_ASLEEP_STATUS = 503
+COMPANION_ASLEEP_CODE = "companion_asleep"
 IDLE_POLL_S = 5.0
 RETRY_BACKOFF_S = 15.0
 DEFAULT_SEARCH_RESULTS = 5
@@ -64,6 +70,14 @@ EXTRACTION_TEMPERATURE = 0.0
 OLLAMA_OPENAI_URL = "http://127.0.0.1:11434/v1"
 OLLAMA_API_KEY = "ollama"
 NO_THINKING_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def is_companion_asleep(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, openai.APIStatusError)
+        and exc.status_code == COMPANION_ASLEEP_STATUS
+        and exc.body == COMPANION_ASLEEP_CODE
+    )
 
 
 def extraction_endpoint(llm: LlmConfig) -> tuple[str, str, dict[str, Any]]:
@@ -212,6 +226,9 @@ class GraphMemoryService:
 
         model = self._extraction_model()
         llm_client = _ExtractionClient(
+            client=openai.AsyncOpenAI(
+                api_key=api_key, base_url=base_url, default_headers=NO_WAKE_HEADERS
+            ),
             config=LLMConfig(
                 api_key=api_key,
                 model=model,
@@ -410,8 +427,16 @@ class GraphMemoryService:
                 timeout=self._cfg.ingest_timeout_s,
             )
         except Exception as exc:
+            if is_companion_asleep(exc):
+                log.info("graph_memory: эпизод id=%s ждёт, компаньон уснул", episode_id)
+                await self._db.conn.execute(
+                    "UPDATE graph_episodes SET status = 'pending' WHERE id = ?", (episode_id,)
+                )
+                await self._db.conn.commit()
+                await asyncio.sleep(IDLE_POLL_S)
+                return
             attempts = row["attempts"] + 1
-            failed = attempts >= MAX_ATTEMPTS
+            failed = attempts >= MAX_ATTEMPTS or isinstance(exc, ValidationError)
             log.warning(
                 "graph_memory: эпизод id=%s провален (попытка %d/%d): %s",
                 episode_id,

@@ -58,6 +58,9 @@ SILENCE_BAD_BODY = 'тело: {"silence": null | {"until": ISO | null}}'
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
 AUTH_HEADER = "Authorization"
+NO_WAKE_HEADER = "X-No-Wake"
+NO_WAKE_VALUE = "1"
+COMPANION_ASLEEP_CODE = "companion_asleep"
 BUSY_MESSAGE = "модель занята, переключение невозможно"
 VRAM_BUSY_MESSAGE = "основная модель занята, видеопамять не перестроена"
 
@@ -901,6 +904,8 @@ async def relay_companion(
     companion: Companion,
     gate: PriorityGate,
 ) -> web.StreamResponse:
+    if not companion.running and request.headers.get(NO_WAKE_HEADER) == NO_WAKE_VALUE:
+        return json_error(503, COMPANION_ASLEEP_CODE)
     await gate.enter_priority(preempt=not companion.running)
     label = client_label(payload)
     companion.begin_request(auth_headers(request), label)
