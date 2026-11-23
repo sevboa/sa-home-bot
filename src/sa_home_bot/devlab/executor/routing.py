@@ -21,6 +21,7 @@ ROUTE_ROUNDS = 6
 ROUTE_RETRY_S = 5.0
 ROUTE_RETRY_MAX_S = 60.0
 SILENCE_WAIT_S = 60.0
+SILENCE_CUT_TEXT = "тишина видеокарты: запрос к локальной модели оборван"
 TOKENS_PER_PRICE_UNIT = 1_000_000
 
 MODELS_ANY = "any"
@@ -136,6 +137,36 @@ def price_reply(entry: CatalogEntry, reply: ModelReply) -> ModelReply:
     return replace(reply, cost_usd=entry.price(reply.tokens_in, reply.tokens_out))
 
 
+class SilenceWatch:
+    def __init__(self) -> None:
+        self.active = False
+        self._tasks: set[asyncio.Future] = set()
+        self._cut: set[asyncio.Future] = set()
+
+    def update(self, active: bool) -> None:
+        self.active = active
+        if not active:
+            return
+        for task in list(self._tasks):
+            if not task.done():
+                self._cut.add(task)
+                task.cancel()
+
+    async def guard(self, call: Awaitable[ModelReply]) -> ModelReply:
+        task = asyncio.ensure_future(call)
+        self._tasks.add(task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if task in self._cut and (current is None or current.cancelling() == 0):
+                raise ModelError(SILENCE_CUT_TEXT, transient=True, silence=True) from None
+            raise
+        finally:
+            self._tasks.discard(task)
+            self._cut.discard(task)
+
+
 class FailoverChat:
     def __init__(
         self,
@@ -147,7 +178,9 @@ class FailoverChat:
         retry_max_s: float = ROUTE_RETRY_MAX_S,
         silence_wait_s: float = SILENCE_WAIT_S,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        silence: SilenceWatch | None = None,
     ) -> None:
+        self._silence = silence
         self._catalog = catalog
         self._make_chat = make_chat
         self._model = model
@@ -179,15 +212,22 @@ class FailoverChat:
             for entry in entries:
                 try:
                     chat = self._make_chat(entry)
-                    reply = await (
+                    call = (
                         chat.complete(messages, tools, extra=extra)
                         if extra
                         else chat.complete(messages, tools)
                     )
+                    if self._silence is not None and not entry.remote:
+                        reply = await self._silence.guard(call)
+                    else:
+                        reply = await call
                 except ModelError as exc:
                     if not exc.transient:
                         raise
-                    if exc.silence:
+                    local_in_silence = (
+                        self._silence is not None and self._silence.active and not entry.remote
+                    )
+                    if exc.silence or local_in_silence:
                         log.info("Тишина видеокарты, модель %s ждёт: %s", self._model, exc)
                         silent = True
                         continue
@@ -209,7 +249,8 @@ class FailoverChat:
 
 
 class GatewayModels:
-    def __init__(self, catalog: Catalog, token: str) -> None:
+    def __init__(self, catalog: Catalog, token: str, silence: SilenceWatch | None = None) -> None:
+        self._silence = silence
         self._catalog = catalog
         self._token = token
         self._session: aiohttp.ClientSession | None = None
@@ -224,7 +265,7 @@ class GatewayModels:
                 entry.url, self._token, model, job_id, session=session, prompt_style=prompt_style
             )
 
-        return FailoverChat(self._catalog, make, model)
+        return FailoverChat(self._catalog, make, model, silence=self._silence)
 
     async def close(self) -> None:
         if self._session is not None:
