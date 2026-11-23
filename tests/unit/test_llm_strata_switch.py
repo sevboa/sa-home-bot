@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from sa_home_bot.llm.strata_switch import (
     CHAT_PATH,
+    COMPANION_ASLEEP_CODE,
     COMPANION_KEY,
     DEFAULT_COMPANION_IDLE_STOP_S,
     DEFAULT_FREEZE_MAX_S,
@@ -23,6 +24,8 @@ from sa_home_bot.llm.strata_switch import (
     DEFAULT_PRIORITY_GRACE_S,
     MAIN_DEMAND_FIELD,
     MODELS_PATH,
+    NO_WAKE_HEADER,
+    NO_WAKE_VALUE,
     RELEASE_PATH,
     SILENCE_CODE,
     SILENCE_FOREVER_TEXT,
@@ -1092,6 +1095,54 @@ async def test_companion_second_request_does_not_launch_again():
             await resp.read()
         assert journal == [ACTIVE_RESERVE, LAUNCH]
         assert len(partner.bodies) == 2
+    finally:
+        await close(router, *servers)
+
+
+async def test_no_wake_header_gets_503_while_companion_sleeps():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    main = VramUpstream(journal)
+    partner = Upstream()
+    app, router, servers, companion = await companion_router(main, partner, run)
+    try:
+        resp = await router.post(
+            CHAT_PATH,
+            json={"model": COMPANION.name, "messages": []},
+            headers={**AUTH, NO_WAKE_HEADER: NO_WAKE_VALUE},
+        )
+        assert resp.status == 503
+        assert await resp.json() == {"error": COMPANION_ASLEEP_CODE}
+        assert companion.running is False
+        assert companion.active == 0
+        assert journal == []
+        assert partner.bodies == []
+    finally:
+        await close(router, *servers)
+
+
+async def test_no_wake_header_passes_when_companion_runs_and_plain_request_wakes_it():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    main = VramUpstream(journal)
+    partner = Upstream()
+    app, router, servers, companion = await companion_router(main, partner, run)
+    try:
+        woken = await router.post(
+            CHAT_PATH, json={"model": COMPANION.name, "messages": []}, headers=AUTH
+        )
+        await woken.read()
+        assert woken.status == 200
+        assert companion.running is True
+        resp = await router.post(
+            CHAT_PATH,
+            json={"model": COMPANION.name, "messages": []},
+            headers={**AUTH, NO_WAKE_HEADER: NO_WAKE_VALUE},
+        )
+        await resp.read()
+        assert resp.status == 200
+        assert len(partner.bodies) == 2
+        assert journal == [ACTIVE_RESERVE, LAUNCH]
     finally:
         await close(router, *servers)
 

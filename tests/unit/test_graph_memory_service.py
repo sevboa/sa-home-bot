@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel, ValidationError
 
 from sa_home_bot.config import GraphMemoryConfig, LlmConfig, Settings
 from sa_home_bot.db.connection import Database
 from sa_home_bot.db.migrations import apply_migrations
 from sa_home_bot.graph_memory import service as service_module
 from sa_home_bot.graph_memory.service import (
+    COMPANION_ASLEEP_CODE,
     NO_THINKING_BODY,
     OLLAMA_API_KEY,
     OLLAMA_OPENAI_URL,
@@ -242,3 +247,67 @@ async def test_ingest_loop_waits_for_awake_companion(svc, monkeypatch):
     row = await svc._next_pending()
     assert row is not None
     assert row["attempts"] == 0
+
+
+class _Edges(BaseModel):
+    edges: list[str]
+
+
+def _asleep_error(body):
+    exc = RuntimeError("503")
+    exc.status_code = 503
+    exc.body = body
+    return exc
+
+
+def _failing_graphiti(exc):
+    class _Graphiti:
+        async def add_episode(self, **kwargs):
+            raise exc
+
+    return _Graphiti()
+
+
+async def _episode_after_failure(svc, monkeypatch, exc):
+    sleeps = []
+    nodes = types.SimpleNamespace(EpisodeType=types.SimpleNamespace(text="text"))
+    monkeypatch.setitem(sys.modules, "graphiti_core", types.ModuleType("graphiti_core"))
+    monkeypatch.setitem(sys.modules, "graphiti_core.nodes", nodes)
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(service_module.asyncio, "sleep", fake_sleep)
+    svc._graphiti = _failing_graphiti(exc)
+    await svc.run_command("add_episode", {"text": "факт", "chat_id": CHAT_A})
+    row = await svc._next_pending()
+    await svc._process_one(row)
+    cur = await svc._db.conn.execute("SELECT status, attempts, error FROM graph_episodes")
+    return await cur.fetchone(), sleeps
+
+
+async def test_process_one_keeps_pending_without_attempt_when_companion_asleep(svc, monkeypatch):
+    row, sleeps = await _episode_after_failure(
+        svc, monkeypatch, _asleep_error(COMPANION_ASLEEP_CODE)
+    )
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    assert row["error"] is None
+    assert sleeps == [service_module.IDLE_POLL_S]
+
+
+async def test_process_one_counts_other_503_as_ordinary_failure(svc, monkeypatch):
+    row, _ = await _episode_after_failure(svc, monkeypatch, _asleep_error("gpu_silence"))
+    assert row["status"] == "pending"
+    assert row["attempts"] == 1
+    assert "503" in row["error"]
+
+
+async def test_process_one_fails_at_once_on_validation_error(svc, monkeypatch):
+    with pytest.raises(ValidationError) as caught:
+        _Edges.model_validate({})
+    row, sleeps = await _episode_after_failure(svc, monkeypatch, caught.value)
+    assert row["status"] == "failed"
+    assert row["attempts"] == 1
+    assert "edges" in row["error"]
+    assert sleeps == []
