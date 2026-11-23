@@ -7,6 +7,11 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
+SCRIPT_MARKUP_EXAMPLE_EN = """# Intent: read load by the contents (L40-90), conclusion to a note
+src = read("src/pkg/a.py", 40, 90)
+signature = next(r for r in src.splitlines() if r.startswith("def load"))
+print(signature)
+note(f"a.py:40-90 {signature.strip()}: returns 1, the test expects 2")"""
 SCRIPT_TEST_EXAMPLE_EN = """# Intent: test expects 2, check it is red for the right reason, step 1
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
@@ -117,11 +122,6 @@ _CODE_MODE_RUNS_EN = (
     "- Output is cut by characters, not lines: a file over ~6000 chars (about 150 lines) - "
     "do not print it whole and do not page through it: "
     "grep(pattern, path, context=5) shows line numbers, then read(path, start, end).\n"
-    "- Notes: learned something important (a signature, a path, an expected value, a decision, "
-    "what is already done) - write it at once with note(\"...\"). The conversation history gets "
-    "folded and script variables stay, but notes survive folding and restarts and are shown to "
-    "you at the start of the task. Do not re-read what the notes already hold. Notes full - "
-    "compress them with notes_set(\"...\"); notes() returns the current text.\n"
     "- Do not re-read a file after edit(): EditError reports failures. Use diff() only if you "
     "do not remember what you changed. If the last run is green and only docs/ changed since, "
     "call finish() at once: no rerun, no diff().\n"
@@ -134,6 +134,27 @@ _CODE_MODE_RUNS_EN = (
     "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
     "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
+)
+_CODE_MODE_MARKUP_EN = (
+    "\n"
+    "## Table of contents, Plan, Read and notes\n"
+    "At the start of the task, in the notes block, you have the Table of contents of the task "
+    "files (what is where, line ranges), the Plan (steps with marks) and Read (what you have "
+    "already read); the host maintains them.\n"
+    "- Read only the range you need from the table of contents: read(path, a, b), not the whole "
+    "file and not piece after piece.\n"
+    "- Right after reading, write a conclusion with a reference to note(): "
+    "note(\"host.py:177-312 read_host_sync: metric order ...; reference full: 27 metrics\"). "
+    "Notes survive folding and restarts; when full, compress via notes_set(\"...\"); "
+    "notes() returns the text.\n"
+    "- Keep data in script variables, print only what you need into the context.\n"
+    "- Do not re-read what is in Read and in the notes: the host marks a repeated read with a "
+    "hint.\n"
+    "- As soon as the signature and a sample are clear, write the file. Many calls in a row "
+    "without a write get a reminder from the host.\n"
+    "\n"
+    "Example of reconnaissance by the table of contents:\n"
+    f"{SCRIPT_MARKUP_EXAMPLE_EN}\n"
 )
 _CODE_MODE_RED_GLM_EN = (
     "- If a step needs a red test, verify it yourself: one call edits the test and runs "
@@ -225,6 +246,18 @@ CODE_MODE_INTRO_CB_V3_EN = (
     + _CODE_MODE_CALC_EN
     + _CODE_MODE_NEIGHBORS_EN
     + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_GLM_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_GLM_EN
+    + _CODE_MODE_TAIL_EN
+)
+CODE_MODE_INTRO_CB_V4_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_CALC_EN
+    + _CODE_MODE_NEIGHBORS_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_MARKUP_EN
     + _CODE_MODE_RED_GLM_EN
     + _CODE_MODE_ASK_EN
     + _CODE_MODE_EXAMPLE_GLM_EN
@@ -422,4 +455,105 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
         "an edit or read failed: fragment not found or found more than once, no such file, "
         "start beyond the end of the file, closed path",
     ),
+)
+
+_API_V5_READ = (
+    (
+        "read",
+        "def read(path: str, offset: int | None = None, limit: int | None = None) -> str: ...",
+        "file text; offset is the first line (1-based), limit is how many lines; without them "
+        "the whole file; exact text, suitable for old in edit(); a repeated read of an "
+        "unchanged range that is already above in this conversation returns a short "
+        "[unchanged since call N] mark instead of the text; missing file or offset beyond the "
+        "end - EditError",
+    ),
+    (
+        "read_numbered",
+        "def read_numbered(path: str, offset: int | None = None, "
+        "limit: int | None = None) -> str: ...",
+        "same as read() with numbers \"n<TAB>line\", for viewing; not suitable for old in edit()",
+    ),
+)
+_API_V5_GLOB = (
+    "glob",
+    "def glob(pattern: str) -> list[str]: ...",
+    "paths of project files matching a pattern: * within a directory, ** across directories, "
+    "? one character",
+)
+_API_V5_TODO = (
+    "todo",
+    "def todo(items: list[str | tuple[str, str]] | None = None) -> str | None: ...",
+    "your own task list: replaces it with items, each a string or a (text, status) pair, "
+    "status is pending, in_progress or done; todo() without items returns the current list; "
+    "it survives history folding and restarts and is shown to you with the notes",
+)
+
+
+def _api_cb_v5() -> tuple[tuple[str, str, str], ...]:
+    replaced = {entry[0]: entry for entry in _API_V5_READ}
+    api: list[tuple[str, str, str]] = []
+    for entry in SCRIPT_API_EN:
+        if entry[0] == "note":
+            api.append(_API_V5_TODO)
+        api.append(replaced.get(entry[0], entry))
+        if entry[0] == "ls":
+            api.append(_API_V5_GLOB)
+    return tuple(api)
+
+
+SCRIPT_API_CB_V5_EN = _api_cb_v5()
+EXECUTE_DESCRIPTION_CB_V5_EN = (
+    "Runs Python in the project root (src is in sys.path, project packages import). The "
+    "functions below are already defined; do not import them. One process per task: variables "
+    "and imports persist between calls, as in a Jupyter kernel. You see what print() prints "
+    "and the value of the last expression. Functions:\n"
+)
+SCRIPT_CLIPPED_HINT_CB_V5_EN = "; print less or read a narrower range with offset and limit"
+SCRIPT_CB_V5_EXAMPLE_EN = """src = read("src/pkg/a.py")
+print(src)
+edit("src/pkg/a.py", "return 1", "return 2")
+r = run_tests(["tests/test_a.py"])
+print(r)
+if r.ok:
+    finish("load returns 2; tests pass")"""
+CODE_MODE_INTRO_CB_V5_EN = (
+    "You are an agent working with the user toward their goals, using your own judgment along "
+    "the way.\n"
+    "\n"
+    "## The task and its limits\n"
+    "The task is the first user message (task.md): the goal, steps and checks. Hard limits come "
+    "from the task and the project rules below: allowed paths, forbidden actions, code and docs "
+    "conventions. Follow them exactly; everything else is your call. The task, docs and rules "
+    "are in Russian: write docs/ entries and the finish() summary in Russian.\n"
+    "\n"
+    "## How you work\n"
+    "You act through execute(code), which runs Python in the project root. The functions "
+    "listed in its description (read, write, edit, grep, glob, ls, todo, note, run, run_tests, "
+    "finish and others) are already defined. One process lives for the whole task: variables "
+    "and imports persist between calls. What you see is what the script printed. search(query) "
+    "lists the functions matching a word. Several steps fit in one call when you do not need to "
+    "see an intermediate result.\n"
+    "A read of a file range that has not changed and is already in this conversation returns a "
+    "short [unchanged since call N] mark: use the text above or your variables.\n"
+    "Keep your own work list with todo([...]) and save facts worth keeping with note(\"...\"); "
+    "both survive history folding and restarts and are shown at the start of the task.\n"
+    "\n"
+    "Example:\n"
+    "```\n"
+    f"{SCRIPT_CB_V5_EXAMPLE_EN}\n"
+    "```\n"
+    "\n"
+    "## Finishing work\n"
+    "- Do not stop until the task is done. When a call fails or returns nothing useful, find out "
+    "why and work around it instead of giving up or repeating it unchanged.\n"
+    "- Check your work with tests (run_tests) and the project checks (run) before finish(). "
+    "finish(summary) closes all steps; the guard checks the diff, tests and project rules, and "
+    "if it rejects, the output says why: fix it and call again. step_done() is optional.\n"
+    "- Ask the owner (ask_owner) only for a real blocker: a decision only the owner can make.\n"
+    "- Do not create planning, decision or analysis documents: work from the context, your "
+    "todo list and notes. Write only the docs the task asks for.\n"
+)
+CODE_MODE_REMINDER_CB_V5_EN = (
+    "[Reminder] Keep going until the task is done: diagnose failures and work around them, "
+    "check with tests before finish(), ask the owner only for a real blocker."
 )

@@ -6,20 +6,26 @@ import re
 import shlex
 import tokenize
 from collections import Counter
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection
+from dataclasses import dataclass, replace
 from typing import Any
 
+from sa_home_bot.devlab.agent.context import CHARS_PER_TOKEN
+from sa_home_bot.devlab.agent.markup import STYLE_CB_V4, Markup
 from sa_home_bot.devlab.agent.notes import NOTES_UNAVAILABLE, AgentNotes
 from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.prompt_en import (
     EN,
     EXECUTE_CODE_EN,
+    EXECUTE_DESCRIPTION_CB_V5_EN,
     EXECUTE_DESCRIPTION_EN,
+    SCRIPT_API_CB_V5_EN,
     SCRIPT_API_EN,
+    SCRIPT_CLIPPED_HINT_CB_V5_EN,
     SEARCH_DESCRIPTION_EN,
     SEARCH_QUERY_EN,
 )
+from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5, RepeatLog
 from sa_home_bot.devlab.agent.sandbox import (
     Sandbox,
     SandboxPathError,
@@ -64,6 +70,8 @@ LIST_MAX_ENTRIES = 200
 READ_MIN_LINES = 200
 READ_MAX_LINES_CAP = 2000
 READ_TOKENS_PER_LINE = 60
+SCRIPT_OUTPUT_WINDOW_SHARE = 0.12
+SCRIPT_OUTPUT_MAX_CHARS = 40_000
 GREP_MAX_MATCHES = 50
 GREP_MAX_FILE_BYTES = 200_000
 GREP_LINE_CHARS = 200
@@ -92,6 +100,11 @@ PLAIN_TOOLS = frozenset(
 
 def read_max_lines(window_tokens: int) -> int:
     return max(READ_MIN_LINES, min(READ_MAX_LINES_CAP, window_tokens // READ_TOKENS_PER_LINE))
+
+
+def script_output_chars(window_tokens: int, floor: int) -> int:
+    scaled = int(window_tokens * CHARS_PER_TOKEN * SCRIPT_OUTPUT_WINDOW_SHARE)
+    return max(floor, min(SCRIPT_OUTPUT_MAX_CHARS, scaled))
 
 
 def _with_final_newline(data: bytes) -> bytes | None:
@@ -239,6 +252,11 @@ EXECUTE_DEFINITION = _schema(
 SEARCH_DEFINITION_EN = _schema(
     TOOL_SEARCH, SEARCH_DESCRIPTION_EN, query=_text(SEARCH_QUERY_EN)
 )
+EXECUTE_DEFINITION_CB_V5 = _schema(
+    TOOL_EXECUTE,
+    EXECUTE_DESCRIPTION_CB_V5_EN + api_stubs("", SCRIPT_API_CB_V5_EN),
+    code=_text(EXECUTE_CODE_EN),
+)
 EXECUTE_DEFINITION_EN = _schema(
     TOOL_EXECUTE,
     EXECUTE_DESCRIPTION_EN + api_stubs("", SCRIPT_API_EN),
@@ -279,10 +297,16 @@ class ToolBox:
         spec: AgentSpec,
         read_lines: int = READ_MIN_LINES,
         notes: AgentNotes | None = None,
+        window_tokens: int = 0,
     ) -> None:
         self._notes = notes
+        self._window_tokens = window_tokens
         self._sandbox = sandbox
         self._spec = spec
+        self._markup = Markup() if spec.code_mode and spec.prompt_style == STYLE_CB_V4 else None
+        cb_v5 = spec.code_mode and spec.prompt_style == STYLE_CB_V5
+        self._repeats = RepeatLog() if cb_v5 else None
+        self._calls = 0
         self._read_lines = read_lines
         self._step_gate: StepGate | None = None
         self._handlers = {
@@ -298,7 +322,22 @@ class ToolBox:
             self._handlers = {TOOL_SEARCH: self._search, TOOL_EXECUTE: self._execute}
 
     def notes_text(self) -> str:
-        return self._notes.text() if self._notes is not None else ""
+        if self._repeats is not None:
+            return self._notes.block_text() if self._notes is not None else ""
+        own = self._notes.text() if self._notes is not None else ""
+        return self._markup.block(own) if self._markup is not None else own
+
+    async def open_segment(self, task: str) -> None:
+        if self._markup is not None:
+            await self._markup.open_segment(self._sandbox, task)
+
+    def close_steps(self, closed: Collection[int]) -> None:
+        if self._markup is not None:
+            self._markup.close_steps(closed)
+
+    def reset_reads(self) -> None:
+        if self._repeats is not None:
+            self._repeats.reset()
 
     @property
     def code_mode(self) -> bool:
@@ -306,6 +345,8 @@ class ToolBox:
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
+        if self._repeats is not None:
+            return [SEARCH_DEFINITION_EN, EXECUTE_DEFINITION_CB_V5]
         if self._spec.code_mode:
             if self._spec.prompt_lang == EN:
                 return [SEARCH_DEFINITION_EN, EXECUTE_DEFINITION_EN]
@@ -453,6 +494,8 @@ class ToolBox:
 
     async def _search(self, args: dict[str, Any]) -> str:
         api = SCRIPT_API_EN if self._spec.prompt_lang == EN else SCRIPT_API
+        if self._repeats is not None:
+            api = SCRIPT_API_CB_V5_EN
         return api_stubs(_argument(args, "query", str, ""), api) or SEARCH_EMPTY
 
     def _script_config(self) -> dict[str, Any]:
@@ -466,6 +509,8 @@ class ToolBox:
             "test_timeout": spec.narrow_test_timeout_s,
             "budget": spec.script_timeout_s - SCRIPT_BUDGET_MARGIN_S,
             "output_chars": spec.output_chars,
+            "markup": self._markup is not None,
+            "claude_read": self._repeats is not None,
         }
 
     async def _comment_lines(self) -> list[str]:
@@ -542,6 +587,42 @@ class ToolBox:
             return {"ok": False, "reason": refusal}
         return {"ok": True, "value": ""}
 
+    def _serve_reads(self, args: dict[str, Any]) -> dict[str, Any]:
+        path, digest = args.get("path"), args.get("digest")
+        numbers = [args.get(key) for key in ("start", "end", "total")]
+        if self._markup is None or not isinstance(path, str) or not isinstance(digest, str):
+            return {"ok": True, "value": ""}
+        if not all(type(number) is int for number in numbers):
+            return {"ok": True, "value": ""}
+        start, end, total = numbers
+        return {"ok": True, "value": self._markup.record_read(path, digest, start, end, total)}
+
+    def _serve_seen(self, args: dict[str, Any]) -> dict[str, Any]:
+        path, digest = args.get("path"), args.get("digest")
+        numbers = [args.get(key) for key in ("start", "end")]
+        if self._repeats is None or not isinstance(path, str) or not isinstance(digest, str):
+            return {"ok": True, "value": ""}
+        if not all(type(number) is int for number in numbers):
+            return {"ok": True, "value": ""}
+        start, end = numbers
+        return {"ok": True, "value": self._repeats.check(path, digest, start, end, self._calls)}
+
+    def _serve_todo(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._notes is None:
+            return {"ok": False, "reason": NOTES_UNAVAILABLE}
+        if args.get("op") == "get":
+            return {"ok": True, "value": self._notes.todo_text()}
+        items = args.get("items")
+        pairs = [
+            (item[0], item[1])
+            for item in (items if isinstance(items, list) else [])
+            if isinstance(item, list) and len(item) == 2 and all(isinstance(p, str) for p in item)
+        ]
+        refusal = self._notes.set_todo(pairs)
+        if refusal is not None:
+            return {"ok": False, "reason": refusal}
+        return {"ok": True, "value": ""}
+
     async def _serve_call(
         self, request: dict[str, Any], gate: StepGate | None, accepted: list[str]
     ) -> dict[str, Any]:
@@ -557,6 +638,12 @@ class ToolBox:
             return {"ok": True}
         if name == "notes" and isinstance(args, dict):
             return self._serve_notes(args)
+        if name == "seen" and isinstance(args, dict):
+            return self._serve_seen(args)
+        if name == "todo" and isinstance(args, dict):
+            return self._serve_todo(args)
+        if name == "reads" and isinstance(args, dict):
+            return self._serve_reads(args)
         if name == "diff":
             text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
@@ -569,6 +656,17 @@ class ToolBox:
         return {"ok": False, "reason": CALL_UNKNOWN.format(name=name)}
 
     async def _execute(self, args: dict[str, Any]) -> ToolOutcome:
+        self._calls += 1
+        if self._markup is None:
+            return await self._run_script(args)
+        self._markup.begin_call()
+        outcome = await self._run_script(args)
+        hint = self._markup.after_call(outcome.mutating)
+        if hint and outcome.control is None:
+            return replace(outcome, text=f"{outcome.text}\n{hint}")
+        return outcome
+
+    async def _run_script(self, args: dict[str, Any]) -> ToolOutcome:
         code = _argument(args, "code", str)
         timeout_s = self._spec.script_timeout_s
         before = await self._sandbox.changed_digests()
@@ -582,6 +680,8 @@ class ToolBox:
             worker_argv(self._script_config()), request_payload(code), timeout_s, serve
         )
         mutating = before != await self._sandbox.changed_digests()
+        if (reply.timed_out or reply.data is None) and self._repeats is not None:
+            self._repeats.reset()
         if reply.timed_out:
             text = f"[таймаут {timeout_s:g} с]\n{SCRIPT_STATE_RESET}"
             return ToolOutcome(text, mutating=mutating)
@@ -591,13 +691,17 @@ class ToolBox:
             return ToolOutcome(text, mutating=mutating)
         run = parse_reply(reply.data)
         limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
+        hint = SCRIPT_CLIPPED_HINT
+        if self._repeats is not None:
+            limit = script_output_chars(self._window_tokens, limit)
+            hint = SCRIPT_CLIPPED_HINT_CB_V5_EN
         if run.failed:
             output = clip_tail(run.output, limit) or SCRIPT_NO_OUTPUT
             return ToolOutcome(
                 f"{SCRIPT_FAILED_HEAD}\n{output}", mutating=mutating, green=run.green
             )
         silent = "" if run.control or accepted else SCRIPT_NO_OUTPUT
-        output = clip_head(run.output, limit, SCRIPT_CLIPPED_HINT) or silent
+        output = clip_head(run.output, limit, hint) or silent
         control = (
             ControlRequest(run.control.tool, run.control.args, run.control.tool)
             if run.control

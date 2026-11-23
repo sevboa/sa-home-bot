@@ -12,7 +12,11 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELDS
 from sa_home_bot.devlab.agent.prompt import DEFAULT_STYLE, reminder_for, with_flow_reminder
 from sa_home_bot.devlab.agent.prompt_en import EN
-from sa_home_bot.devlab.agent.tools import EXECUTE_DEFINITION_EN, TOOL_EXECUTE
+from sa_home_bot.devlab.agent.tools import (
+    EXECUTE_DEFINITION_CB_V5,
+    EXECUTE_DEFINITION_EN,
+    TOOL_EXECUTE,
+)
 from sa_home_bot.devlab.usage import usage_cost
 from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
 
@@ -29,7 +33,7 @@ def _has_execute(tools: list[dict[str, Any]]) -> bool:
 
 
 def _prompt_lang(tools: list[dict[str, Any]]) -> str:
-    return EN if EXECUTE_DEFINITION_EN in tools else "ru"
+    return EN if EXECUTE_DEFINITION_EN in tools or EXECUTE_DEFINITION_CB_V5 in tools else "ru"
 
 
 class ModelError(Exception):
