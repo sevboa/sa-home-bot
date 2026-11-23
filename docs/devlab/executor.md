@@ -357,3 +357,11 @@
 (`protocol.FIELD_LOCAL_DEMAND`, `False` при активной тишине) — есть ли задание в `STATUS_QUEUED` или
 `STATUS_RUNNING` на модель каталога без `MODEL_REMOTE`; `SilenceRelay.push` пересылает его тем же
 запросом в `main_demand` (`strata_switch.MAIN_DEMAND_FIELD`), лог при смене пары (тишина, спрос).
+
+## Замок каталога исполнителя (2026-11-23)
+Инцидент: после рестарта ноды старый процесс исполнителя прожил 2 часа рядом с новым, новый прочитал
+общий `agent-state.json` и пересоздал контейнер задания, где работал агент старого. Теперь
+`run_executor` сразу после создания каталога берёт `flock(LOCK_EX|LOCK_NB)` на
+`<work_dir>/executor.lock` (`acquire_work_lock`), пока замок занят, ждёт с логом раз в
+`LOCK_LOG_INTERVAL_S`, не читая `agent-state.json` и не делая sweep. Файл держится открытым всю
+жизнь процесса.
