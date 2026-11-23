@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from sa_home_bot.devlab.agent import context
 from sa_home_bot.devlab.agent.context import (
     DROPPED_STEPS_PATTERN,
     FOLD_TARGET_SHARE,
+    FOLDED_OUTPUT,
     FOLDED_OUTPUT_PREFIX,
     FOLDED_REPLY_PREFIX,
     REASONING_FIELD,
@@ -230,7 +233,7 @@ def snapshot(messages: list[dict]) -> list[dict]:
 
 
 def test_fold_leaves_headroom_so_next_steps_only_append():
-    budget = 6000
+    budget = 7000
     messages = dialog(12, output=2000)
     assert fold_old_results(messages, budget, 4) <= budget * FOLD_TARGET_SHARE
     assert_valid(messages)
@@ -264,4 +267,22 @@ def test_last_unit_reasoning_is_dropped_when_it_alone_overflows():
     messages = with_reasoning(dialog(2, output=100), 30000)
     assert fold_old_results(messages, 3000, 4) <= 3000
     assert REASONING_FIELD not in messages[-2]
+    assert_valid(messages)
+
+
+def test_folded_marker_tells_what_to_do():
+    marker = FOLDED_OUTPUT.format(size=7)
+    assert marker.startswith(FOLDED_OUTPUT_PREFIX)
+    assert "7 симв." in marker
+    assert "из переменных" in marker
+    assert "grep" in marker
+
+
+@pytest.mark.parametrize("keep_recent", [0, 1, 4])
+def test_last_tool_output_is_never_folded(keep_recent):
+    messages = dialog(10, output=1500)
+    fold_old_results(messages, 3000, keep_recent)
+    tools = [m["content"] for m in messages if m["role"] == "tool"]
+    assert tools[-1] == "x" * 1500
+    assert any(t.startswith(FOLDED_OUTPUT_PREFIX) for t in tools) or len(tools) < 10
     assert_valid(messages)

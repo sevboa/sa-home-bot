@@ -10,7 +10,10 @@ CHARS_PER_TOKEN = 3
 REASONING_FIELD = "reasoning_content"
 REASONING_FIELDS = (REASONING_FIELD, "reasoning", "reasoning_details")
 FOLDED_OUTPUT_PREFIX = "[вывод свёрнут"
-FOLDED_OUTPUT = FOLDED_OUTPUT_PREFIX + ": {size} симв.]"
+FOLDED_OUTPUT = (
+    FOLDED_OUTPUT_PREFIX + ": {size} симв.; был показан раньше — бери из переменных скрипта"
+    " или перечитай частью (read с диапазоном / grep)]"
+)
 ARGUMENT_KEEP_CHARS = 200
 ARGUMENT_LONG_CHARS = 300
 CUT_ARGUMENT = "{head}… [обрезано {size} симв.]"
@@ -65,7 +68,9 @@ def _old_boundary(messages: list[dict[str, Any]], keep_recent: int) -> int:
     tool_indexes = [i for i, m in enumerate(messages) if m["role"] == "tool"]
     if len(tool_indexes) <= keep_recent:
         return PINNED_MESSAGES
-    return tool_indexes[-keep_recent] if keep_recent else len(messages)
+    boundary = tool_indexes[-keep_recent] if keep_recent else len(messages)
+    last_call = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=0)
+    return min(boundary, max(last_call, PINNED_MESSAGES))
 
 
 def _drop_reasoning(message: dict[str, Any]) -> bool:

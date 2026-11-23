@@ -1105,6 +1105,51 @@ async def test_repeated_read_is_collapsed_then_crane(tmp_path):
     assert REPEAT_TURN.format(number=1) in user_texts(result.dialog.messages)
 
 
+def execute_spec():
+    return AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
+
+
+async def test_numeric_near_repeats_hit_crane_at_exact_threshold(tmp_path):
+    exact = ScriptedChatModel(
+        *(tool_reply(TOOL_EXECUTE, c, code="print(tr[5:9])") for c in "abcde")
+    )
+    near = ScriptedChatModel(
+        *(
+            tool_reply(TOOL_EXECUTE, str(i), code=f"print(json.dumps(tr[{i}:{i + 4}]))")
+            for i in range(5, 11)
+        )
+    )
+    steps = []
+    for model in (exact, near):
+        loop, _ = make_loop(tmp_path, model, spec=execute_spec())
+        result = await loop.run("правила", "задача")
+        assert result.crane is Crane.REPEAT
+        steps.append(result.steps)
+    assert steps[0] == steps[1] == 5
+    assert CODE_REPEAT_TURN.format(number=1) in user_texts(result.dialog.messages)
+
+
+@pytest.mark.parametrize(
+    "codes",
+    [
+        [
+            f"print(open('{name}').read())"
+            for name in ("src/a.py", "src/b.py", "docs/c.md", "tests/d.py", "x.toml")
+        ],
+        [f"v{i} = {i}\nprint(v{i})" if i % 2 else f"print('{'z' * i}')" for i in range(1, 6)],
+    ],
+)
+async def test_different_code_is_not_a_repeat(tmp_path, codes):
+    model = ScriptedChatModel(
+        *(tool_reply(TOOL_EXECUTE, str(i), code=code) for i, code in enumerate(codes)),
+        ModelError("конец"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=execute_spec())
+    result = await loop.run("правила", "задача")
+    assert result.status is AgentStatus.MODEL_FAILED
+    assert result.crane is None
+
+
 async def test_repeat_after_file_change_is_not_a_crane(tmp_path):
     model = ScriptedChatModel(
         lint_call("a"),

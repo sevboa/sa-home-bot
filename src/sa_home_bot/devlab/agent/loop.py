@@ -86,6 +86,9 @@ ASK_SKIPPED = "не выполнено: задан вопрос владельц
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
+NUMBERS = re.compile(r"\d+")
+SPACES = re.compile(r"\s+")
+NUMBER_PLACEHOLDER = "#"
 REPEAT_TURN = (
     "Этот вызов ты уже делал (вызов {number}), результат был выше и не изменился. "
     "Прочитанное держи в переменных. Следующий вызов должен изменить файл "
@@ -93,7 +96,8 @@ REPEAT_TURN = (
     f"{TOOL_ASK_OWNER}(). Если не знаешь, что править, — {TOOL_ASK_OWNER}()."
 )
 CODE_REPEAT_TURN = (
-    "Этот вызов ты уже делал (вызов {number}), результат был выше и не изменился. "
+    "Этот вызов ты уже делал (вызов {number}; повтором считается и тот же вызов с другими "
+    "числами), результат был выше и не изменился. "
     "Прочитанное держи в переменных. Следующий вызов execute должен изменить файл "
     "(edit/write), запустить проверку или вызвать finish()/ask_owner(). "
     "Если не знаешь, что править, — ask_owner()."
@@ -233,6 +237,14 @@ def _script_code(arguments: str) -> str:
     except (ValueError, AttributeError):
         return ""
     return code if isinstance(code, str) else ""
+
+
+def _comparable(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    code = args.get("code")
+    if name != TOOL_EXECUTE or not isinstance(code, str):
+        return args
+    flat = SPACES.sub(" ", NUMBERS.sub(NUMBER_PLACEHOLDER, code)).strip()
+    return {**args, "code": flat}
 
 
 def _call_label(name: str, args: dict[str, Any]) -> str:
@@ -520,7 +532,8 @@ class AgentLoop:
     async def _count_repeats(
         self, call: ToolCall, args: dict[str, Any], seg: Segment
     ) -> tuple[int, tuple[str, str]]:
-        key = f"{call.name} {json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+        comparable = json.dumps(_comparable(call.name, args), sort_keys=True, ensure_ascii=False)
+        key = f"{call.name} {comparable}"
         if seg.tree_fingerprint is None:
             seg.tree_fingerprint = await self._tools.tree_fingerprint()
         entry = (key, seg.tree_fingerprint)
