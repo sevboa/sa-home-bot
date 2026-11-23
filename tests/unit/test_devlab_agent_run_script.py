@@ -450,3 +450,12 @@ async def test_edit_rejects_new_comment_but_ignores_old_ones(ruled_project):
     await box._sandbox.session_close()
     assert "комментарии запрещены: src/a.py:1 # поясняю" in outcome.text
     assert "value = 1" in outcome.text
+
+
+
+async def test_assigning_api_name_is_restored_with_note(project):
+    box = toolbox(project)
+    first = await box.call(TOOL_EXECUTE, {"code": "read = 5\ncount = 3"})
+    assert "assigning read shadowed the API function read; it is restored" in first.text
+    second = await box.call(TOOL_EXECUTE, {"code": "print(read('src/a.py'), count)"})
+    assert second.text.endswith(" 3")

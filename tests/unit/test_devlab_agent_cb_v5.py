@@ -251,3 +251,12 @@ async def test_script_output_uses_scaled_limit_only_in_cb_v5(project):
     finally:
         await wide._sandbox.session_close()
         await narrow._sandbox.session_close()
+
+
+async def test_import_shadowing_api_glob_is_restored_with_note(project):
+    box = box_for(project)
+    first = await run(box, "import glob\nx = 7")
+    assert "import glob shadowed the API function glob; it is restored" in first
+    assert "import glob as globmod" in first
+    second = await run(box, "print(callable(glob), x)")
+    assert second == "True 7"
