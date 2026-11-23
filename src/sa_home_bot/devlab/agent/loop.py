@@ -140,6 +140,7 @@ class AgentLimits:
     max_tokens: int = 0
     max_idle_replies: int = 3
     max_repeats: int = 3
+    max_near_repeats: int = 6
     context_tokens: int = 16000
     reply_tokens: int = 2000
     keep_recent: int = 4
@@ -181,6 +182,10 @@ class Segment:
     recent_calls: list[tuple[str, str]] = field(default_factory=list)
     first_numbers: dict[tuple[str, str], int] = field(default_factory=dict)
     repeated: int = 0
+    near_entry: tuple[str, str] | None = None
+    near_count: int = 0
+    near_number: int = 0
+    near_hit: bool = False
     turn_number: int = 0
     turn_message: dict[str, Any] | None = None
     repeat_reason: str | None = None
@@ -239,12 +244,11 @@ def _script_code(arguments: str) -> str:
     return code if isinstance(code, str) else ""
 
 
-def _comparable(name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _near_key(name: str, args: dict[str, Any]) -> str | None:
     code = args.get("code")
     if name != TOOL_EXECUTE or not isinstance(code, str):
-        return args
-    flat = SPACES.sub(" ", NUMBERS.sub(NUMBER_PLACEHOLDER, code)).strip()
-    return {**args, "code": flat}
+        return None
+    return SPACES.sub(" ", NUMBERS.sub(NUMBER_PLACEHOLDER, code)).strip()
 
 
 def _call_label(name: str, args: dict[str, Any]) -> str:
@@ -387,6 +391,7 @@ class AgentLoop:
             seg.calls = []
             seg.skipped = 0
             seg.repeat_reason = None
+            seg.near_hit = False
             seg.repeated = 0
             asked_at = self._clock()
             quick = bool(limits.quick_params) and seg.steps <= limits.quick_steps
@@ -433,6 +438,11 @@ class AgentLoop:
             if finished is not None:
                 return self._result(AgentStatus.FINISHED, seg, summary=finished)
             if seg.repeat_reason is not None:
+                if seg.near_hit:
+                    template = CODE_REPEAT_TURN if self._tools.code_mode else REPEAT_TURN
+                    messages.append(
+                        {"role": "user", "content": template.format(number=seg.near_number)}
+                    )
                 return self._crane_result(seg, messages, Crane.REPEAT, seg.repeat_reason)
             if seg.asked is not None:
                 question, call_id = seg.asked
@@ -509,6 +519,10 @@ class AgentLoop:
         if call.name == TOOL_ASK_OWNER:
             return self._ask(args, seg), None
         repeats, entry = await self._count_repeats(call, args, seg)
+        if self._count_near(call, args, seg):
+            seg.near_hit = True
+            seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
+            return REPEAT_SKIPPED, None
         if repeats and entry in seg.first_numbers:
             if repeats + 1 >= self._limits.max_repeats + REPEAT_TURNS:
                 seg.repeat_reason = REPEAT_REASON.format(call=_call_label(call.name, args))
@@ -527,19 +541,30 @@ class AgentLoop:
             counter = CODE_COUNTER.format(number=number, thousands=round(seg.context_tokens / 1000))
             text = f"{text}\n{counter}" if text else counter
         seg.first_numbers[entry] = number
+        if seg.near_count == 1:
+            seg.near_number = number
         return text, summary
 
     async def _count_repeats(
         self, call: ToolCall, args: dict[str, Any], seg: Segment
     ) -> tuple[int, tuple[str, str]]:
-        comparable = json.dumps(_comparable(call.name, args), sort_keys=True, ensure_ascii=False)
-        key = f"{call.name} {comparable}"
+        key = f"{call.name} {json.dumps(args, sort_keys=True, ensure_ascii=False)}"
         if seg.tree_fingerprint is None:
             seg.tree_fingerprint = await self._tools.tree_fingerprint()
         entry = (key, seg.tree_fingerprint)
         repeats = seg.recent_calls.count(entry)
         seg.recent_calls = [*seg.recent_calls, entry][-RECENT_CALLS_WINDOW:]
         return repeats, entry
+
+    def _count_near(self, call: ToolCall, args: dict[str, Any], seg: Segment) -> bool:
+        near = _near_key(call.name, args)
+        if near is None or seg.tree_fingerprint is None:
+            seg.near_entry, seg.near_count = None, 0
+            return False
+        entry = (near, seg.tree_fingerprint)
+        seg.near_count = seg.near_count + 1 if entry == seg.near_entry else 1
+        seg.near_entry = entry
+        return seg.near_count >= self._limits.max_near_repeats
 
     async def _run_tool(
         self, call: ToolCall, args: dict[str, Any], seg: Segment

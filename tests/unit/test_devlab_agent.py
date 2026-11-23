@@ -1109,23 +1109,21 @@ def execute_spec():
     return AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",), code_mode=True)
 
 
-async def test_numeric_near_repeats_hit_crane_at_exact_threshold(tmp_path):
-    exact = ScriptedChatModel(
-        *(tool_reply(TOOL_EXECUTE, c, code="print(tr[5:9])") for c in "abcde")
+@pytest.mark.parametrize(
+    ("codes", "steps"),
+    [
+        (["print(tr[5:9])"] * 5, 5),
+        ([f"print(json.dumps(tr[{i}:{i + 4}]))" for i in range(5, 11)], 6),
+    ],
+)
+async def test_repeat_chains_hit_crane_at_their_threshold(tmp_path, codes, steps):
+    model = ScriptedChatModel(
+        *(tool_reply(TOOL_EXECUTE, str(i), code=code) for i, code in enumerate(codes))
     )
-    near = ScriptedChatModel(
-        *(
-            tool_reply(TOOL_EXECUTE, str(i), code=f"print(json.dumps(tr[{i}:{i + 4}]))")
-            for i in range(5, 11)
-        )
-    )
-    steps = []
-    for model in (exact, near):
-        loop, _ = make_loop(tmp_path, model, spec=execute_spec())
-        result = await loop.run("правила", "задача")
-        assert result.crane is Crane.REPEAT
-        steps.append(result.steps)
-    assert steps[0] == steps[1] == 5
+    loop, _ = make_loop(tmp_path, model, spec=execute_spec())
+    result = await loop.run("правила", "задача")
+    assert result.crane is Crane.REPEAT
+    assert result.steps == steps
     assert CODE_REPEAT_TURN.format(number=1) in user_texts(result.dialog.messages)
 
 
@@ -1137,6 +1135,7 @@ async def test_numeric_near_repeats_hit_crane_at_exact_threshold(tmp_path):
             for name in ("src/a.py", "src/b.py", "docs/c.md", "tests/d.py", "x.toml")
         ],
         [f"v{i} = {i}\nprint(v{i})" if i % 2 else f"print('{'z' * i}')" for i in range(1, 6)],
+        [f"print(read('src/a.py', {i * 150 + 1}, {i * 150 + 150}))" for i in range(5)],
     ],
 )
 async def test_different_code_is_not_a_repeat(tmp_path, codes):
