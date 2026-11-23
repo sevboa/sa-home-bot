@@ -20,6 +20,7 @@ from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus, Crane
 from sa_home_bot.devlab.agent.model import ModelFactory
+from sa_home_bot.devlab.agent.notes import NOTES_SUFFIX, AgentNotes, prune_notes
 from sa_home_bot.devlab.agent.prompt import build_system, build_task
 from sa_home_bot.devlab.agent.repo import PUSH_INTERVAL_S, AgentRepo, agent_author
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox, ManagedSandbox
@@ -56,6 +57,8 @@ OUTBOX_FILE = "agent-outbox.json"
 DIALOG_FILE = "dialog.json"
 STEPS_FILE = protocol.LOG_FILE_STEPS
 AGENT_DIR = "agent"
+NOTES_DIR = "agent-notes"
+NOTES_KEEP_S = 14 * 86400.0
 MIRROR_DIR = "mirror.git"
 WORK_DIR = "work"
 GIT_DIR = "git"
@@ -197,6 +200,7 @@ class AgentWorker(WorkerLoops):
         self._sandboxes = sandboxes
         self._catalog = catalog
         self._spends: dict[str, JobSpend] = {}
+        prune_notes(settings.work_dir / NOTES_DIR, NOTES_KEEP_S)
         self._state_path = settings.work_dir / AGENT_STATE_FILE
         self._outbox_path = settings.work_dir / OUTBOX_FILE
         self._state = load_model(AgentState, self._state_path)
@@ -498,7 +502,12 @@ class AgentWorker(WorkerLoops):
         limits = self._limits_for(spend, entries, profile)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id, spec.prompt_style), spend),
-            ToolBox(sandbox, spec, read_max_lines(limits.context_tokens)),
+            ToolBox(
+                sandbox,
+                spec,
+                read_max_lines(limits.context_tokens),
+                self._notes_of(job.id),
+            ),
             FinishGuard(sandbox, spec, self._settings.slots.heavy),
             limits,
             on_change=repo.on_change,
@@ -528,6 +537,9 @@ class AgentWorker(WorkerLoops):
             job.params.get(protocol.PARAM_REMARKS, ""),
         )
         return await loop.run(system, task)
+
+    def _notes_of(self, job_id: str) -> AgentNotes:
+        return AgentNotes(self._settings.work_dir / NOTES_DIR / f"{job_id}{NOTES_SUFFIX}")
 
     def _steps_trace(self, root: Path) -> StepTrace:
         return StepTrace(root / STEPS_FILE, scrub=self.scrub)
@@ -635,6 +647,7 @@ class AgentWorker(WorkerLoops):
             await self._park(run, result.dialog, usage)
             return
         if result.status is AgentStatus.FINISHED:
+            self._notes_of(job.id).discard()
             await self._retry(lambda: run.repo.finish(result.summary), None)
             await self.send(
                 job.id, protocol.MSG_DONE, {protocol.PAYLOAD_SUMMARY: result.summary, **usage}

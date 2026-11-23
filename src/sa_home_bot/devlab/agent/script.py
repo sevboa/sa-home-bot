@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from sa_home_bot.devlab.agent.notes import NOTES_LIMIT_CHARS
 from sa_home_bot.devlab.agent.sandbox import IGNORED_DIRS
 
 CONTROL_STEP_DONE = "step_done"
@@ -94,6 +95,24 @@ SCRIPT_API: tuple[tuple[str, str, str], ...] = (
         "def diff() -> str: ...",
         "унифицированный дифф всех изменённых текстовых файлов рабочей копии против базы "
         "задания (src, tests, docs и остальные)",
+    ),
+    (
+        "note",
+        "def note(text: str) -> None: ...",
+        "дописать заметку в файл заметок задания: он переживает свёртку истории и перезапуск, "
+        "его текст показан тебе в начале; пиши сигнатуры, пути, ожидаемые значения, решения, "
+        f"что уже сделано; лимит {NOTES_LIMIT_CHARS} симв., при переполнении заметка не "
+        "пишется, а печатается просьба сжать через notes_set()",
+    ),
+    (
+        "notes",
+        "def notes() -> str: ...",
+        "текущий текст заметок задания",
+    ),
+    (
+        "notes_set",
+        "def notes_set(text: str) -> None: ...",
+        "заменить все заметки целиком, чтобы сжать их, когда они заполнены",
     ),
     (
         "Result",
@@ -249,6 +268,30 @@ def diff():
     if not reply.get("ok"):
         raise EditError(str(reply.get("reason", "")))
     return str(reply.get("value", ""))
+
+
+def _notes_send(op, text):
+    reply = _call("notes", {"op": op, "text": text})
+    if not reply.get("ok"):
+        print(str(reply.get("reason", "")))
+        return None
+    return str(reply.get("value", ""))
+
+
+def note(text):
+    if not isinstance(text, str):
+        raise TypeError("note: аргумент text должен быть строкой")
+    _notes_send("add", text)
+
+
+def notes():
+    return _notes_send("get", "") or ""
+
+
+def notes_set(text):
+    if not isinstance(text, str):
+        raise TypeError("notes_set: аргумент text должен быть строкой")
+    _notes_send("replace", text)
 
 
 def finish(summary):

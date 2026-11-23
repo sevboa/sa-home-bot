@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX
+from sa_home_bot.devlab.agent.notes import NOTES_BLOCK_PATTERN, notes_block
 
 CHARS_PER_TOKEN = 3
 REASONING_FIELD = "reasoning_content"
@@ -256,10 +258,31 @@ def _trim_last_unit(window: _Window) -> bool:
     return False
 
 
-def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_recent: int) -> int:
+def set_notes_block(messages: list[dict[str, Any]], notes: str) -> bool:
+    content = messages[1]["content"]
+    marker = DROPPED_STEPS_PATTERN.search(content)
+    body = content[: marker.start()] if marker else content
+    tail = content[marker.start() :] if marker else ""
+    updated = NOTES_BLOCK_PATTERN.sub("", body) + notes_block(notes) + tail
+    if updated == content:
+        return False
+    messages[1]["content"] = updated
+    return True
+
+
+def fold_old_results(
+    messages: list[dict[str, Any]],
+    budget_tokens: int,
+    keep_recent: int,
+    notes_text: Callable[[], str] | None = None,
+) -> int:
     window = _Window(messages, budget_tokens)
     if window.fits():
         return window.tokens()
+    if notes_text is not None and set_notes_block(messages, notes_text()):
+        window.reset()
+        if window.fits():
+            return window.tokens()
     boundary = _old_boundary(messages, keep_recent)
     window.limit = max(1, int(budget_tokens * FOLD_TARGET_SHARE))
     for stage in (_fold_reasoning, _fold_tool_outputs, _fold_arguments, _fold_replies):
@@ -279,7 +302,8 @@ def fold_old_results(messages: list[dict[str, Any]], budget_tokens: int, keep_re
 
 
 def task_text(messages: list[dict[str, Any]]) -> str:
-    return DROPPED_STEPS_PATTERN.sub("", str(messages[1].get("content") or ""))
+    task = DROPPED_STEPS_PATTERN.sub("", str(messages[1].get("content") or ""))
+    return NOTES_BLOCK_PATTERN.sub("", task)
 
 
 def pinned_report(messages: list[dict[str, Any]]) -> str:

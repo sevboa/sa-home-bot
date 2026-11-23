@@ -1,3 +1,4 @@
+from sa_home_bot.devlab.agent.notes import NOTES_LIMIT_CHARS
 from sa_home_bot.devlab.agent.script import SCRIPT_OUTPUT_CHARS
 
 SCRIPT_READ_EXAMPLE_EN = """# Intent: read load and its test into variables, find it in docs
@@ -116,6 +117,11 @@ _CODE_MODE_RUNS_EN = (
     "- Output is cut by characters, not lines: a file over ~6000 chars (about 150 lines) - "
     "do not print it whole and do not page through it: "
     "grep(pattern, path, context=5) shows line numbers, then read(path, start, end).\n"
+    "- Notes: learned something important (a signature, a path, an expected value, a decision, "
+    "what is already done) - write it at once with note(\"...\"). The conversation history gets "
+    "folded and script variables stay, but notes survive folding and restarts and are shown to "
+    "you at the start of the task. Do not re-read what the notes already hold. Notes full - "
+    "compress them with notes_set(\"...\"); notes() returns the current text.\n"
     "- Do not re-read a file after edit(): EditError reports failures. Use diff() only if you "
     "do not remember what you changed. If the last run is green and only docs/ changed since, "
     "call finish() at once: no rerun, no diff().\n"
@@ -377,6 +383,24 @@ SCRIPT_API_EN: tuple[tuple[str, str, str], ...] = (
         "def diff() -> str: ...",
         "unified diff of all changed text files in the working copy against the task base "
         "(src, tests, docs and the rest)",
+    ),
+    (
+        "note",
+        "def note(text: str) -> None: ...",
+        "append a note to the task notes file: it survives history folding and restarts and its "
+        "text is shown to you at the start; write signatures, paths, expected values, decisions, "
+        f"what is already done; limit {NOTES_LIMIT_CHARS} chars, when full the note is not "
+        "written and a request to compress via notes_set() is printed",
+    ),
+    (
+        "notes",
+        "def notes() -> str: ...",
+        "current text of the task notes",
+    ),
+    (
+        "notes_set",
+        "def notes_set(text: str) -> None: ...",
+        "replace all notes at once, to compress them when they are full",
     ),
     (
         "Result",
