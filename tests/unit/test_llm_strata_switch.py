@@ -2526,3 +2526,75 @@ async def test_silence_with_companion_stops_companion_and_shows_in_status():
         assert status["silence"]["until"] is None
     finally:
         await close(router, *servers)
+
+
+async def test_silence_cuts_running_request_and_unloads_at_once():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch = StrataSwitch(settings(stoppers={"iq3": ["/models/iq3-off.sh"]}), run, StepClock())
+    switch.current = "iq3"
+    upstream = ScratchUpstream(delay=30.0)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        running = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.2)
+        assert switch.active == 1
+        resp = await router.post(SILENCE_PATH, json={"silence": {"until": None}}, headers=AUTH)
+        assert resp.status == 200
+        assert run.calls == [["/models/iq3-off.sh"]]
+        assert switch.active == 0
+        assert switch.current is None
+        cut = await asyncio.wait_for(running, 2.0)
+        answer = await cut.json()
+        assert cut.status == SILENCE_STATUS
+        assert answer["code"] == SILENCE_CODE
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_silence_cuts_waiting_request_with_503():
+    journal: list[str] = []
+    run = JournalRun(journal)
+    switch = StrataSwitch(
+        settings(stoppers={"iq3": ["/models/iq3-off.sh"]}, idle_s=60.0), run, StepClock()
+    )
+    switch.current = "iq3"
+    upstream = ScratchUpstream(delay=30.0)
+    upstream_server, router = await run_router(switch, upstream)
+    try:
+        running = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.1)
+        waiting = asyncio.create_task(
+            router.post(CHAT_PATH, json={"model": "qw2", "messages": []}, headers=AUTH)
+        )
+        await asyncio.sleep(0.2)
+        assert len(switch.waiting) == 1
+        await router.post(SILENCE_PATH, json={"silence": {"until": None}}, headers=AUTH)
+        for task in (running, waiting):
+            resp = await asyncio.wait_for(task, 2.0)
+            assert resp.status == SILENCE_STATUS
+            assert (await resp.json())["code"] == SILENCE_CODE
+        assert switch.waiting == []
+        assert switch.active == 0
+        assert run.calls == [["/models/iq3-off.sh"]]
+    finally:
+        await close(router, upstream_server)
+
+
+async def test_silence_without_running_requests_still_unloads():
+    run = JournalRun([])
+    switch = StrataSwitch(settings(stoppers={"iq3": ["/models/iq3-off.sh"]}), run, StepClock())
+    switch.current = "iq3"
+    upstream_server, router = await run_router(switch, Upstream())
+    try:
+        await router.post(SILENCE_PATH, json={"silence": {"until": None}}, headers=AUTH)
+        assert switch.current is None
+        await router.post(SILENCE_PATH, json={"silence": None}, headers=AUTH)
+        resp = await router.post(CHAT_PATH, json={"model": "iq3", "messages": []}, headers=AUTH)
+        assert resp.status == 200
+    finally:
+        await close(router, upstream_server)

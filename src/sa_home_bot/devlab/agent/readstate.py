@@ -10,9 +10,17 @@ UNCHANGED = (
 class RepeatLog:
     def __init__(self) -> None:
         self._files: dict[str, tuple[str, list[tuple[int, int, int]]]] = {}
+        self._marked: dict[str, int] = {}
 
     def reset(self) -> None:
         self._files.clear()
+        self._marked.clear()
+
+    def forget_call(self, call: int) -> None:
+        for _digest, spans in self._files.values():
+            spans[:] = [span for span in spans if span[2] != call]
+        for path in [path for path, marked in self._marked.items() if marked == call]:
+            del self._marked[path]
 
     def check(self, path: str, digest: str, start: int, end: int, call: int) -> str:
         known = self._files.get(path)
@@ -21,8 +29,10 @@ class RepeatLog:
             self._files[path] = known
         spans = known[1]
         covering = _covering_call(spans, start, end)
-        if covering is not None:
+        if covering is not None and self._marked.get(path) != call - 1:
+            self._marked[path] = call
             return UNCHANGED.format(call=covering)
+        self._marked.pop(path, None)
         spans.append((start, end, call))
         return ""
 

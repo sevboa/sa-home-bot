@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import aiohttp
@@ -18,6 +19,7 @@ from sa_home_bot.devlab.executor.routing import (
     CatalogEntry,
     FailoverChat,
     ModelCatalog,
+    SilenceWatch,
     price_reply,
 )
 from sa_home_bot.llm.strata_switch import SILENCE_CODE
@@ -410,3 +412,108 @@ def test_catalog_entry_ignores_garbage_context(raw):
     entry = CatalogEntry.from_hub({protocol.MODEL_NAME: "m", protocol.MODEL_CONTEXT: raw})
 
     assert entry.context == 0
+
+
+async def hanging_then_ok_server() -> tuple[TestServer, list[asyncio.Event]]:
+    started: list[asyncio.Event] = []
+
+    async def handler(request):
+        await request.json()
+        marker = asyncio.Event()
+        started.append(marker)
+        marker.set()
+        if len(started) == 1:
+            await asyncio.sleep(30)
+        return web.json_response(reply_body("ок"))
+
+    app = web.Application()
+    app.router.add_post(protocol.HTTP_CHAT_PATH, handler)
+    server = TestServer(app)
+    await server.start_server()
+    return server, started
+
+
+async def test_silence_cuts_local_request_without_spending_round():
+    server, started = await hanging_then_ok_server()
+    session = aiohttp.ClientSession()
+    watch = SilenceWatch()
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    try:
+        chat = FailoverChat(
+            StaticCatalog(entry_at(server, "a", remote=False)),
+            lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=1,
+            sleep=record_sleep,
+            silence=watch,
+        )
+        running = asyncio.create_task(chat.complete(MESSAGES, []))
+        await asyncio.sleep(0.2)
+        watch.update(True)
+        reply = await asyncio.wait_for(running, 5.0)
+    finally:
+        await session.close()
+        await server.close()
+
+    assert reply.content == "ок"
+    assert len(started) == 2
+    assert len(sleeps) == 1
+
+
+async def test_silence_does_not_touch_remote_request():
+    server, started = await hanging_then_ok_server()
+    session = aiohttp.ClientSession()
+    watch = SilenceWatch()
+    try:
+        chat = FailoverChat(
+            StaticCatalog(entry_at(server, "a", remote=True)),
+            lambda entry: GatewayChat(entry.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=1,
+            sleep=noop_sleep,
+            silence=watch,
+        )
+        running = asyncio.create_task(chat.complete(MESSAGES, []))
+        await asyncio.sleep(0.2)
+        watch.update(True)
+        await asyncio.sleep(0.2)
+        assert not running.done()
+        assert len(started) == 1
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+    finally:
+        await session.close()
+        await server.close()
+
+
+async def test_connection_error_of_local_model_in_silence_is_silence_not_round():
+    session = aiohttp.ClientSession()
+    watch = SilenceWatch()
+    watch.update(True)
+    sleeps: list[float] = []
+
+    async def stop_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        raise asyncio.CancelledError
+
+    entry = CatalogEntry("m", "a", "http://127.0.0.1:1", remote=False)
+    try:
+        chat = FailoverChat(
+            StaticCatalog(entry),
+            lambda e: GatewayChat(e.url, "tok", "m", "job", session=session),
+            "m",
+            rounds=1,
+            silence_wait_s=7.0,
+            sleep=stop_sleep,
+            silence=watch,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await chat.complete(MESSAGES, [])
+    finally:
+        await session.close()
+
+    assert sleeps == [7.0]

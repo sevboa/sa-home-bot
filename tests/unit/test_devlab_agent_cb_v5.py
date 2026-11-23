@@ -162,14 +162,14 @@ async def test_repeat_log_resets_on_fold_and_state_loss(project):
     box = box_for(project)
     try:
         await run(box, "read('src/a.py')")
-        assert "unchanged" in await run(box, "print(read('src/a.py'))")
+        assert "unchanged" in await run(box, "print(read('src/a.py', 1, 5))")
         messages = [
             {"role": "system", "content": "s"},
             {"role": "user", "content": "task"},
             {"role": "assistant", "content": "a" * 3000},
         ]
         assert fold_old_results(messages, 10_000, 2, None, box.reset_reads) > 0
-        assert "unchanged" in await run(box, "print(read('src/a.py'))")
+        assert "unchanged" not in await run(box, "print(read('src/a.py', 1, 5))")
         fold_old_results(messages, 100, 2, None, box.reset_reads)
         assert "unchanged" not in await run(box, "print(read('src/a.py', 1, 2))")
         assert "unchanged" in await run(box, "print(read('src/a.py', 1, 2))")
@@ -177,6 +177,47 @@ async def test_repeat_log_resets_on_fold_and_state_loss(project):
         assert "unchanged" not in await run(box, "print(read('src/a.py', 1, 2))")
     finally:
         await box._sandbox.session_close()
+
+
+async def test_clipped_output_is_not_marked_as_seen(project):
+    (project / "src" / "big.txt").write_text("y" * 50_000)
+    box = box_for(project)
+    try:
+        clipped = await run(box, "print(read('src/big.txt'))\nprint(read('src/a.py'))")
+        assert "обрезано" in clipped
+        assert "line 100" in await run(box, "print(read('src/a.py'))")
+    finally:
+        await box._sandbox.session_close()
+
+
+async def test_failed_script_is_not_marked_as_seen(project):
+    box = box_for(project)
+    try:
+        await run(box, "x = read('src/a.py')\nraise ValueError('boom')")
+        assert "line 100" in await run(box, "print(read('src/a.py'))")
+    finally:
+        await box._sandbox.session_close()
+
+
+async def test_mark_not_issued_twice_in_a_row(project):
+    box = box_for(project)
+    try:
+        await run(box, "read('src/a.py')")
+        assert "unchanged" in await run(box, "print(read('src/a.py'))")
+        assert "line 100" in await run(box, "print(read('src/a.py'))")
+        assert "unchanged" in await run(box, "print(read('src/a.py'))")
+    finally:
+        await box._sandbox.session_close()
+
+
+def test_forget_call_and_consecutive_unit():
+    log = RepeatLog()
+    assert log.check("f", "d", 1, 10, 1) == ""
+    log.forget_call(1)
+    assert log.check("f", "d", 1, 10, 2) == ""
+    assert "call 2" in log.check("f", "d", 1, 10, 3)
+    assert log.check("f", "d", 1, 10, 4) == ""
+    assert "unchanged" in log.check("f", "d", 1, 10, 5)
 
 
 def test_repeat_log_unit():

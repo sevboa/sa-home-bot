@@ -7,6 +7,7 @@ import socket
 from pathlib import Path
 
 from sa_home_bot.config import DevlabConfig, Settings
+from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, podman_sandbox_factory
@@ -14,7 +15,12 @@ from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker,
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
-from sa_home_bot.devlab.executor.routing import MODELS_ANY, GatewayModels, ModelCatalog
+from sa_home_bot.devlab.executor.routing import (
+    MODELS_ANY,
+    GatewayModels,
+    ModelCatalog,
+    SilenceWatch,
+)
 from sa_home_bot.devlab.executor.runner import TestRunner
 from sa_home_bot.devlab.executor.service import ExecutorService
 from sa_home_bot.devlab.executor.silence_relay import SilenceRelay
@@ -110,7 +116,8 @@ async def run_executor(
     work_lock = await acquire_work_lock(work_dir)
     hub = ExecutorHub(cfg.hub_url, cfg.hub_token)
     catalog = ModelCatalog(hub)
-    gateways = GatewayModels(catalog, cfg.hub_token)
+    silence_watch = SilenceWatch()
+    gateways = GatewayModels(catalog, cfg.hub_token, silence_watch)
     busy = BusyTracker(cfg.owner_wait_s)
     worker_settings = WorkerSettings(
         hub_url=cfg.hub_url,
@@ -170,7 +177,13 @@ async def run_executor(
         *(asyncio.create_task(agent.run(heartbeat=False)) for agent in agents),
         asyncio.create_task(
             beat_forever(
-                hub, busy, (tester, *agents), cfg.heartbeat_interval_s, agents[0], relay=relay
+                hub,
+                busy,
+                (tester, *agents),
+                cfg.heartbeat_interval_s,
+                agents[0],
+                relay=relay,
+                silence_watch=silence_watch,
             )
         ),
     ]
@@ -202,11 +215,14 @@ async def beat_forever(
     interval_s: float,
     scrubber: WorkerLoops,
     relay: SilenceRelay | None = None,
+    silence_watch: SilenceWatch | None = None,
 ) -> None:
     async def beat() -> None:
         jobs = [job for worker in workers for job in worker.jobs]
         progress = {key: n for worker in workers for key, n in worker.progress.items()}
         reply = await send_heartbeat(hub, busy, jobs, progress)
+        if silence_watch is not None and protocol.FIELD_SILENCE in reply:
+            silence_watch.update(bool(reply[protocol.FIELD_SILENCE]))
         if relay is not None:
             await relay.push(reply)
 

@@ -54,6 +54,8 @@ SILENCE_CODE = "gpu_silence"
 SILENCE_FOREVER_TEXT = "тишина видеокарты до /silent off"
 SILENCE_UNTIL_TEXT = "тишина видеокарты до {until}"
 SILENCE_TIME_FORMAT = "%d.%m %H:%M"
+SILENCE_CUT_WAIT_S = 10.0
+STREAM_STARTED_KEY = web.RequestKey("stream_started", bool)
 SILENCE_BAD_BODY = 'тело: {"silence": null | {"until": ISO | null}}'
 COMPANION_NAME = "companion"
 RESERVE_MIB_FIELD = "reserve_mib"
@@ -563,6 +565,18 @@ def parse_silence(payload: object) -> tuple[bool, datetime | None, bool | None]:
     return True, moment, demand
 
 
+async def cut_inflight(
+    inflight: set[asyncio.Task], silenced: set[asyncio.Task], wait_s: float = SILENCE_CUT_WAIT_S
+) -> None:
+    tasks = [task for task in inflight if not task.done()]
+    if not tasks:
+        return
+    silenced.update(tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.wait(tasks, timeout=wait_s)
+
+
 async def unload_for_silence(switch: StrataSwitch, companion: Companion | None) -> None:
     if companion is not None:
         try:
@@ -861,6 +875,7 @@ async def relay_stream(
                 if gate is not None and attempt is not None:
                     gate.protect_stream(attempt)
                 await response.prepare(request)
+                request[STREAM_STARTED_KEY] = True
                 prepared = True
             await response.write(chunk)
         if not prepared:
@@ -1052,9 +1067,30 @@ def build_app(
         data = [{"id": name, "object": "model"} for name in names]
         return web.json_response({"object": "list", "data": data})
 
+    inflight: set[asyncio.Task] = set()
+    silenced: set[asyncio.Task] = set()
+
     async def chat(request: web.Request) -> web.StreamResponse:
         if switch.silence_active():
             return silence_error(switch.silence_text())
+        task = asyncio.create_task(dispatch(request))
+        inflight.add(task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if task not in silenced or (current is not None and current.cancelling() > 0):
+                raise
+            if request.get(STREAM_STARTED_KEY):
+                if request.transport is not None:
+                    request.transport.close()
+                raise
+            return silence_error(switch.silence_text())
+        finally:
+            inflight.discard(task)
+            silenced.discard(task)
+
+    async def dispatch(request: web.Request) -> web.StreamResponse:
         try:
             payload = await request.json()
         except (ValueError, UnicodeDecodeError):
@@ -1098,6 +1134,7 @@ def build_app(
         if demand is not None:
             switch.main_demand = demand
         if switch.silence_active():
+            await cut_inflight(inflight, silenced)
             await unload_for_silence(switch, companion)
         return web.json_response(
             {

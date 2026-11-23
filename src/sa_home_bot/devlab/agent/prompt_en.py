@@ -1,5 +1,10 @@
 from sa_home_bot.devlab.agent.notes import NOTES_LIMIT_CHARS
-from sa_home_bot.devlab.agent.script import SCRIPT_OUTPUT_CHARS
+from sa_home_bot.devlab.agent.remote import SCRIPT_OUTPUT_MAX_CHARS_R2
+from sa_home_bot.devlab.agent.script import (
+    SCRIPT_CHECK_R2,
+    SCRIPT_OUTPUT_CHARS,
+    with_check_api,
+)
 
 SCRIPT_READ_EXAMPLE_EN = """# Intent: read load and its test into variables, find it in docs
 src = read("src/pkg/a.py", 40, 90)
@@ -317,6 +322,102 @@ CODE_MODE_REMINDER_REMOTE_EN = (
     "batches. Finish: last edits, run_tests(), run(\"ruff check ...\") and finish(\"summary\") "
     "- in one call; finish closes all steps, step_done() is optional."
 )
+SCRIPT_R2_READ_EXAMPLE_EN = """# Intent: read everything the task needs in one call
+files = read_many(["src/pkg/a.py", "tests/test_a.py", "docs/pkg.md"])
+for path, text in files.items():
+    print(f"=== {path} ===")
+    print(text)
+print("\\n".join(grep(r"load", "src/pkg", context=2)))"""
+SCRIPT_R2_EDIT_EXAMPLE_EN = """# Intent: test, load fix, docs, check and finish in one call
+src, test = files["src/pkg/a.py"], files["tests/test_a.py"]
+old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
+edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
+old = next(r for r in src.splitlines(keepends=True) if "return 1" in r)
+edit("src/pkg/a.py", old, old.replace("1", "2"))
+write("docs/pkg.md", files["docs/pkg.md"] + "\\n- 2026-11-23: load возвращает 2.\\n")
+r = check(["tests/test_a.py"])
+print(r)
+if r.ok:
+    finish("load возвращает 2; тесты, ruff и стражи зелёные")"""
+_CODE_MODE_COST_R2_EN = (
+    "Requests to the model are limited per day: every execute call spends the daily quota. "
+    "Thinking and tokens are free. The goal is as few calls per task as possible, usually "
+    "three or four. Work out the whole solution before writing a call.\n"
+    "Rules:\n"
+    "1. The first call is reconnaissance. Read EVERYTHING the task needs in one script: all "
+    "files named in task.md, references, neighboring examples (grep() over neighboring modules "
+    "and tests). Print files whole: output goes up to ~"
+    f"{SCRIPT_OUTPUT_MAX_CHARS_R2} chars. Never read one file per call.\n"
+    "2. Every call that edits code runs the tests in the same script and prints the result. "
+    "An edit and its test run are never split across calls.\n"
+    "3. Several edits of one file, and edits of several files and tests, go in one call.\n"
+    "4. Tests are green: call finish() at once. It checks ruff, the guards and the full suite "
+    "itself and returns everything that is wrong as one list. Do not run ruff, diff() or git "
+    "diff in separate calls.\n"
+    "5. Do not re-check what is already checked: take what you read from variables, do not "
+    "repeat a green run.\n"
+    "A call failed or tests are red: the next call fixes exactly that from the output and "
+    "runs the tests again in the same script.\n"
+)
+_CODE_MODE_RUNS_R2_EN = (
+    "\n"
+    "## How code runs\n"
+    "- Like plain Python, immediately and in order: edit() and write() change the file at once. "
+    "If the fragment is not found, edit() raises EditError and the script stops on that line; "
+    "edits before it are already applied.\n"
+    "- run_tests(paths), run(command) and check() start the process at once and return a "
+    "Result: r.ok, r.code, r.output. Pytest output is compact: green is one summary line, red "
+    "is only the failed tests with a short traceback.\n"
+    "- check(paths=None) runs, in one call, the narrow tests (paths or the changed test files "
+    "of the task) and the project guards (ruff etc.) and prints an OK/FAIL summary for each "
+    "check.\n"
+    "- One process per task, like a Jupyter kernel: variables, imports and functions from "
+    "earlier calls persist. Read into variables (files = read_many(...)) and take the lines "
+    "for edit() from them. After a timeout or a crash the state is reset and the output says "
+    "so; files on disk stay.\n"
+    "- You see what print() printed and the value of the last expression. Output longer than "
+    f"{SCRIPT_OUTPUT_MAX_CHARS_R2} chars (less with a small window) is cut; you see the "
+    "beginning.\n"
+    "- Do not re-read a file after edit(): EditError reports failures. diff() is not needed.\n"
+    "- Processes only via run(), run_tests() and check(); subprocess and os.system are "
+    "forbidden.\n"
+    "\n"
+    "## Steps and finishing\n"
+    "- finish(\"summary\") closes all steps of the task and ends it; put it in the same call as "
+    "the last edits and the check, under if r.ok. The guard checks the diff, tests and project "
+    "rules; on rejection it returns all remarks at once as a list: fix them all in one call "
+    "and call finish() again.\n"
+    "- step_done() is not needed.\n"
+)
+_CODE_MODE_EXAMPLE_R2_EN = (
+    "## Example: a three-step task in two calls (a third only if red)\n"
+    "Steps: 1 - a test for the new behaviour, 2 - code fix, 3 - a note in docs/.\n"
+    "\n"
+    "Call 1 - reconnaissance, everything at once:\n"
+    f"{SCRIPT_R2_READ_EXAMPLE_EN}\n"
+    "\n"
+    "Call 2 - all edits, the check and finish in one script; lines for edit() come from the "
+    "variables of call 1:\n"
+    f"{SCRIPT_R2_EDIT_EXAMPLE_EN}\n"
+    "\n"
+    "Call 3 - only if the check is red: fixes from the output, check() again and finish() in "
+    "the same script.\n"
+    "\n"
+)
+CODE_MODE_INTRO_R2_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_R2_EN
+    + _CODE_MODE_RUNS_R2_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_R2_EN
+    + _CODE_MODE_TAIL_EN
+)
+CODE_MODE_REMINDER_R2_EN = (
+    "[Reminder] Requests per day are limited, tokens are free. Read everything you need in "
+    "one script; edit and run the tests in one call (check() or run_tests()); green - call "
+    "finish() at once, it checks ruff and the guards itself; do not run ruff or diff in "
+    "separate calls; do not re-check what is checked."
+)
 GLM_SETTING_TITLE_EN = "## Setting"
 RULES_TITLE_EN = "Project rules (mandatory):"
 EN = "en"
@@ -556,4 +657,16 @@ CODE_MODE_INTRO_CB_V5_EN = (
 CODE_MODE_REMINDER_CB_V5_EN = (
     "[Reminder] Keep going until the task is done: diagnose failures and work around them, "
     "check with tests before finish(), ask the owner only for a real blocker."
+)
+SCRIPT_API_R2_EN = with_check_api(
+    SCRIPT_API_EN,
+    "pytest over a list of test paths (path::test_name allowed); returns a Result; a green run "
+    "is one summary line, a red run only the failed tests with a short traceback; if a test "
+    "that existed in the task base fails, output has the line \"сначала проверь код, а не тест\"",
+    (
+        SCRIPT_CHECK_R2[0],
+        SCRIPT_CHECK_R2[1],
+        "in one call: the narrow tests (paths or the changed test files of the task) and the "
+        "project guards (ruff etc.); a Result with an OK/FAIL summary for each check",
+    ),
 )
