@@ -42,7 +42,6 @@ async def run_vpn(settings: Settings) -> None:
     await apply_migrations(db)
 
     transports = settings.vpn.transports or [TRANSPORT_AWG]
-    awg_on = TRANSPORT_AWG in transports
 
     if settings.vpn.awg_alt is not None:
         primary = RealAwgBackend(settings.vpn.interface)
@@ -110,8 +109,7 @@ async def run_vpn(settings: Settings) -> None:
     tasks = [usage_task]
     if settings.vpn.warp is not None:
         tasks.append(asyncio.create_task(service.warp_probe_loop(), name="vpn-warp-probe-loop"))
-    if awg_on:
-        tasks.append(asyncio.create_task(service.check_loop(), name="vpn-check-loop"))
+    tasks.append(asyncio.create_task(service.check_loop(), name="vpn-check-loop"))
     log.info(
         "Служба vpn запущена: транспорты %s, сокет %s",
         ",".join(transports),
