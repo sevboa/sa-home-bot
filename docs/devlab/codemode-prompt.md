@@ -241,6 +241,10 @@ reminder_file = "/models/sa-home/devlab/prompts/reminder.md"
 - Поля не заменяют `prompt_style`/`remote_style`: они определяют определения инструментов и поведение хоста (cb_v4 разметка, r2 `check`), файлы меняют только два текста.
 - Код: `executor/agent_worker.py` (`read_profile_file`, `_code_mode_overrides`), `agent/prompt.py`, `agent/model.py`; тесты: `tests/unit/test_devlab_agent_worker.py`, `tests/unit/test_devlab_agent.py`.
 
+## Затёртые имена API (2026-11-23)
+
+Задание b8gg9k (GLM cb_v5): `import os, glob, json` затёр функцию API `glob` модулем, следующий вызов `glob(...)` упал. Воркер скрипта (`_restore_api` в `agent/script.py`) после каждого выполнения сверяет имена API в пространстве исполнения с оригиналами: затёртое (модулем или присвоением, например `read = 5`) возвращается, а в вывод добавляется строка `[note] import glob shadowed the API function glob; it is restored - use the module as import glob as globmod` (для присвоения: `assigning read shadowed ...; use another variable name`). Перехват в момент выполнения не делался: `exec` с подклассом dict обходит `__setitem__` при import и присваивании. Падающий в том же скрипте вызов не спасается. Остальные переменные сохраняются между вызовами как раньше. Тесты: `tests/unit/test_devlab_agent_run_script.py`, `tests/unit/test_devlab_agent_cb_v5.py`.
+
 ## r3: короткий промпт удалённого режима (2026-11-23)
 
 `remote_style = "r3"` — значение по умолчанию для удалённых моделей (`DevlabProfileConfig`, `AgentSpec`); r1 и r2 остаются выбираемыми полем профиля. Для GLM воркер по-прежнему ставит r1, `prompt_style` не затронут.

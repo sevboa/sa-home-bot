@@ -234,6 +234,7 @@ import subprocess
 import sys
 import time
 import traceback
+import types
 
 _START = time.monotonic()
 _IGNORED = frozenset(_CONFIG["ignored"])
@@ -869,6 +870,27 @@ for _fd in (0, 1, 2):
 sys.stdin = io.StringIO("")
 _KNOWN_MODULES = frozenset(sys.modules)
 _namespace = {"__name__": "__main__", **{name: globals()[name] for name in _CONFIG["names"]}}
+_API = {name: _namespace[name] for name in _CONFIG["names"]}
+
+
+def _restore_api():
+    notes = []
+    for name, original in _API.items():
+        current = _namespace.get(name, original)
+        if current is original:
+            continue
+        _namespace[name] = original
+        if isinstance(current, types.ModuleType):
+            notes.append(
+                f"[note] import {name} shadowed the API function {name}; it is restored"
+                f" - use the module as import {name} as {name}mod"
+            )
+        else:
+            notes.append(
+                f"[note] assigning {name} shadowed the API function {name}; it is restored"
+                " - use another variable name"
+            )
+    return notes
 
 
 def _drop_project_modules():
@@ -915,6 +937,8 @@ def _run_one(code):
             traceback.print_exception(
                 type(error), error, error.__traceback__.tb_next, file=sys.stdout
             )
+        for note in _restore_api():
+            print(note)
         try:
             for note in _finalize():
                 print(note)
