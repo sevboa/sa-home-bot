@@ -748,6 +748,8 @@ class ToolBox:
             text = f"{SCRIPT_FAILED_HEAD}\n{died}\n{SCRIPT_STATE_RESET}"
             return ToolOutcome(text, mutating=mutating)
         run = parse_reply(reply.data)
+        if self._repeats is not None and run.failed:
+            self._repeats.forget_call(self._calls)
         limit = max(self._spec.output_chars, SCRIPT_OUTPUT_CHARS)
         hint = SCRIPT_CLIPPED_HINT
         if self._remote_r2:
@@ -760,6 +762,8 @@ class ToolBox:
             return ToolOutcome(
                 f"{SCRIPT_FAILED_HEAD}\n{output}", mutating=mutating, green=run.green
             )
+        if self._repeats is not None and len(run.output) > limit:
+            self._repeats.forget_call(self._calls)
         silent = "" if run.control or accepted else SCRIPT_NO_OUTPUT
         output = clip_head(run.output, limit, hint) or silent
         control = (
