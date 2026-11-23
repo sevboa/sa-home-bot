@@ -30,7 +30,6 @@ from sa_home_bot.devlab.agent.prompt_en import (
 from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5, RepeatLog
 from sa_home_bot.devlab.agent.remote import (
     REMOTE_R2,
-    REMOTE_R3,
     SCRIPT_OUTPUT_MAX_CHARS_R2,
     SCRIPT_RUN_OUTPUT_CHARS_R2,
 )
@@ -346,11 +345,9 @@ class ToolBox:
         self._sandbox = sandbox
         self._spec = spec
         self._remote_r2 = spec.code_mode and spec.remote_style == REMOTE_R2
-        self._remote_r3 = spec.code_mode and spec.remote_style == REMOTE_R3
-        plain = self._remote_r2 or self._remote_r3
-        cb_v4 = spec.code_mode and spec.prompt_style == STYLE_CB_V4 and not plain
+        cb_v4 = spec.code_mode and spec.prompt_style == STYLE_CB_V4 and not self._remote_r2
         self._markup = Markup() if cb_v4 else None
-        cb_v5 = spec.code_mode and spec.prompt_style == STYLE_CB_V5 and not plain
+        cb_v5 = spec.code_mode and spec.prompt_style == STYLE_CB_V5 and not self._remote_r2
         self._repeats = RepeatLog() if cb_v5 else None
         self._calls = 0
         self._read_lines = read_lines

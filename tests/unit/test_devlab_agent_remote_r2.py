@@ -183,6 +183,10 @@ def test_r3_keeps_setting_rules_and_role_text():
 
 
 def test_r3_uses_r1_definitions_and_limits(project):
-    box = box_for(project, remote_style="r3", prompt_style="cb_v4")
+    box = box_for(project, remote_style="r3")
     assert box.definitions[1] is EXECUTE_DEFINITION
-    assert box._markup is None
+
+
+def test_default_remote_style_keeps_glm_prompt_style_features(project):
+    assert box_for(project, remote_style="r3", prompt_style="cb_v4")._markup is not None
+    assert box_for(project, remote_style="r2", prompt_style="cb_v4")._markup is None
