@@ -129,7 +129,8 @@ async def submit(
     depends_on: list[str] | None = None,
     fallback: str = "",
 ) -> Any:
-    check_task_length(task)
+    if purpose != protocol.PURPOSE_BENCH:
+        check_task_length(task)
     if not base_branch and len(depends_on or []) != 1:
         raise HubError("base_branch: обязателен, если зависимостей не ровно одна")
     if (

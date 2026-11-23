@@ -232,6 +232,14 @@ async def test_long_task_is_rejected(client, store, alice):
     assert await store.queue.list_jobs() == []
 
 
+async def test_long_bench_task_is_queued(client, store, alice):
+    await register(client, store, alice)
+    task = "x" * (protocol.TASK_LONG_CHARS + 1)
+    is_error, submitted = await submit(client, alice, task=task, purpose=protocol.PURPOSE_BENCH)
+    assert not is_error
+    assert submitted["job"]["id"]
+
+
 async def test_submit_with_profile(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice, profile="docs")
