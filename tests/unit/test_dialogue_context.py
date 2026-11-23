@@ -415,6 +415,14 @@ async def test_threshold_adds_step_away_instruction(store):
     assert state["prompt_tokens"] == 1000 and state["num_ctx"] == 32768
 
 
+def test_step_away_instruction_yields_to_farewell():
+    text = dialogue_context.STEP_AWAY_INSTRUCTION
+    assert "dismiss" in text
+    assert "спать" in text
+    assert "прощается" in text
+    assert text.index("прощается") > text.index("Пообещай скоро вернуться")
+
+
 async def test_below_threshold_no_instruction(store):
     await _long_dialogue(store, 10)
     await _turn(store, 21, "user", "а что дальше?")
