@@ -129,7 +129,7 @@ async def test_real_mcp_client_lists_tools_and_reads_resources(client, alice):
 
 @pytest.mark.parametrize(
     "uri, marker",
-    [(protocol.RESOURCE_TASK_TEMPLATE, "## Шаги"), (protocol.RESOURCE_USAGE, "agent/<id>")],
+    [(protocol.RESOURCE_TASK_TEMPLATE, "**Проверка:**"), (protocol.RESOURCE_USAGE, "agent/<id>")],
 )
 async def test_resources_read(client, alice, uri, marker):
     result = await rpc(client, alice, "resources/read", {"uri": uri})
