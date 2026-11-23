@@ -154,7 +154,8 @@ async def test_executor_actions_follow_transition_table(queue, status, kind):
     job = await SETUPS[status](queue)
     target = EXECUTOR_ACTIONS[kind]
     confirms_stop = kind == S.MSG_STOPPED and status == S.STATUS_STOPPED
-    if target in S.TRANSITIONS[status] or confirms_stop:
+    repeats_question = kind == S.MSG_QUESTION and status == S.STATUS_WAITING_OWNER
+    if target in S.TRANSITIONS[status] or confirms_stop or repeats_question:
         await queue.post_from_executor(job.id, kind)
         assert (await queue.get_job(job.id)).status == target
     else:
@@ -1464,3 +1465,11 @@ async def test_reviews_filter_by_since(queue):
     ).isoformat()
     filtered_empty = await queue.reviews(since=future)
     assert len(filtered_empty) == 0
+
+
+async def test_duplicate_question_while_waiting_owner_is_idempotent(queue):
+    job = await waiting_job(queue)
+    await queue.post_from_executor(job.id, S.MSG_QUESTION, {S.PAYLOAD_TEXT: "ещё раз"})
+    assert (await queue.get_job(job.id, CLIENT)).status == S.STATUS_WAITING_OWNER
+    kinds = [m.kind for m in await queue.inbox(CLIENT)]
+    assert kinds.count(S.MSG_QUESTION) == 2

@@ -744,7 +744,10 @@ class HubQueue:
                         f"задание {job_id} ({job.kind}, {job.status}): {kind} недопустим"
                     )
                 kind, payload = await self._requeue(conn, job, payload)
-            elif not (kind == protocol.MSG_STOPPED and job.status == protocol.STATUS_STOPPED):
+            elif not (
+                (kind == protocol.MSG_STOPPED and job.status == protocol.STATUS_STOPPED)
+                or (kind == protocol.MSG_QUESTION and job.status == protocol.STATUS_WAITING_OWNER)
+            ):
                 target = protocol.MESSAGE_TARGET_STATUS[kind]
                 if target is None:
                     if job.status != protocol.STATUS_RUNNING:
