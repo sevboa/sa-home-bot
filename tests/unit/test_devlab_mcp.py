@@ -212,20 +212,24 @@ async def test_submit_without_base_branch_pushed(client, store, alice):
     assert await store.queue.list_jobs() == []
 
 
-@pytest.mark.parametrize(
-    ("size", "warned"),
-    [(protocol.TASK_LONG_CHARS, False), (protocol.TASK_LONG_CHARS + 1, True)],
-)
-async def test_long_task_gives_warning_but_is_queued(client, store, alice, size, warned):
+async def test_task_at_limit_is_queued(client, store, alice):
     await register(client, store, alice)
     gateway = await store.issue_token("gw", protocol.ROLE_GATEWAY)
     principal = await store.authenticate(gateway)
     await store.heartbeat(principal, {protocol.FIELD_MODELS: [{protocol.MODEL_NAME: MODEL}]})
-    _, submitted = await submit(client, alice, task="x" * size)
+    is_error, submitted = await submit(client, alice, task="x" * protocol.TASK_LONG_CHARS)
+    assert not is_error
     assert submitted["job"]["id"]
-    assert bool(submitted["warnings"]) is warned
-    if warned:
-        assert str(size) in submitted["warnings"][0]
+    assert submitted["warnings"] == []
+
+
+async def test_long_task_is_rejected(client, store, alice):
+    await register(client, store, alice)
+    size = protocol.TASK_LONG_CHARS + 1
+    is_error, text = await submit(client, alice, task="x" * size)
+    assert is_error
+    assert str(size) in text and "не поставлена" in text
+    assert await store.queue.list_jobs() == []
 
 
 async def test_submit_with_profile(client, store, alice):
