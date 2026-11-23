@@ -59,7 +59,7 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_models` | — | каталог живых моделей (`HubStore.models()`) |
 | `devlab_project_add` | `name` | регистрирует проект и bare-репозиторий; в ответе `git_path` |
 | `devlab_projects` | — | список проектов |
-| `devlab_submit` | `project`, `model`, `task`, `base_branch` (`base/...`), `priority` | ставит задание; `warnings`, если модели нет в каталоге (задание всё равно ждёт её) |
+| `devlab_submit` | `project`, `model`, `task`, `base_branch` (`base/...`), `priority` | ставит задание; `warnings`, если модели нет в каталоге (задание всё равно ждёт её); `task` длиннее `TASK_LONG_CHARS` (1500 знаков) — ошибка, задание не создаётся; кроме `purpose=bench` (экзамены стенда) |
 | `devlab_test` | `project`, `ref`, `cmd`, `args`, `wait` | ставит задание `test`; `wait` секунд (0..1800) ждёт результата |
 | `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ); для `agent` — `file=steps.jsonl`, журнал шагов |
 | `devlab_list` | `statuses` | свои задания без текста task.md |

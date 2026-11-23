@@ -94,6 +94,15 @@ async def model_warnings(ctx: Context, model: str) -> list[str]:
     ]
 
 
+def check_task_length(task: str) -> None:
+    if len(task) > protocol.TASK_LONG_CHARS:
+        raise HubError(
+            f"Задача длинная ({len(task)} знаков > {protocol.TASK_LONG_CHARS}), не поставлена:"
+            " сократи — поведение, образец, проверка, пути;"
+            " правила проекта и шаги не повторяй."
+        )
+
+
 async def models(ctx: Context) -> Any:
     return await ctx.store.models()
 
@@ -120,6 +129,8 @@ async def submit(
     depends_on: list[str] | None = None,
     fallback: str = "",
 ) -> Any:
+    if purpose != protocol.PURPOSE_BENCH:
+        check_task_length(task)
     if not base_branch and len(depends_on or []) != 1:
         raise HubError("base_branch: обязателен, если зависимостей не ровно одна")
     if (
@@ -144,7 +155,10 @@ async def submit(
         depends_on=depends_on or (),
         fallback=fallback,
     )
-    return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
+    return {
+        "job": job_view(job, with_task=False),
+        "warnings": [*await model_warnings(ctx, model)],
+    }
 
 
 async def test_outcome(ctx: Context, job: Any) -> Any:
@@ -316,7 +330,8 @@ TOOLS: tuple[Tool, ...] = (
         protocol.TOOL_SUBMIT,
         "Поставить задание агенту в очередь. Базу нужно заранее запушить в ветку base/<имя>."
         " Если модели нет в каталоге, задание всё равно встанет в очередь и будет ждать её;"
-        " ответ предупредит об этом в warnings.",
+        " ответ предупредит об этом в warnings."
+        f" Задача длиннее {protocol.TASK_LONG_CHARS} знаков отклоняется.",
         (
             Param("project", "string", "Имя зарегистрированного проекта.", required=True),
             Param("model", "string", "Имя модели из devlab_models.", required=True),

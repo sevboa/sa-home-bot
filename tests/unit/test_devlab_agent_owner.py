@@ -266,7 +266,7 @@ async def test_resume_with_other_model_starts_fresh_with_journal_and_remarks(env
     assert not worker.parked_jobs
     model = ScriptedChatModel(FINISH)
     names: list[str] = []
-    worker._models = lambda name, jid, style: names.append(name) or model
+    worker._models = lambda name, jid, style, reminder: names.append(name) or model
 
     assert await worker.claim_once()
 

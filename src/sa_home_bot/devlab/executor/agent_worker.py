@@ -137,6 +137,16 @@ def token_ceiling(entries: list[CatalogEntry], max_tokens: int) -> int:
     return max_tokens
 
 
+def read_profile_file(name: str, label: str, configured: str) -> str | None:
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    try:
+        return path.read_text().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ModelUnavailable(f"профиль {name}: {label} {path} не читается: {exc}") from None
+
+
 class ModelUnavailable(Exception):
     pass
 
@@ -489,6 +499,7 @@ class AgentWorker(WorkerLoops):
                 remote_style=REMOTE_R1 if is_glm(job.model) else profile.remote_style,
             )
         role_text = self._role_text(profile_name, profile)
+        intro_text, reminder_text = self._code_mode_overrides(profile_name, profile)
         baseline = await self._baseline(run, repo.base)
         base_dir = run.root / BASE_DIR
         held = self._parked_sandboxes.pop(job.id, None)
@@ -503,7 +514,7 @@ class AgentWorker(WorkerLoops):
         rules = await self._rules(run, project, repo.base, external)
         limits = self._limits_for(spend, entries, profile)
         loop = AgentLoop(
-            MeteredChat(self._models(job.model, job.id, spec.chat_style), spend),
+            MeteredChat(self._models(job.model, job.id, spec.chat_style, reminder_text), spend),
             ToolBox(
                 sandbox,
                 spec,
@@ -527,6 +538,7 @@ class AgentWorker(WorkerLoops):
             code_mode=spec.code_mode,
             lang=spec.prompt_lang,
             style=spec.chat_style,
+            intro=intro_text,
         )
         if role_text is not None:
             system = system + "\n\n" + role_text
@@ -569,11 +581,16 @@ class AgentWorker(WorkerLoops):
     def _role_text(self, name: str, profile: DevlabProfileConfig | None) -> str | None:
         if profile is None or not profile.prompt_file:
             return None
-        path = Path(profile.prompt_file).expanduser()
-        try:
-            return path.read_text().strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ModelUnavailable(f"профиль {name}: файл роли {path} не читается: {exc}") from None
+        return read_profile_file(name, "файл роли", profile.prompt_file)
+
+    def _code_mode_overrides(
+        self, name: str, profile: DevlabProfileConfig | None
+    ) -> tuple[str | None, str | None]:
+        if profile is None or not profile.code_mode:
+            return None, None
+        intro = read_profile_file(name, "файл вводного текста", profile.intro_file)
+        reminder = read_profile_file(name, "файл напоминания", profile.reminder_file)
+        return intro, reminder
 
     def _limits_for(
         self,

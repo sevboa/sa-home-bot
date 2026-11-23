@@ -13,12 +13,14 @@ from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_CB_V4_EN,
     CODE_MODE_INTRO_CB_V5_EN,
     CODE_MODE_INTRO_R2_EN,
+    CODE_MODE_INTRO_R3,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_CB_V1_EN,
     CODE_MODE_REMINDER_CB_V2_EN,
     CODE_MODE_REMINDER_CB_V3_EN,
     CODE_MODE_REMINDER_CB_V5_EN,
     CODE_MODE_REMINDER_R2_EN,
+    CODE_MODE_REMINDER_R3,
     CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
@@ -26,7 +28,7 @@ from sa_home_bot.devlab.agent.prompt_en import (
     RULES_TITLE_EN,
 )
 from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5
-from sa_home_bot.devlab.agent.remote import REMOTE_R2, SCRIPT_OUTPUT_MAX_CHARS_R2
+from sa_home_bot.devlab.agent.remote import REMOTE_R2, REMOTE_R3, SCRIPT_OUTPUT_MAX_CHARS_R2
 from sa_home_bot.devlab.agent.script import (
     SCRIPT_CODE_EXAMPLE,
     SCRIPT_EDIT_EXAMPLE,
@@ -523,6 +525,7 @@ CODE_MODE_R2_TEXTS = {
     "ru": (CODE_MODE_INTRO_R2, CODE_MODE_REMINDER_R2),
     EN: (CODE_MODE_INTRO_R2_EN, CODE_MODE_REMINDER_R2_EN),
 }
+CODE_MODE_R3_TEXTS = (CODE_MODE_INTRO_R3, CODE_MODE_REMINDER_R3)
 CODE_MODE_REMOTE_TEXTS = {
     "ru": (CODE_MODE_INTRO_REMOTE, CODE_MODE_REMINDER_REMOTE),
     EN: (CODE_MODE_INTRO_REMOTE_EN, CODE_MODE_REMINDER_REMOTE_EN),
@@ -532,6 +535,8 @@ CODE_MODE_REMOTE_TEXTS = {
 def _code_mode_texts(model: str, lang: str, style: str) -> tuple[str, str]:
     key = EN if lang == EN else "ru"
     if not is_glm(model):
+        if style == REMOTE_R3:
+            return CODE_MODE_R3_TEXTS
         return CODE_MODE_R2_TEXTS[key] if style == REMOTE_R2 else CODE_MODE_REMOTE_TEXTS[key]
     return CODE_MODE_TEXTS[key][style]
 
@@ -574,11 +579,15 @@ def build_system(
     code_mode: bool = False,
     lang: str = "ru",
     style: str = DEFAULT_STYLE,
+    intro: str | None = None,
 ) -> str:
     if style == STYLE_CB_V5:
         lang = EN
     english = code_mode and lang == EN
-    parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]
+    if code_mode:
+        parts = [intro if intro is not None else code_mode_intro_for(model, lang, style)]
+    else:
+        parts = [intro_for(model)]
     if code_mode:
         parts.append(code_mode_setting(commands, today or date.today(), lang))
     elif is_glm(model):

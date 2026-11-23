@@ -167,6 +167,8 @@ CPUSET_PATTERN = r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$"
 
 class DevlabProfileConfig(BaseModel):
     prompt_file: str = ""
+    intro_file: str = ""
+    reminder_file: str = ""
     max_steps: int | None = Field(default=None, ge=1)
     max_wall_s: float | None = Field(default=None, gt=0)
     write_prefixes: list[str] = Field(default_factory=list)
@@ -175,7 +177,7 @@ class DevlabProfileConfig(BaseModel):
     code_mode: bool = False
     prompt_lang: Literal["ru", "en"] = "ru"
     prompt_style: Literal["cb_v1", "cb_v2", "cb_v3", "cb_v4", "cb_v5"] = "cb_v3"
-    remote_style: Literal["r1", "r2"] = "r1"
+    remote_style: Literal["r1", "r2", "r3"] = "r3"
     quick_steps: int = Field(default=0, ge=0)
     quick_params: dict[str, Any] = Field(default_factory=dict)
     params: dict[str, Any] = Field(default_factory=dict)

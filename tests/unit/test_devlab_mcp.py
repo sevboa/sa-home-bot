@@ -129,7 +129,7 @@ async def test_real_mcp_client_lists_tools_and_reads_resources(client, alice):
 
 @pytest.mark.parametrize(
     "uri, marker",
-    [(protocol.RESOURCE_TASK_TEMPLATE, "## Шаги"), (protocol.RESOURCE_USAGE, "agent/<id>")],
+    [(protocol.RESOURCE_TASK_TEMPLATE, "**Проверка:**"), (protocol.RESOURCE_USAGE, "agent/<id>")],
 )
 async def test_resources_read(client, alice, uri, marker):
     result = await rpc(client, alice, "resources/read", {"uri": uri})
@@ -210,6 +210,34 @@ async def test_submit_without_base_branch_pushed(client, store, alice):
     is_error, text = await submit(client, alice, base_branch="base/missing")
     assert is_error and "git push" in text and "base/missing" in text
     assert await store.queue.list_jobs() == []
+
+
+async def test_task_at_limit_is_queued(client, store, alice):
+    await register(client, store, alice)
+    gateway = await store.issue_token("gw", protocol.ROLE_GATEWAY)
+    principal = await store.authenticate(gateway)
+    await store.heartbeat(principal, {protocol.FIELD_MODELS: [{protocol.MODEL_NAME: MODEL}]})
+    is_error, submitted = await submit(client, alice, task="x" * protocol.TASK_LONG_CHARS)
+    assert not is_error
+    assert submitted["job"]["id"]
+    assert submitted["warnings"] == []
+
+
+async def test_long_task_is_rejected(client, store, alice):
+    await register(client, store, alice)
+    size = protocol.TASK_LONG_CHARS + 1
+    is_error, text = await submit(client, alice, task="x" * size)
+    assert is_error
+    assert str(size) in text and "не поставлена" in text
+    assert await store.queue.list_jobs() == []
+
+
+async def test_long_bench_task_is_queued(client, store, alice):
+    await register(client, store, alice)
+    task = "x" * (protocol.TASK_LONG_CHARS + 1)
+    is_error, submitted = await submit(client, alice, task=task, purpose=protocol.PURPOSE_BENCH)
+    assert not is_error
+    assert submitted["job"]["id"]
 
 
 async def test_submit_with_profile(client, store, alice):
