@@ -130,6 +130,7 @@ cat > "$BUILD_DIR/config.json" <<EOF
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
+        "sockopt": { "tcpKeepAliveIdle": 300, "tcpKeepAliveInterval": 30 },
         "realitySettings": {
           "show": false,
           "dest": "${DEST}",

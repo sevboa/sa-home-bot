@@ -18,10 +18,12 @@ from sa_home_bot.node.fixups.netfilter import (
     NFTABLES_CONF_PATH,
     default_route_iface,
     ensure_ip_forward,
+    ensure_sysctl_d,
     filter_table_json,
     indent,
     line_index,
     nft_check_file,
+    sysctl_int,
     ufw_allow_all,
     ufw_allows_all,
     ufw_in_use,
@@ -401,6 +403,88 @@ def make_reality_xhttp_inbound_fixup(settings: Settings) -> Fixup:
         id="reality-xhttp-inbound",
         title="Вход Reality с транспортом XHTTP в xray через API без рестарта",
         needed=lambda s: needs.vpn(s) and getattr(s.vpn.reality, "xhttp", None) is not None,
+        check=check,
+        apply=apply,
+    )
+
+
+CONNTRACK_SYSCTL_PATH = Path("/etc/sysctl.d/99-sa-home-vpn-conntrack.conf")
+CONNTRACK_MAX_KEY = "net.netfilter.nf_conntrack_max"
+CONNTRACK_ESTABLISHED_KEY = "net.netfilter.nf_conntrack_tcp_timeout_established"
+CONNTRACK_MAX_MIN = 16384
+CONNTRACK_ESTABLISHED_TIMEOUT_S = 7200
+XRAY_KEEPALIVE_SOCKOPT = {"tcpKeepAliveIdle": 300, "tcpKeepAliveInterval": 30}
+
+
+def conntrack_sysctl_values() -> dict[str, int]:
+    return {
+        CONNTRACK_MAX_KEY: max(CONNTRACK_MAX_MIN, sysctl_int(CONNTRACK_MAX_KEY) or 0),
+        CONNTRACK_ESTABLISHED_KEY: CONNTRACK_ESTABLISHED_TIMEOUT_S,
+    }
+
+
+def make_vpn_conntrack_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        if not path_exists(CONNTRACK_SYSCTL_PATH):
+            return False
+        live_max = sysctl_int(CONNTRACK_MAX_KEY)
+        live_timeout = sysctl_int(CONNTRACK_ESTABLISHED_KEY)
+        if live_max is not None and live_max < CONNTRACK_MAX_MIN:
+            return False
+        return live_timeout is None or live_timeout == CONNTRACK_ESTABLISHED_TIMEOUT_S
+
+    def apply() -> None:
+        ensure_sysctl_d(CONNTRACK_SYSCTL_PATH, conntrack_sysctl_values())
+
+    return Fixup(
+        id="vpn-conntrack",
+        title=(
+            f"sysctl: nf_conntrack_max не ниже {CONNTRACK_MAX_MIN}, "
+            f"tcp_timeout_established = {CONNTRACK_ESTABLISHED_TIMEOUT_S} с"
+        ),
+        needed=needs.vpn,
+        check=check,
+        apply=apply,
+    )
+
+
+def with_keepalive(config: dict) -> dict:
+    out = copy.deepcopy(config)
+    for inbound in out.get("inbounds", []):
+        stream = inbound.get("streamSettings")
+        if stream:
+            stream["sockopt"] = {**stream.get("sockopt", {}), **XRAY_KEEPALIVE_SOCKOPT}
+    return out
+
+
+def xray_has_keepalive(config: dict) -> bool:
+    return with_keepalive(config) == config
+
+
+def make_xray_keepalive_fixup(settings: Settings) -> Fixup:
+    def check() -> bool:
+        try:
+            config = json.loads(xray_config_path().read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return xray_has_keepalive(config)
+
+    def apply() -> None:
+        config_path = xray_config_path()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        write_xray_config_with_test(config_path, with_keepalive(config))
+        restart = subprocess.run(["systemctl", "--user", "restart", "xray"], check=False)
+        if restart.returncode != 0:
+            raise FixupError("конфиг записан, но systemctl --user restart xray не сработал")
+        subprocess.run(["systemctl", "--user", "restart", NODE_UNIT_NAME], check=False)
+
+    return Fixup(
+        id="xray-keepalive",
+        title=(
+            "xray: проверка живости TCP на входах "
+            f"(sockopt {XRAY_KEEPALIVE_SOCKOPT}; рестарт xray и ноды)"
+        ),
+        needed=lambda s: needs.vpn(s) and s.vpn.reality is not None,
         check=check,
         apply=apply,
     )

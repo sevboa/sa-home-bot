@@ -141,7 +141,7 @@ _JEEVES_APPS = [
                 "apps-unit-sudoers-jellyfin",
             },
         ),
-        (["vpn"], "server", [], {"awg-sudoers", "proxy-units", "proxy-firewall"}),
+        (["vpn"], "server", [], {"awg-sudoers", "vpn-conntrack", "proxy-units", "proxy-firewall"}),
     ],
 )
 def test_build_fixups_follows_assignments_and_kind(root, assignments, kind, apps, expected):
@@ -501,6 +501,49 @@ def test_ensure_ip_forward_persists_sysctl_and_applies_live(root):
     netfilter.ensure_ip_forward()
     assert root.installed[str(netfilter.IP_FORWARD_SYSCTL_PATH)] == "net.ipv4.ip_forward = 1\n"
     assert ["sysctl", "-w", "net.ipv4.ip_forward=1"] in root.sudo_calls
+
+
+CONNTRACK_MAX = "/proc/sys/net/netfilter/nf_conntrack_max"
+CONNTRACK_TIMEOUT = "/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established"
+CONNTRACK_CONF = "/etc/sysctl.d/99-sa-home-vpn-conntrack.conf"
+
+
+def _conntrack_fixup():
+    return vpn_server.make_vpn_conntrack_fixup(make_settings(["vpn"]))
+
+
+@pytest.mark.parametrize(
+    ("live_max", "expected_max"), [("4096", 16384), ("65536", 65536), (None, 16384)]
+)
+def test_conntrack_fixup_never_lowers_max(root, live_max, expected_max):
+    if live_max is not None:
+        root.files[CONNTRACK_MAX] = live_max + "\n"
+        root.files[CONNTRACK_TIMEOUT] = "432000\n"
+    fixup = _conntrack_fixup()
+    assert not fixup.check()
+    fixup.apply()
+    content = root.installed[CONNTRACK_CONF]
+    assert f"net.netfilter.nf_conntrack_max = {expected_max}\n" in content
+    assert "net.netfilter.nf_conntrack_tcp_timeout_established = 7200\n" in content
+    live_calls = [c for c in root.sudo_calls if c[:2] == ["sysctl", "-w"]]
+    assert bool(live_calls) is (live_max is not None)
+
+
+@pytest.mark.parametrize(
+    ("live_max", "live_timeout", "applied"),
+    [
+        ("16384", "7200", True),
+        ("4096", "7200", False),
+        ("16384", "432000", False),
+        (None, None, True),
+    ],
+)
+def test_conntrack_fixup_check(root, live_max, live_timeout, applied):
+    root.files[CONNTRACK_CONF] = "x\n"
+    if live_max is not None:
+        root.files[CONNTRACK_MAX] = live_max + "\n"
+        root.files[CONNTRACK_TIMEOUT] = live_timeout + "\n"
+    assert _conntrack_fixup().check() is applied
 
 
 def _nft_json(*, counters_only: bool) -> str:

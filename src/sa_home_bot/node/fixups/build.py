@@ -50,6 +50,8 @@ def build_fixups(settings: Settings) -> list[Fixup]:
         vpn_server.make_reality_xhttp_ufw_fixup(settings),
         vpn_server.make_reality_xhttp_inbound_fixup(settings),
         vpn_server.make_xray_private_block_fixup(settings),
+        vpn_server.make_xray_keepalive_fixup(settings),
+        vpn_server.make_vpn_conntrack_fixup(settings),
         vpn_warp.make_vpn_warp_fixup(settings),
         vpn_server.make_awg_forward_fixup(settings),
         vpn_server.make_awg_alt_interface_fixup(settings),

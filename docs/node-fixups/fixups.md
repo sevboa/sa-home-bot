@@ -23,7 +23,7 @@
 | `privileged.py` | примитивы: `find_executable`, `run_sudo`, `run_user`, `path_exists`, `read_text`, `install_root_file`, `install_sudoers_snippet`, `install_package`, `replace_unit`, `enable_now`, `unit_is_active`, `download`, `file_sha256` |
 | `netfilter.py` | nft-обёртки (`sudo -n nft`), `NftChain`, `nft_check_file`, `filter_table_json`, ufw-разбор, `ip_forward`, маршрут по умолчанию |
 | `host.py` | smartmontools, sudoers+обёртка smartctl, PATH юнита ноды, группа journal, sudoers приложений, polkit power, Wake-on-LAN |
-| `vpn_server.py` | sudoers awg, ufw-порты awg и подписки Hiddify, `vpn-nft-ports` (порты без ufw), forward/NAT awg-сервера под ufw, подключение интерфейсов (awg-interface, awg-alt-interface) |
+| `vpn_server.py` | `vpn-conntrack` (sysctl conntrack, 2026-11-23), `xray-keepalive` (sockopt keepalive входов xray, см. [../vpn-services/server-isolation.md](../vpn-services/server-isolation.md)), sudoers awg, ufw-порты awg и подписки Hiddify, `vpn-nft-ports` (порты без ufw), forward/NAT awg-сервера под ufw, подключение интерфейсов (awg-interface, awg-alt-interface) |
 | `probe_net.py`, `probe_tunnel.py` | netns-пробники `vpn_check` (см. [vpn-probes.md](vpn-probes.md)) |
 | `proxy.py` | mtg + microsocks, счётчики трафика прокси в nftables, ufw-порт mtg |
 | `devlab.py` | мастерская devlab (Этап 60.1): podman, пользователь `devlab`, subuid/subgid, linger, обёртка контейнеров + sudoers |

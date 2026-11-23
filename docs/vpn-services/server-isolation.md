@@ -43,3 +43,20 @@ AWG (`awg0`, `awg1`) этой дыры нет: через туннель не о
    должно молчать.
 
 Тесты: `tests/unit/test_fixups_xray_private_block.py`.
+
+## Находка 2026-11-23: conntrack ion забит мёртвыми сокетами
+На ion (464 МБ RAM) таблица conntrack была заполнена на 75–100%: `nf_conntrack_max=4096`
+(дефолт для малой памяти), `nf_conntrack_tcp_timeout_established=432000` (5 суток). Около 2950 записей —
+настоящие ESTABLISHED-сокеты xray на входе Reality XHTTP (порт 2087), две трети от одного клиента
+из РФ (Hiddify XHTTP, мобильная сеть): клиент бросает соединения без FIN, сервер их не закрывает.
+При 100% ядро молча дропает новые соединения, и VPN ложится для всех.
+
+Фикс-апы (`nodectl fix` на нодах со службой vpn):
+- `vpn-conntrack`: `/etc/sysctl.d/99-sa-home-vpn-conntrack.conf`,
+  `net.netfilter.nf_conntrack_max = max(16384, текущее)` (не понижает) и
+  `net.netfilter.nf_conntrack_tcp_timeout_established = 7200`; применяется сразу через
+  `sysctl -w`, если модуль загружен (иначе только файл).
+- `xray-keepalive`: во `streamSettings` каждого входа xray (reality-in, reality-alt, reality-xhttp)
+  `"sockopt": {"tcpKeepAliveIdle": 300, "tcpKeepAliveInterval": 30}`, существующий sockopt сливается;
+  запись через `xray run -test`, затем рестарт xray и ноды. `deploy/setup-reality-server.sh` пишет
+  тот же sockopt в новый конфиг. Входы alt и xhttp копируют reality-in и наследуют его.

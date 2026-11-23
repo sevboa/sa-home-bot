@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 from sa_home_bot.node.fixups.core import FixupError
 from sa_home_bot.node.fixups.privileged import (
+    file_matches,
     find_executable,
     install_package,
     install_root_file,
@@ -19,6 +20,7 @@ IP_FORWARD_PROC_PATH = Path("/proc/sys/net/ipv4/ip_forward")
 IP_FORWARD_SYSCTL_PATH = Path("/etc/sysctl.d/99-sa-home-vpn-probe-forward.conf")
 IP_FORWARD_SYSCTL_CONTENT = "net.ipv4.ip_forward = 1\n"
 NFTABLES_CONF_PATH = Path("/etc/nftables.conf")
+SYSCTL_PROC_ROOT = Path("/proc/sys")
 
 
 class NftChain(NamedTuple):
@@ -76,6 +78,30 @@ def ensure_ip_forward() -> None:
     if not path_exists(IP_FORWARD_SYSCTL_PATH):
         install_root_file(IP_FORWARD_SYSCTL_PATH, IP_FORWARD_SYSCTL_CONTENT, mode="0644")
     run_sudo(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+
+
+def sysctl_proc_path(key: str) -> Path:
+    return SYSCTL_PROC_ROOT / key.replace(".", "/")
+
+
+def sysctl_int(key: str) -> int | None:
+    try:
+        return int(sysctl_proc_path(key).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def sysctl_d_content(values: dict[str, int]) -> str:
+    return "".join(f"{key} = {value}\n" for key, value in values.items())
+
+
+def ensure_sysctl_d(path: Path, values: dict[str, int]) -> None:
+    content = sysctl_d_content(values)
+    if not file_matches(path, content):
+        install_root_file(path, content, mode="0644")
+    for key, value in values.items():
+        if path_exists(sysctl_proc_path(key)):
+            run_sudo(["sysctl", "-w", f"{key}={value}"])
 
 
 def default_route_iface() -> str | None:

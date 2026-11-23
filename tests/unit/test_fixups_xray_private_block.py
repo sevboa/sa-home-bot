@@ -108,3 +108,61 @@ def test_fixup_writes_config_and_restarts(tmp_path, monkeypatch):
 def test_fixup_registered_for_reality_server(monkeypatch):
     FakeRoot(monkeypatch)
     assert "xray-private-block" in [f.id for f in build_fixups(_settings())]
+
+
+def _stream_config() -> dict:
+    return {
+        "inbounds": [
+            {"tag": "reality-in", "streamSettings": {"network": "tcp"}},
+            {
+                "tag": "reality-xhttp",
+                "streamSettings": {"network": "xhttp", "sockopt": {"mark": 1}},
+            },
+            {"tag": "api-in", "port": 10085},
+        ]
+    }
+
+
+def test_with_keepalive_merges_sockopt_and_skips_inbounds_without_stream():
+    config = vpn_server.with_keepalive(_stream_config())
+    assert config["inbounds"][0]["streamSettings"]["sockopt"] == {
+        "tcpKeepAliveIdle": 300,
+        "tcpKeepAliveInterval": 30,
+    }
+    assert config["inbounds"][1]["streamSettings"]["sockopt"] == {
+        "mark": 1,
+        "tcpKeepAliveIdle": 300,
+        "tcpKeepAliveInterval": 30,
+    }
+    assert "streamSettings" not in config["inbounds"][2]
+    assert vpn_server.xray_has_keepalive(config)
+    assert not vpn_server.xray_has_keepalive(_stream_config())
+    assert vpn_server.with_keepalive(config) == config
+
+
+def test_keepalive_fixup_writes_config_and_restarts(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(_stream_config()))
+    monkeypatch.setattr(vpn_server, "xray_config_path", lambda: path)
+    monkeypatch.setattr(
+        vpn_server,
+        "write_xray_config_with_test",
+        lambda config_path, config: config_path.write_text(json.dumps(config)),
+    )
+    calls = []
+    monkeypatch.setattr(
+        vpn_server.subprocess,
+        "run",
+        lambda args, check=False: calls.append(args) or subprocess.CompletedProcess(args, 0),
+    )
+    fixup = vpn_server.make_xray_keepalive_fixup(_settings())
+    assert not fixup.check()
+    fixup.apply()
+    assert fixup.check()
+    assert ["systemctl", "--user", "restart", "xray"] in calls
+
+
+@pytest.mark.parametrize("fixup_id", ["xray-keepalive", "vpn-conntrack"])
+def test_vpn_fixups_registered(monkeypatch, fixup_id):
+    FakeRoot(monkeypatch)
+    assert fixup_id in [f.id for f in build_fixups(_settings())]
