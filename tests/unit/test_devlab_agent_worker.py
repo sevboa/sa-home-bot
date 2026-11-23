@@ -94,7 +94,7 @@ def make_worker(
     env.hubs.append(hub)
     return AgentWorker(
         hub,
-        lambda model_name, job_id, style="full": model,
+        lambda model_name, job_id, style="cb_v3": model,
         sandboxes or (lambda request: LocalSandbox(request.workdir, request.baseline)),
         AgentSettings(
             hub_url=env.hub_url,
@@ -449,7 +449,7 @@ async def test_profile_role_text_joins_system_prompt(env):
 
 @pytest.mark.parametrize(
     ("profile", "write_prefixes", "code_mode", "prompt_lang", "prompt_style"),
-    [("custom", ("docs/",), True, "en", "fast"), (None, (), False, "ru", "full")],
+    [("custom", ("docs/",), True, "en", "cb_v1"), (None, (), False, "ru", "cb_v3")],
 )
 async def test_profile_fields_reach_toolbox_spec(
     env, monkeypatch, profile, write_prefixes, code_mode, prompt_lang, prompt_style
@@ -474,7 +474,7 @@ async def test_profile_fields_reach_toolbox_spec(
                 write_prefixes=["docs/"],
                 code_mode=True,
                 prompt_lang="en",
-                prompt_style="fast",
+                prompt_style="cb_v1",
             )
         },
     )

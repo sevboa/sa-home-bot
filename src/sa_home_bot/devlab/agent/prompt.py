@@ -6,11 +6,13 @@ from typing import Any
 
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
 from sa_home_bot.devlab.agent.prompt_en import (
-    CODE_MODE_INTRO_EN,
-    CODE_MODE_INTRO_FAST_EN,
+    CODE_MODE_INTRO_CB_V1_EN,
+    CODE_MODE_INTRO_CB_V2_EN,
+    CODE_MODE_INTRO_CB_V3_EN,
     CODE_MODE_INTRO_REMOTE_EN,
-    CODE_MODE_REMINDER_EN,
-    CODE_MODE_REMINDER_FAST_EN,
+    CODE_MODE_REMINDER_CB_V1_EN,
+    CODE_MODE_REMINDER_CB_V2_EN,
+    CODE_MODE_REMINDER_CB_V3_EN,
     CODE_MODE_REMINDER_REMOTE_EN,
     CODE_MODE_SETTING_EN,
     EN,
@@ -38,8 +40,10 @@ from sa_home_bot.devlab.agent.tools import (
     TOOL_WRITE_FILE,
 )
 
-STYLE_FULL = "full"
-STYLE_FAST = "fast"
+STYLE_CB_V1 = "cb_v1"
+STYLE_CB_V2 = "cb_v2"
+STYLE_CB_V3 = "cb_v3"
+DEFAULT_STYLE = STYLE_CB_V3
 SYSTEM_INTRO = (
     "Ты автономный разработчик. Задание — в первом сообщении пользователя (task.md). "
     "Работай только инструментами: читай код, правь его через "
@@ -165,6 +169,18 @@ _CODE_MODE_NEIGHBORS = (
     "одну вещь не пиши дважды. Образец ищи в том же вызове на чтение, пачкой с read(), а не "
     "отдельным вызовом.\n"
 )
+_CODE_MODE_CALC = (
+    "Ожидаемые значения для теста (дельты счётчиков, проценты, суммы, даты, разбор эталона) "
+    "не высчитывай в размышлении: посчитай скриптом из входных данных или эталона и "
+    "напечатай, а в тест вставь результат. Например:\n"
+    "```\n"
+    "import json\n"
+    "data = json.loads(read(\"tests/fixtures/x/in.json\"))\n"
+    "a, b = data[\"before\"], data[\"after\"]\n"
+    "print({k: b[k] - a[k] for k in a})\n"
+    "```\n"
+    "Минута в скрипте вместо десяти в размышлении.\n"
+)
 _CODE_MODE_RUNS = (
     "\n"
     "## Как исполняется код\n"
@@ -263,7 +279,7 @@ _CODE_MODE_TAIL = (
     "Каждый ответ — вызов инструмента, обычно execute. Первой строкой кода пиши "
     "комментарий с намерением: что этот вызов сделает целиком."
 )
-CODE_MODE_INTRO_FAST = (
+CODE_MODE_INTRO_CB_V1 = (
     _CODE_MODE_HEAD
     + _CODE_MODE_COST_GLM
     + _CODE_MODE_RUNS
@@ -272,9 +288,20 @@ CODE_MODE_INTRO_FAST = (
     + _CODE_MODE_EXAMPLE_GLM
     + _CODE_MODE_TAIL
 )
-CODE_MODE_INTRO = (
+CODE_MODE_INTRO_CB_V2 = (
     _CODE_MODE_HEAD
     + _CODE_MODE_COST_GLM
+    + _CODE_MODE_NEIGHBORS
+    + _CODE_MODE_RUNS
+    + _CODE_MODE_RED_GLM
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_GLM
+    + _CODE_MODE_TAIL
+)
+CODE_MODE_INTRO_CB_V3 = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_GLM
+    + _CODE_MODE_CALC
     + _CODE_MODE_NEIGHBORS
     + _CODE_MODE_RUNS
     + _CODE_MODE_RED_GLM
@@ -319,8 +346,15 @@ _REMINDER_GLM_FINISH = (
     "finish(\"итог\") — одним вызовом; finish сам закрывает все шаги, step_done() "
     "необязателен."
 )
-CODE_MODE_REMINDER_FAST = _REMINDER_GLM_HEAD + _REMINDER_GLM_FINISH
-CODE_MODE_REMINDER = _REMINDER_GLM_HEAD + _REMINDER_GLM_NEIGHBORS + _REMINDER_GLM_FINISH
+_REMINDER_GLM_HEAD_CB_V3 = (
+    _REMINDER_GLM_HEAD.removesuffix("скриптом. ")
+    + "скриптом, ожидаемые значения тестов тоже считай скриптом. "
+)
+CODE_MODE_REMINDER_CB_V1 = _REMINDER_GLM_HEAD + _REMINDER_GLM_FINISH
+CODE_MODE_REMINDER_CB_V3 = (
+    _REMINDER_GLM_HEAD_CB_V3 + _REMINDER_GLM_NEIGHBORS + _REMINDER_GLM_FINISH
+)
+CODE_MODE_REMINDER_CB_V2 = _REMINDER_GLM_HEAD + _REMINDER_GLM_NEIGHBORS + _REMINDER_GLM_FINISH
 CODE_MODE_REMINDER_REMOTE = (
     "[Напоминание] Запросы ограничены, размышление бесплатно. Думай подробно: продумай "
     "решение целиком — все файлы, тест, код, docs. Накопи все правки и внеси их одним "
@@ -347,32 +381,41 @@ def intro_for(model: str) -> str:
     return GLM_INTRO if _is_glm(model) else SYSTEM_INTRO
 
 
-def code_mode_intro_for(model: str, lang: str = "ru", style: str = STYLE_FULL) -> str:
-    glm = _is_glm(model)
-    fast = style == STYLE_FAST
-    if lang == EN:
-        if not glm:
-            return CODE_MODE_INTRO_REMOTE_EN
-        return CODE_MODE_INTRO_FAST_EN if fast else CODE_MODE_INTRO_EN
-    if not glm:
-        return CODE_MODE_INTRO_REMOTE
-    return CODE_MODE_INTRO_FAST if fast else CODE_MODE_INTRO
+CODE_MODE_TEXTS = {
+    "ru": {
+        STYLE_CB_V1: (CODE_MODE_INTRO_CB_V1, CODE_MODE_REMINDER_CB_V1),
+        STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2, CODE_MODE_REMINDER_CB_V2),
+        STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3, CODE_MODE_REMINDER_CB_V3),
+    },
+    EN: {
+        STYLE_CB_V1: (CODE_MODE_INTRO_CB_V1_EN, CODE_MODE_REMINDER_CB_V1_EN),
+        STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2_EN, CODE_MODE_REMINDER_CB_V2_EN),
+        STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3_EN, CODE_MODE_REMINDER_CB_V3_EN),
+    },
+}
+CODE_MODE_REMOTE_TEXTS = {
+    "ru": (CODE_MODE_INTRO_REMOTE, CODE_MODE_REMINDER_REMOTE),
+    EN: (CODE_MODE_INTRO_REMOTE_EN, CODE_MODE_REMINDER_REMOTE_EN),
+}
+
+
+def _code_mode_texts(model: str, lang: str, style: str) -> tuple[str, str]:
+    key = EN if lang == EN else "ru"
+    if not _is_glm(model):
+        return CODE_MODE_REMOTE_TEXTS[key]
+    return CODE_MODE_TEXTS[key][style]
+
+
+def code_mode_intro_for(model: str, lang: str = "ru", style: str = DEFAULT_STYLE) -> str:
+    return _code_mode_texts(model, lang, style)[0]
 
 
 def reminder_for(
-    model: str, code_mode: bool = False, lang: str = "ru", style: str = STYLE_FULL
+    model: str, code_mode: bool = False, lang: str = "ru", style: str = DEFAULT_STYLE
 ) -> str:
-    glm = _is_glm(model)
-    fast = style == STYLE_FAST
     if code_mode:
-        if lang == EN:
-            if not glm:
-                return CODE_MODE_REMINDER_REMOTE_EN
-            return CODE_MODE_REMINDER_FAST_EN if fast else CODE_MODE_REMINDER_EN
-        if not glm:
-            return CODE_MODE_REMINDER_REMOTE
-        return CODE_MODE_REMINDER_FAST if fast else CODE_MODE_REMINDER
-    return GLM_FLOW_REMINDER if glm else FLOW_REMINDER
+        return _code_mode_texts(model, lang, style)[1]
+    return GLM_FLOW_REMINDER if _is_glm(model) else FLOW_REMINDER
 
 
 def _setting(
@@ -400,7 +443,7 @@ def build_system(
     today: date | None = None,
     code_mode: bool = False,
     lang: str = "ru",
-    style: str = STYLE_FULL,
+    style: str = DEFAULT_STYLE,
 ) -> str:
     english = code_mode and lang == EN
     parts = [code_mode_intro_for(model, lang, style) if code_mode else intro_for(model)]

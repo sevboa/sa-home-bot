@@ -10,7 +10,7 @@ import aiohttp
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.context import REASONING_FIELDS
-from sa_home_bot.devlab.agent.prompt import STYLE_FULL, reminder_for, with_flow_reminder
+from sa_home_bot.devlab.agent.prompt import DEFAULT_STYLE, reminder_for, with_flow_reminder
 from sa_home_bot.devlab.agent.prompt_en import EN
 from sa_home_bot.devlab.agent.tools import EXECUTE_DEFINITION_EN, TOOL_EXECUTE
 from sa_home_bot.devlab.usage import usage_cost
@@ -95,7 +95,7 @@ class GatewayChat:
         timeout_s: float = MODEL_TIMEOUT_S,
         temperature: float | None = None,
         session: aiohttp.ClientSession | None = None,
-        prompt_style: str = STYLE_FULL,
+        prompt_style: str = DEFAULT_STYLE,
     ) -> None:
         self._url = base_url.rstrip("/") + protocol.HTTP_CHAT_PATH
         self._headers = {"Authorization": f"Bearer {token}", protocol.HEADER_JOB: job_id}

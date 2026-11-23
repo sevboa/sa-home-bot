@@ -36,8 +36,9 @@ from sa_home_bot.devlab.agent.model import (
     parse_reply,
 )
 from sa_home_bot.devlab.agent.prompt import (
-    CODE_MODE_REMINDER,
-    CODE_MODE_REMINDER_FAST,
+    CODE_MODE_REMINDER_CB_V1,
+    CODE_MODE_REMINDER_CB_V2,
+    CODE_MODE_REMINDER_CB_V3,
     CODE_MODE_REMINDER_REMOTE,
     FLOW_REMINDER,
     with_flow_reminder,
@@ -453,9 +454,10 @@ async def test_gateway_chat_uses_code_mode_reminder_when_execute_offered():
 @pytest.mark.parametrize(
     ("model", "style", "expected"),
     [
-        ("glm-5.3", "full", CODE_MODE_REMINDER),
-        ("glm-5.3", "fast", CODE_MODE_REMINDER_FAST),
-        ("flint", "fast", CODE_MODE_REMINDER_REMOTE),
+        ("glm-5.3", "cb_v1", CODE_MODE_REMINDER_CB_V1),
+        ("glm-5.3", "cb_v2", CODE_MODE_REMINDER_CB_V2),
+        ("glm-5.3", "cb_v3", CODE_MODE_REMINDER_CB_V3),
+        ("flint", "cb_v1", CODE_MODE_REMINDER_REMOTE),
     ],
 )
 async def test_gateway_chat_reminder_follows_prompt_style(model, style, expected):
