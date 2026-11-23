@@ -212,6 +212,22 @@ async def test_submit_without_base_branch_pushed(client, store, alice):
     assert await store.queue.list_jobs() == []
 
 
+@pytest.mark.parametrize(
+    ("size", "warned"),
+    [(protocol.TASK_LONG_CHARS, False), (protocol.TASK_LONG_CHARS + 1, True)],
+)
+async def test_long_task_gives_warning_but_is_queued(client, store, alice, size, warned):
+    await register(client, store, alice)
+    gateway = await store.issue_token("gw", protocol.ROLE_GATEWAY)
+    principal = await store.authenticate(gateway)
+    await store.heartbeat(principal, {protocol.FIELD_MODELS: [{protocol.MODEL_NAME: MODEL}]})
+    _, submitted = await submit(client, alice, task="x" * size)
+    assert submitted["job"]["id"]
+    assert bool(submitted["warnings"]) is warned
+    if warned:
+        assert str(size) in submitted["warnings"][0]
+
+
 async def test_submit_with_profile(client, store, alice):
     await register(client, store, alice)
     _, submitted = await submit(client, alice, profile="docs")

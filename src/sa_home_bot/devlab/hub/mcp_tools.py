@@ -94,6 +94,16 @@ async def model_warnings(ctx: Context, model: str) -> list[str]:
     ]
 
 
+def task_warnings(task: str) -> list[str]:
+    if len(task) <= protocol.TASK_LONG_CHARS:
+        return []
+    return [
+        f"Задача длинная ({len(task)} знаков > {protocol.TASK_LONG_CHARS}):"
+        " короткая задача решается лучше — поведение, образец, проверка, пути;"
+        " правила проекта и шаги не повторяй."
+    ]
+
+
 async def models(ctx: Context) -> Any:
     return await ctx.store.models()
 
@@ -144,7 +154,10 @@ async def submit(
         depends_on=depends_on or (),
         fallback=fallback,
     )
-    return {"job": job_view(job, with_task=False), "warnings": await model_warnings(ctx, model)}
+    return {
+        "job": job_view(job, with_task=False),
+        "warnings": [*await model_warnings(ctx, model), *task_warnings(task)],
+    }
 
 
 async def test_outcome(ctx: Context, job: Any) -> Any:
