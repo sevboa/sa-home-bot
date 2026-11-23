@@ -489,7 +489,7 @@ async def test_profile_fields_reach_toolbox_spec(
     assert captured_spec["spec"].code_mode is code_mode
     assert captured_spec["spec"].prompt_lang == prompt_lang
     assert captured_spec["spec"].prompt_style == prompt_style
-    assert styles == [prompt_style]
+    assert styles == ["r3"]
 
 
 async def test_profile_intro_and_reminder_files_replace_code_mode_texts(env):

@@ -240,3 +240,13 @@ reminder_file = "/models/sa-home/devlab/prompts/reminder.md"
 - Плейсхолдеров нет: встроенные вводный текст и напоминание тоже не форматируются (подстановка `{today}`/`{commands}` относится только к блоку «Обстановка», он остаётся встроенным и добавляется отдельно). Текст файла уходит как есть.
 - Поля не заменяют `prompt_style`/`remote_style`: они определяют определения инструментов и поведение хоста (cb_v4 разметка, r2 `check`), файлы меняют только два текста.
 - Код: `executor/agent_worker.py` (`read_profile_file`, `_code_mode_overrides`), `agent/prompt.py`, `agent/model.py`; тесты: `tests/unit/test_devlab_agent_worker.py`, `tests/unit/test_devlab_agent.py`.
+
+## r3: короткий промпт удалённого режима (2026-11-23)
+
+`remote_style = "r3"` — значение по умолчанию для удалённых моделей (`DevlabProfileConfig`, `AgentSpec`); r1 и r2 остаются выбираемыми полем профиля. Для GLM воркер по-прежнему ставит r1, `prompt_style` не затронут.
+
+- Текст: `CODE_MODE_INTRO_R3` и `CODE_MODE_REMINDER_R3` в `agent/prompt_en.py`, около 1,7 тыс. знаков вместо 6,2 тыс. у r1. Один английский текст при любом `prompt_lang`: роль, жёсткие границы (задача и правила проекта), устройство `execute`, раздел «Requests are scarce» (читать всё одним вызовом, решение и проверку писать в одном скрипте, после красного чинить ровно по выводу), пример, «Finishing».
+- Почему: запросов в сутки мало, а длинный промпт и длинная задача рождали лишние вызовы. Короткая задача dafhaq на r3 прошла за 51 запрос и 7 минут против 87 запросов у r1 на длинной задаче. Вместе с отказом `devlab_submit` от задач длиннее 1500 знаков.
+- Сборка: выбор по `style == "r3"` в `prompt.py` (`_code_mode_texts`), `AgentSpec.chat_style` отдаёт `r3` в `build_system` и фабрику моделей. Блок «Обстановка» (дата, команды), правила проекта и текст роли из `prompt_file` добавляются после вводной как обычно; их заголовки остаются по `prompt_lang`. `intro_file`/`reminder_file` заменяют тексты r3 так же, как остальные.
+- Инструменты как у r1: определение `execute` и API без `check()`, лимит вывода скрипта r1 (не 70 000 r2). Разметка cb_v4 и повторные отметки cb_v5 при r3 отключены, как при r2.
+- Код: `agent/remote.py` (`REMOTE_R3`, `DEFAULT_REMOTE_STYLE`), `agent/spec.py`, `agent/tools.py`, `agent/prompt.py`, `config.py`; тесты: `tests/unit/test_devlab_agent_remote_r2.py`.

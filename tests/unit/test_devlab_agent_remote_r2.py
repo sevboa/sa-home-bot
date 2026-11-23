@@ -6,8 +6,10 @@ from sa_home_bot.config import DevlabProfileConfig
 from sa_home_bot.devlab.agent import tools as tools_module
 from sa_home_bot.devlab.agent.prompt import (
     CODE_MODE_INTRO_R2,
+    CODE_MODE_INTRO_R3,
     CODE_MODE_INTRO_REMOTE,
     CODE_MODE_REMINDER_R2,
+    CODE_MODE_REMINDER_R3,
     CODE_MODE_REMINDER_REMOTE,
     build_system,
     reminder_for,
@@ -16,7 +18,7 @@ from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_R2_EN,
     CODE_MODE_INTRO_REMOTE_EN,
 )
-from sa_home_bot.devlab.agent.remote import REMOTE_R2, SCRIPT_OUTPUT_MAX_CHARS_R2
+from sa_home_bot.devlab.agent.remote import REMOTE_R2, REMOTE_R3, SCRIPT_OUTPUT_MAX_CHARS_R2
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.script import SCRIPT_OUTPUT_CHARS, worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -66,10 +68,14 @@ async def run(box, code):
 
 
 def test_profile_remote_style_default_is_r1():
-    assert DevlabProfileConfig().remote_style == "r1"
+    assert DevlabProfileConfig().remote_style == "r3"
+    assert DevlabProfileConfig(remote_style="r1").remote_style == "r1"
+    assert AgentSpec().remote_style == "r3"
+    assert AgentSpec().chat_style == "r3"
+    assert AgentSpec(remote_style="r1", prompt_style="cb_v3").chat_style == "cb_v3"
     assert DevlabProfileConfig(remote_style="r2").remote_style == "r2"
     assert AgentSpec(remote_style="r2", prompt_style="cb_v3").chat_style == "r2"
-    assert AgentSpec(prompt_style="cb_v4").chat_style == "cb_v4"
+    assert AgentSpec(remote_style="r1", prompt_style="cb_v4").chat_style == "cb_v4"
 
 
 @pytest.mark.parametrize(
@@ -155,3 +161,28 @@ async def test_check_without_paths_asks_host_for_changed_tests(project):
     box = box_for(project)
     out = await run(box, "print(check())")
     assert "нечего проверять" in out
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_r3_prompt_is_short_and_independent_of_language(lang):
+    system = build_system([], MODEL, code_mode=True, lang=lang, style=REMOTE_R3)
+    assert system.startswith(CODE_MODE_INTRO_R3)
+    assert len(CODE_MODE_INTRO_R3) < 2000
+    assert "Requests are scarce" in CODE_MODE_INTRO_R3
+    assert "check(" not in CODE_MODE_INTRO_R3
+    assert CODE_MODE_INTRO_REMOTE not in system and CODE_MODE_INTRO_R2 not in system
+    assert reminder_for(MODEL, True, lang, REMOTE_R3) == CODE_MODE_REMINDER_R3
+
+
+def test_r3_keeps_setting_rules_and_role_text():
+    system = build_system(
+        [("rules.md", "Правило")], MODEL, ["pytest"], code_mode=True, style=REMOTE_R3
+    )
+    assert system.startswith(CODE_MODE_INTRO_R3)
+    assert "pytest" in system and "=== rules.md ===" in system
+
+
+def test_r3_uses_r1_definitions_and_limits(project):
+    box = box_for(project, remote_style="r3", prompt_style="cb_v4")
+    assert box.definitions[1] is EXECUTE_DEFINITION
+    assert box._markup is None
