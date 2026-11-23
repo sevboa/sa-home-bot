@@ -3,8 +3,6 @@ from __future__ import annotations
 import sys
 import types
 
-import httpx2
-import openai
 import pytest
 import pytest_asyncio
 from pydantic import BaseModel, ValidationError
@@ -256,8 +254,10 @@ class _Edges(BaseModel):
 
 
 def _asleep_error(body):
-    response = httpx2.Response(503, request=httpx2.Request("POST", "http://router/v1"))
-    return openai.InternalServerError("503", response=response, body=body)
+    exc = RuntimeError("503")
+    exc.status_code = 503
+    exc.body = body
+    return exc
 
 
 def _failing_graphiti(exc):

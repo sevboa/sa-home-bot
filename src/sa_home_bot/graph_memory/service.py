@@ -5,7 +5,6 @@ import logging
 import socket
 from typing import Any
 
-import openai
 from pydantic import ValidationError
 
 from sa_home_bot import __version__
@@ -74,9 +73,8 @@ NO_THINKING_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 
 def is_companion_asleep(exc: BaseException) -> bool:
     return (
-        isinstance(exc, openai.APIStatusError)
-        and exc.status_code == COMPANION_ASLEEP_STATUS
-        and exc.body == COMPANION_ASLEEP_CODE
+        getattr(exc, "status_code", None) == COMPANION_ASLEEP_STATUS
+        and getattr(exc, "body", None) == COMPANION_ASLEEP_CODE
     )
 
 
@@ -186,6 +184,7 @@ class GraphMemoryService:
             return self._graphiti
 
     async def _build_graphiti(self) -> Any:
+        import openai
         from graphiti_core import Graphiti
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
