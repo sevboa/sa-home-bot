@@ -13,7 +13,9 @@ from sa_home_bot.devlab.agent.context import (
     estimate_tokens,
     fold_old_results,
     pinned_report,
+    set_notes_block,
     shrink_arguments,
+    task_text,
 )
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
@@ -201,13 +203,6 @@ def _rejected(name: str, text: str) -> bool:
     )
 
 
-def _task_text(messages: list[dict[str, Any]]) -> str:
-    for message in messages:
-        if message.get("role") == "user" and isinstance(message.get("content"), str):
-            return message["content"]
-    return ""
-
-
 def _task_steps(task: str) -> list[int]:
     numbers: list[int] = []
     inside = False
@@ -365,7 +360,8 @@ class AgentLoop:
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
         seg = Segment(messages, self._clock())
-        self._task_steps = _task_steps(_task_text(messages))
+        set_notes_block(messages, self._tools.notes_text())
+        self._task_steps = _task_steps(task_text(messages))
         self._emit(event="start", resumed=resume is not None)
         tools_tokens = estimate_tokens(self._tools.definitions)
         budget = limits.context_tokens - limits.reply_tokens - tools_tokens
@@ -374,7 +370,9 @@ class AgentLoop:
             if crane is not None:
                 return self._crane_result(seg, messages, *crane)
             before = estimate_tokens(messages) if self._trace is not None else 0
-            window = fold_old_results(messages, budget, limits.keep_recent)
+            window = fold_old_results(
+                messages, budget, limits.keep_recent, self._tools.notes_text
+            )
             if window > budget:
                 return self._result(
                     AgentStatus.CONTEXT_OVERFLOW,

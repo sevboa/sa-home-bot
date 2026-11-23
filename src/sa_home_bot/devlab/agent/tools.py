@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from sa_home_bot.devlab.agent.notes import NOTES_UNAVAILABLE, AgentNotes
 from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.prompt_en import (
     EN,
@@ -272,7 +273,14 @@ def without_xdist(argv: list[str]) -> list[str]:
 
 
 class ToolBox:
-    def __init__(self, sandbox: Sandbox, spec: AgentSpec, read_lines: int = READ_MIN_LINES) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        spec: AgentSpec,
+        read_lines: int = READ_MIN_LINES,
+        notes: AgentNotes | None = None,
+    ) -> None:
+        self._notes = notes
         self._sandbox = sandbox
         self._spec = spec
         self._read_lines = read_lines
@@ -288,6 +296,9 @@ class ToolBox:
         }
         if spec.code_mode:
             self._handlers = {TOOL_SEARCH: self._search, TOOL_EXECUTE: self._execute}
+
+    def notes_text(self) -> str:
+        return self._notes.text() if self._notes is not None else ""
 
     @property
     def code_mode(self) -> bool:
@@ -518,6 +529,19 @@ class ToolBox:
                 return True
         return False
 
+    def _serve_notes(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._notes is None:
+            return {"ok": False, "reason": NOTES_UNAVAILABLE}
+        text = args.get("text")
+        text = text if isinstance(text, str) else ""
+        op = args.get("op")
+        if op == "get":
+            return {"ok": True, "value": self._notes.text()}
+        refusal = self._notes.add(text) if op == "add" else self._notes.replace(text)
+        if refusal is not None:
+            return {"ok": False, "reason": refusal}
+        return {"ok": True, "value": ""}
+
     async def _serve_call(
         self, request: dict[str, Any], gate: StepGate | None, accepted: list[str]
     ) -> dict[str, Any]:
@@ -531,6 +555,8 @@ class ToolBox:
                 return {"ok": False, "reason": reason}
             accepted.append(str(args.get("title", "")))
             return {"ok": True}
+        if name == "notes" and isinstance(args, dict):
+            return self._serve_notes(args)
         if name == "diff":
             text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
