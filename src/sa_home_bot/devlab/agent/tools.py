@@ -6,10 +6,11 @@ import re
 import shlex
 import tokenize
 from collections import Counter
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection
+from dataclasses import dataclass, replace
 from typing import Any
 
+from sa_home_bot.devlab.agent.markup import STYLE_CB_V4, Markup
 from sa_home_bot.devlab.agent.notes import NOTES_UNAVAILABLE, AgentNotes
 from sa_home_bot.devlab.agent.paths import matches
 from sa_home_bot.devlab.agent.prompt_en import (
@@ -283,6 +284,7 @@ class ToolBox:
         self._notes = notes
         self._sandbox = sandbox
         self._spec = spec
+        self._markup = Markup() if spec.code_mode and spec.prompt_style == STYLE_CB_V4 else None
         self._read_lines = read_lines
         self._step_gate: StepGate | None = None
         self._handlers = {
@@ -298,7 +300,16 @@ class ToolBox:
             self._handlers = {TOOL_SEARCH: self._search, TOOL_EXECUTE: self._execute}
 
     def notes_text(self) -> str:
-        return self._notes.text() if self._notes is not None else ""
+        own = self._notes.text() if self._notes is not None else ""
+        return self._markup.block(own) if self._markup is not None else own
+
+    async def open_segment(self, task: str) -> None:
+        if self._markup is not None:
+            await self._markup.open_segment(self._sandbox, task)
+
+    def close_steps(self, closed: Collection[int]) -> None:
+        if self._markup is not None:
+            self._markup.close_steps(closed)
 
     @property
     def code_mode(self) -> bool:
@@ -466,6 +477,7 @@ class ToolBox:
             "test_timeout": spec.narrow_test_timeout_s,
             "budget": spec.script_timeout_s - SCRIPT_BUDGET_MARGIN_S,
             "output_chars": spec.output_chars,
+            "markup": self._markup is not None,
         }
 
     async def _comment_lines(self) -> list[str]:
@@ -542,6 +554,16 @@ class ToolBox:
             return {"ok": False, "reason": refusal}
         return {"ok": True, "value": ""}
 
+    def _serve_reads(self, args: dict[str, Any]) -> dict[str, Any]:
+        path, digest = args.get("path"), args.get("digest")
+        numbers = [args.get(key) for key in ("start", "end", "total")]
+        if self._markup is None or not isinstance(path, str) or not isinstance(digest, str):
+            return {"ok": True, "value": ""}
+        if not all(type(number) is int for number in numbers):
+            return {"ok": True, "value": ""}
+        start, end, total = numbers
+        return {"ok": True, "value": self._markup.record_read(path, digest, start, end, total)}
+
     async def _serve_call(
         self, request: dict[str, Any], gate: StepGate | None, accepted: list[str]
     ) -> dict[str, Any]:
@@ -557,6 +579,8 @@ class ToolBox:
             return {"ok": True}
         if name == "notes" and isinstance(args, dict):
             return self._serve_notes(args)
+        if name == "reads" and isinstance(args, dict):
+            return self._serve_reads(args)
         if name == "diff":
             text = await self._sandbox.diff()
             return {"ok": True, "value": text or DIFF_EMPTY}
@@ -569,6 +593,16 @@ class ToolBox:
         return {"ok": False, "reason": CALL_UNKNOWN.format(name=name)}
 
     async def _execute(self, args: dict[str, Any]) -> ToolOutcome:
+        if self._markup is None:
+            return await self._run_script(args)
+        self._markup.begin_call()
+        outcome = await self._run_script(args)
+        hint = self._markup.after_call(outcome.mutating)
+        if hint and outcome.control is None:
+            return replace(outcome, text=f"{outcome.text}\n{hint}")
+        return outcome
+
+    async def _run_script(self, args: dict[str, Any]) -> ToolOutcome:
         code = _argument(args, "code", str)
         timeout_s = self._spec.script_timeout_s
         before = await self._sandbox.changed_digests()

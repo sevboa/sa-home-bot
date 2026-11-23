@@ -7,6 +7,11 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
+SCRIPT_MARKUP_EXAMPLE_EN = """# Intent: read load by the contents (L40-90), conclusion to a note
+src = read("src/pkg/a.py", 40, 90)
+signature = next(r for r in src.splitlines() if r.startswith("def load"))
+print(signature)
+note(f"a.py:40-90 {signature.strip()}: returns 1, the test expects 2")"""
 SCRIPT_TEST_EXAMPLE_EN = """# Intent: test expects 2, check it is red for the right reason, step 1
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
@@ -117,11 +122,6 @@ _CODE_MODE_RUNS_EN = (
     "- Output is cut by characters, not lines: a file over ~6000 chars (about 150 lines) - "
     "do not print it whole and do not page through it: "
     "grep(pattern, path, context=5) shows line numbers, then read(path, start, end).\n"
-    "- Notes: learned something important (a signature, a path, an expected value, a decision, "
-    "what is already done) - write it at once with note(\"...\"). The conversation history gets "
-    "folded and script variables stay, but notes survive folding and restarts and are shown to "
-    "you at the start of the task. Do not re-read what the notes already hold. Notes full - "
-    "compress them with notes_set(\"...\"); notes() returns the current text.\n"
     "- Do not re-read a file after edit(): EditError reports failures. Use diff() only if you "
     "do not remember what you changed. If the last run is green and only docs/ changed since, "
     "call finish() at once: no rerun, no diff().\n"
@@ -134,6 +134,27 @@ _CODE_MODE_RUNS_EN = (
     "- step_done(\"N: summary\") is an optional intermediate check of a step on long tasks: the "
     "guard runs the changed tests. Accepted: the script goes on. Rejected: it raises "
     "StepRejected with the reason and the script stops.\n"
+)
+_CODE_MODE_MARKUP_EN = (
+    "\n"
+    "## Table of contents, Plan, Read and notes\n"
+    "At the start of the task, in the notes block, you have the Table of contents of the task "
+    "files (what is where, line ranges), the Plan (steps with marks) and Read (what you have "
+    "already read); the host maintains them.\n"
+    "- Read only the range you need from the table of contents: read(path, a, b), not the whole "
+    "file and not piece after piece.\n"
+    "- Right after reading, write a conclusion with a reference to note(): "
+    "note(\"host.py:177-312 read_host_sync: metric order ...; reference full: 27 metrics\"). "
+    "Notes survive folding and restarts; when full, compress via notes_set(\"...\"); "
+    "notes() returns the text.\n"
+    "- Keep data in script variables, print only what you need into the context.\n"
+    "- Do not re-read what is in Read and in the notes: the host marks a repeated read with a "
+    "hint.\n"
+    "- As soon as the signature and a sample are clear, write the file. Many calls in a row "
+    "without a write get a reminder from the host.\n"
+    "\n"
+    "Example of reconnaissance by the table of contents:\n"
+    f"{SCRIPT_MARKUP_EXAMPLE_EN}\n"
 )
 _CODE_MODE_RED_GLM_EN = (
     "- If a step needs a red test, verify it yourself: one call edits the test and runs "
@@ -225,6 +246,18 @@ CODE_MODE_INTRO_CB_V3_EN = (
     + _CODE_MODE_CALC_EN
     + _CODE_MODE_NEIGHBORS_EN
     + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_RED_GLM_EN
+    + _CODE_MODE_ASK_EN
+    + _CODE_MODE_EXAMPLE_GLM_EN
+    + _CODE_MODE_TAIL_EN
+)
+CODE_MODE_INTRO_CB_V4_EN = (
+    _CODE_MODE_HEAD_EN
+    + _CODE_MODE_COST_GLM_EN
+    + _CODE_MODE_CALC_EN
+    + _CODE_MODE_NEIGHBORS_EN
+    + _CODE_MODE_RUNS_EN
+    + _CODE_MODE_MARKUP_EN
     + _CODE_MODE_RED_GLM_EN
     + _CODE_MODE_ASK_EN
     + _CODE_MODE_EXAMPLE_GLM_EN

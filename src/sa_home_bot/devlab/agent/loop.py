@@ -19,6 +19,7 @@ from sa_home_bot.devlab.agent.context import (
 )
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
+from sa_home_bot.devlab.agent.markup import task_steps
 from sa_home_bot.devlab.agent.model import (
     ChatModel,
     ModelError,
@@ -78,9 +79,6 @@ SCRIPT_REJECTED = re.compile(
     re.MULTILINE,
 )
 TRACE_TEXT_CHARS = 300
-STEPS_HEADING = re.compile(r"^#{1,6}\s*(?:шаги|steps)\b", re.IGNORECASE)
-ANY_HEADING = re.compile(r"^#{1,6}\s")
-STEP_LINE = re.compile(r"^\s*(\d+)[.)]\s+\S")
 STEP_TITLE_NUMBERS = re.compile(r"^\s*(\d+(?:\s*(?:[–-]|,)\s*\d+)*)")
 FINISH_STEP_TITLE = "{number}: закрыт на finish: {summary}"
 FINISH_STEP_SUMMARY_CHARS = 200
@@ -201,19 +199,6 @@ def _rejected(name: str, text: str) -> bool:
     return text.startswith(
         (FINISH_REJECTED, STEP_REJECTED, CODE_FINISH_REJECTED, CODE_STEP_REJECTED)
     )
-
-
-def _task_steps(task: str) -> list[int]:
-    numbers: list[int] = []
-    inside = False
-    for line in task.splitlines():
-        if ANY_HEADING.match(line):
-            inside = STEPS_HEADING.match(line) is not None
-            continue
-        found = STEP_LINE.match(line) if inside else None
-        if found and int(found.group(1)) not in numbers:
-            numbers.append(int(found.group(1)))
-    return numbers
 
 
 def _title_numbers(title: str) -> set[int]:
@@ -360,8 +345,10 @@ class AgentLoop:
             else [{"role": "system", "content": system}, {"role": "user", "content": task}]
         )
         seg = Segment(messages, self._clock())
+        opening = task_text(messages)
+        await self._tools.open_segment(opening)
         set_notes_block(messages, self._tools.notes_text())
-        self._task_steps = _task_steps(task_text(messages))
+        self._task_steps = [number for number, _ in task_steps(opening)]
         self._emit(event="start", resumed=resume is not None)
         tools_tokens = estimate_tokens(self._tools.definitions)
         budget = limits.context_tokens - limits.reply_tokens - tools_tokens
@@ -616,6 +603,7 @@ class AgentLoop:
             return rejected + "\n".join(failures)
         seg.red_runs = 0
         self._closed_steps |= _title_numbers(title)
+        self._tools.close_steps(self._closed_steps)
         if self._on_step is not None:
             await self._on_step(title.strip())
         return ""
@@ -639,4 +627,5 @@ class AgentLoop:
             if number in self._closed_steps:
                 continue
             self._closed_steps.add(number)
+            self._tools.close_steps(self._closed_steps)
             await self._on_step(FINISH_STEP_TITLE.format(number=number, summary=head))

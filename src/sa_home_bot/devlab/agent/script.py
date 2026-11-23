@@ -140,6 +140,11 @@ test = read("tests/test_a.py")
 print(src)
 print(test)
 print("\\n".join(grep(r"load", "docs/pkg.md")))"""
+SCRIPT_MARKUP_EXAMPLE = """# Намерение: прочитать load по оглавлению (a.py L40-90), вывод в заметку
+src = read("src/pkg/a.py", 40, 90)
+signature = next(r for r in src.splitlines() if r.startswith("def load"))
+print(signature)
+note(f"a.py:40-90 {signature.strip()}: возвращает 1, тест ждёт 2")"""
 SCRIPT_TEST_EXAMPLE = """# Намерение: тест на 2, убедиться, что красный по нужной причине, шаг 1
 old_test = next(r for r in test.splitlines(keepends=True) if "load() == 1" in r)
 edit("tests/test_a.py", old_test, old_test.replace("== 1", "== 2"))
@@ -170,6 +175,7 @@ if r.ok:
 PROLOGUE = r'''import ast
 import builtins
 import fnmatch
+import hashlib
 import importlib
 import io
 import json
@@ -392,16 +398,36 @@ def _text(path):
         raise EditError(f"файл {path} не текстовый") from None
 
 
+def _journal(path, text, start, end, total):
+    if not _CONFIG.get("markup"):
+        return
+    last = total if end is None else min(end, total)
+    if last < start:
+        return
+    digest = hashlib.sha1(text.encode()).hexdigest()
+    reply = _call(
+        "reads",
+        {"path": _relative(path), "digest": digest, "start": start, "end": last, "total": total},
+    )
+    hint = reply.get("value") if reply.get("ok") else None
+    if isinstance(hint, str) and hint:
+        print(hint)
+
+
 def read(path, start=1, end=None):
-    lines = _text(path).splitlines(keepends=True)
+    text = _text(path)
+    lines = text.splitlines(keepends=True)
     if start > max(1, len(lines)):
         raise EditError(f"в файле {path} {len(lines)} строк")
+    _journal(path, text, max(1, start), end, len(lines))
     return "".join(lines[max(1, start) - 1 : end])
 
 
 def read_numbered(path, start=1, end=None):
-    lines = _text(path).splitlines()
+    text = _text(path)
+    lines = text.splitlines()
     last = len(lines) if end is None else min(end, len(lines))
+    _journal(path, text, max(1, start), end, len(lines))
     return "\n".join(f"{n}\t{lines[n - 1]}" for n in range(max(1, start), last + 1))
 
 

@@ -5,10 +5,12 @@ from datetime import date
 from typing import Any
 
 from sa_home_bot.devlab.agent.context import FOLDED_OUTPUT_PREFIX
+from sa_home_bot.devlab.agent.markup import STYLE_CB_V4
 from sa_home_bot.devlab.agent.prompt_en import (
     CODE_MODE_INTRO_CB_V1_EN,
     CODE_MODE_INTRO_CB_V2_EN,
     CODE_MODE_INTRO_CB_V3_EN,
+    CODE_MODE_INTRO_CB_V4_EN,
     CODE_MODE_INTRO_REMOTE_EN,
     CODE_MODE_REMINDER_CB_V1_EN,
     CODE_MODE_REMINDER_CB_V2_EN,
@@ -23,6 +25,7 @@ from sa_home_bot.devlab.agent.script import (
     SCRIPT_CODE_EXAMPLE,
     SCRIPT_EDIT_EXAMPLE,
     SCRIPT_FINAL_EXAMPLE,
+    SCRIPT_MARKUP_EXAMPLE,
     SCRIPT_OUTPUT_CHARS,
     SCRIPT_READ_EXAMPLE,
     SCRIPT_TEST_EXAMPLE,
@@ -200,11 +203,6 @@ _CODE_MODE_RUNS = (
     "- Вывод режется по символам, а не по строкам: файл больше ~6000 симв. (около 150 строк) "
     "целиком не печатай и кусками не листай: grep(шаблон, путь, context=5) покажет номера "
     "строк, затем read(путь, start, end). Прочитанное второй раз не читай.\n"
-    "- Заметки: узнал важное (сигнатура, путь, ожидаемое значение, решение, что уже сделано) — "
-    "сразу запиши note(\"...\"). История разговора сворачивается, переменные скрипта живут, "
-    "а заметки переживают и свёртку, и перезапуск; их текст показан тебе в начале задания. "
-    "Не перечитывай то, что уже есть в заметках. Заметки полны — сожми их через "
-    "notes_set(\"...\"); notes() возвращает текущий текст.\n"
     "- После edit() файл не перечитывай: ошибку покажет EditError. diff() нужен, только если "
     "не помнишь, что правил. Если последний прогон зелёный и после него менялись только "
     "docs/, сразу finish(): повторный прогон и diff() не нужны.\n"
@@ -217,6 +215,27 @@ _CODE_MODE_RUNS = (
     "- step_done(\"N: итог\") — необязательная промежуточная проверка шага на длинных "
     "заданиях: страж прогоняет изменённые тесты. Принял — скрипт идёт дальше; не принял — "
     "StepRejected с причиной, и скрипт останавливается.\n"
+)
+_CODE_MODE_MARKUP = (
+    "\n"
+    "## Оглавление, План, Прочитано и заметки\n"
+    "В начале задания, в блоке заметок, у тебя есть Оглавление файлов задания (что где лежит, "
+    "диапазоны строк), План (шаги с отметками) и Прочитано (что ты уже читал); хост ведёт их "
+    "сам.\n"
+    "- Читай только нужный диапазон по оглавлению: read(путь, a, b), а не файл целиком и не "
+    "кусками подряд.\n"
+    "- Из прочитанного сразу пиши в note() вывод со ссылкой на место: "
+    "note(\"host.py:177-312 read_host_sync: порядок метрик ...; эталон full: 27 метрик\"). "
+    "Заметки переживают свёртку и перезапуск; полны — сожми через notes_set(\"...\"); "
+    "notes() возвращает текст.\n"
+    "- Данные храни в переменных скрипта, в контекст печатай только нужное.\n"
+    "- Не перечитывай то, что есть в Прочитано и заметках: повторное чтение хост пометит "
+    "подсказкой.\n"
+    "- Как только понятна сигнатура и образец — пиши файл. Много вызовов подряд без записи "
+    "хост отметит напоминанием.\n"
+    "\n"
+    "Пример разведки по оглавлению:\n"
+    f"{SCRIPT_MARKUP_EXAMPLE}\n"
 )
 _CODE_MODE_RED_GLM = (
     "- Если шаг требует красного теста, убедись в этом сам: вызов с правкой теста и "
@@ -314,6 +333,18 @@ CODE_MODE_INTRO_CB_V3 = (
     + _CODE_MODE_EXAMPLE_GLM
     + _CODE_MODE_TAIL
 )
+CODE_MODE_INTRO_CB_V4 = (
+    _CODE_MODE_HEAD
+    + _CODE_MODE_COST_GLM
+    + _CODE_MODE_CALC
+    + _CODE_MODE_NEIGHBORS
+    + _CODE_MODE_RUNS
+    + _CODE_MODE_MARKUP
+    + _CODE_MODE_RED_GLM
+    + _CODE_MODE_ASK
+    + _CODE_MODE_EXAMPLE_GLM
+    + _CODE_MODE_TAIL
+)
 CODE_MODE_INTRO_REMOTE = (
     _CODE_MODE_HEAD
     + _CODE_MODE_COST_REMOTE
@@ -391,11 +422,13 @@ CODE_MODE_TEXTS = {
         STYLE_CB_V1: (CODE_MODE_INTRO_CB_V1, CODE_MODE_REMINDER_CB_V1),
         STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2, CODE_MODE_REMINDER_CB_V2),
         STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3, CODE_MODE_REMINDER_CB_V3),
+        STYLE_CB_V4: (CODE_MODE_INTRO_CB_V4, CODE_MODE_REMINDER_CB_V3),
     },
     EN: {
         STYLE_CB_V1: (CODE_MODE_INTRO_CB_V1_EN, CODE_MODE_REMINDER_CB_V1_EN),
         STYLE_CB_V2: (CODE_MODE_INTRO_CB_V2_EN, CODE_MODE_REMINDER_CB_V2_EN),
         STYLE_CB_V3: (CODE_MODE_INTRO_CB_V3_EN, CODE_MODE_REMINDER_CB_V3_EN),
+        STYLE_CB_V4: (CODE_MODE_INTRO_CB_V4_EN, CODE_MODE_REMINDER_CB_V3_EN),
     },
 }
 CODE_MODE_REMOTE_TEXTS = {
