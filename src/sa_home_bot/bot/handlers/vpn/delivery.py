@@ -8,6 +8,7 @@ from sa_home_bot.bot import (
     vpn_devices,
     vpn_nodes,
     vpn_settings,
+    vpn_wizard,
 )
 from sa_home_bot.bot.handlers.vpn.context import (
     Ctx,
@@ -17,9 +18,12 @@ from sa_home_bot.bot.handlers.vpn.context import (
 from sa_home_bot.bot.handlers.vpn.screens import (
     fresh_device,
     show_screen,
+    subscription_answer,
+    subscription_link,
     subscription_page_url,
 )
 from sa_home_bot.vpn import protocol as vpn_protocol
+from sa_home_bot.vpn import qr
 
 _cb = vpn_callbacks
 _REALITY = vpn_protocol.TRANSPORT_REALITY
@@ -192,6 +196,58 @@ async def send_settings_link(ctx: Ctx, key: str) -> None:
         vpn_settings.page_link_text(device.label, page_url),
         reply_markup=vpn_settings.page_link_keyboard(page_url),
         message_thread_id=ctx.thread_id,
+    )
+
+
+async def send_hiddify_add(ctx: Ctx, key: str) -> None:
+    if not await ctx.require_private("Ссылка выдаётся только в личке."):
+        return
+    found = await fresh_device(ctx, key)
+    if found is None:
+        return
+    device, _servers = found
+    answer = await subscription_answer(ctx.node_link, ctx.chat_id, device)
+    if answer is None:
+        await ctx.alert(vpn_settings.UNAVAILABLE_TEXT)
+        return
+    await ctx.callback.answer()
+    page_url = str(answer["page_url"])
+    keyboard = vpn_wizard.add_keyboard(
+        vpn_wizard.platform_of_label(device.label), ctx.config.vpn, page_url
+    )
+    await ctx.notifier.send_direct(
+        ctx.chat_id,
+        vpn_wizard.connect_text(device.label, subscription_link(answer)),
+        reply_markup=keyboard,
+        message_thread_id=ctx.thread_id,
+    )
+
+
+async def send_subscription_link(ctx: Ctx, key: str) -> None:
+    if not await ctx.require_private("Ссылка выдаётся только в личке."):
+        return
+    found = await fresh_device(ctx, key)
+    if found is None:
+        return
+    device, _servers = found
+    answer = await subscription_answer(ctx.node_link, ctx.chat_id, device)
+    link = subscription_link(answer)
+    if answer is None or link is None:
+        await ctx.alert(vpn_settings.UNAVAILABLE_TEXT)
+        return
+    await ctx.callback.answer()
+    await ctx.notifier.send_direct(
+        ctx.chat_id,
+        vpn_wizard.sub_link_text(device.label, link),
+        reply_markup=vpn_wizard.sub_link_keyboard(str(answer["page_url"])),
+        message_thread_id=ctx.thread_id,
+    )
+    await vpn_delivery.send_qr(
+        ctx.notifier,
+        ctx.chat_id,
+        qr.png_b64(link),
+        caption=vpn_wizard.SUB_QR_CAPTION,
+        thread_id=ctx.thread_id,
     )
 
 

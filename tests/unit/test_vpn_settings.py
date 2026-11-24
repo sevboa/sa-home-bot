@@ -103,11 +103,16 @@ async def _press(data, *, link=None, notifier=None, pend=None, chat_id=778, cfg=
 
 async def test_card_has_get_settings_button_and_pick_screen():
     cb, _, _ = await _press(f"act:vpn:vpn_card:d{KEY}")
-    assert "📥 Получить настройки" in button_texts(cb.message.edit_markups[-1])
+    assert "Другие способы" in button_texts(cb.message.edit_markups[-1])
     cb, _, _ = await _press(f"act:vpn:vpn_card:g{KEY}")
     text, markup = last_edit(cb)
     assert text == f"📥 <b>{LABEL}</b> — чем подключаться?"
-    assert button_texts(markup) == ["⚡ AmneziaVPN", "🛡 VLESS · Hiddify", "⬅️ Назад"]
+    assert button_texts(markup) == [
+        "📶 Настройки на странице",
+        "⚡ AmneziaVPN",
+        "🛡 VLESS · Hiddify",
+        "⬅️ Назад",
+    ]
 
 
 async def test_vless_without_handshake_sends_file_and_one_message():
@@ -282,7 +287,7 @@ async def test_new_device_pick_platform_then_get_settings_screen(_env):
     ]
     cb, _, _ = await _press("act:vpn:vpn_card:n")
     assert button_texts(cb.message.edit_markups[-1]) == [
-        "🍎 iPhone",
+        "🍎 iPhone / iPad / Mac",
         "🤖 Android",
         "💻 Компьютер",
         "⬅️ Назад",
@@ -373,13 +378,13 @@ def _card_markup(page_url):
 
 def test_card_page_button_first_then_link_and_other_ways():
     markup = _card_markup(PAGE)
-    first = all_buttons(markup)[0]
-    assert first.text == "📶 Настройки на странице" and first.url == PAGE
+    first, link = all_buttons(markup)[:2]
+    assert first.text == "➕ Добавить в Hiddify" and first.url == PAGE + "/hiddify"
+    assert link.text == "🔗 Ссылка подписки" and link.callback_data.endswith(f":k{KEY}")
     texts = button_texts(markup)
-    get = [b for b in all_buttons(markup) if b.text == "📥 Получить настройки"][0]
     other = [b for b in all_buttons(markup) if b.text == "Другие способы"][0]
-    assert get.callback_data.endswith(f":l{KEY}") and other.callback_data.endswith(f":g{KEY}")
-    assert texts.index("📥 Получить настройки") < texts.index("Другие способы")
+    assert other.callback_data.endswith(f":g{KEY}")
+    assert "📶 Настройки на странице" not in texts and "📥 Получить настройки" not in texts
 
 
 def test_card_without_page_keeps_old_get_settings():
@@ -403,8 +408,7 @@ async def test_get_settings_sends_one_forwardable_message(monkeypatch):
     assert text == (
         f"📶 <b>Настройки VPN · {LABEL}</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
-        "по шагам: сначала резервный Hiddify, потом основной AmneziaVPN (он быстрее) и проверка, "
-        "что VPN включён.\n"
+        "по шагам: Hiddify и, если нужно, AmneziaVPN, и проверка, что VPN включён.\n"
         f"{PAGE}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )

@@ -909,7 +909,7 @@ def test_card_keyboard_has_hiddify_url_button_first():
         device, servers, subscription=ADMIN, page_url="https://h:8444/s/tok"
     )
     first = markup.inline_keyboard[0][0]
-    assert first.text == "📶 Настройки на странице" and first.url == "https://h:8444/s/tok"
+    assert first.text == "➕ Добавить в Hiddify" and first.url == "https://h:8444/s/tok/hiddify"
     plain = vpn_screens.device_card_keyboard(device, servers, subscription=ADMIN)
     assert all(b.url is None for row in plain.inline_keyboard for b in row)
 
