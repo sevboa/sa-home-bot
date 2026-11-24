@@ -132,6 +132,19 @@ def test_outage_text_names_the_broken_layer():
     assert notify.outage_text({**net, "layer": "moon"}, label_of) is None
 
 
+def test_net_outage_text_carries_ping_hint():
+    net = {**OUTAGE_BASE, "layer": "net", "from": "ok", "to": "down"}
+    base = "🚨 🇳🇱 <code>jeeves</code> — сервер не отвечает 🇷🇺"
+    assert notify.outage_text({**net, "ping": True}, label_of) == f"{base} — ping есть, режут TCP"
+    assert (
+        notify.outage_text({**net, "ping": False}, label_of)
+        == f"{base} — ping нет, IP закрыт целиком"
+    )
+    assert notify.outage_text({**net, "ping": None}, label_of) == base
+    back = {**net, "from": "down", "to": "ok", "ping": True}
+    assert "ping" not in notify.outage_text(back, label_of)
+
+
 def test_layers_lines_mute_layers_under_the_broken_one():
     layers = {
         "global": {"jeeves": {"net": "ok", "node": "ok", "vpn": "partial"}},
