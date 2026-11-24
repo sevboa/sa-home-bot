@@ -82,6 +82,10 @@
 - Профиль `tester` в конфиге исполнителя: `expect_red = true`. Профилю `architect` новых полей не
   нужно: `write_prefixes` (например `plans/`) ограничивает запись, `allow_no_changes = false`
   требует файла результата в `paths`.
+- 2026-11-24: страж finish (`FinishGuard.verify`) без строки «Менять можно только» ищет правки в
+  `write_prefixes` профиля, а не в `diff_prefixes` проекта. До этого архитектор (`ynm45m`) записал
+  `plans/epic-park.json`, но finish отклонялся «нет изменений в src/, tests/». Тест:
+  `test_write_prefixes_scope_finish`.
 
 ## Не сделано
 Профили `tester` и `architect` нужно завести в конфиге исполнителя (конфиги нод в Б4 не трогались).

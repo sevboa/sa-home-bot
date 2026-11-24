@@ -81,6 +81,16 @@ async def test_no_line_keeps_diff_prefixes(tmp_path, edited, accepted):
     assert await guard.verify() == ([] if accepted else [PREFIX_MESSAGE])
 
 
+@pytest.mark.parametrize(
+    "edited,accepted",
+    [("docs/devlab/agent.md", True), ("src/app.py", False)],
+)
+async def test_write_prefixes_scope_finish(tmp_path, edited, accepted):
+    spec = AgentSpec(write_prefixes=("docs/",), diff_prefixes=("src/",))
+    guard = make_guard(tmp_path, "цель", edited=edited, spec=spec)
+    assert await guard.verify() == ([] if accepted else [changed_message("docs/")])
+
+
 async def test_no_line_no_diff_rejected(tmp_path):
     guard = make_guard(tmp_path, "цель")
     assert await guard.verify() == [NO_LINE_MESSAGE]

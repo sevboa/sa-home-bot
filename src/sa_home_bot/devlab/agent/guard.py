@@ -101,16 +101,15 @@ class FinishGuard:
         allowed = task_paths(self._task)
         if allowed:
             changed = [p for p in changed if _in_allowed(p, allowed)]
+        elif spec.write_prefixes:
+            changed = [p for p in changed if p.startswith(spec.write_prefixes)]
         elif spec.diff_prefixes:
             changed = [p for p in changed if p.startswith(spec.diff_prefixes)]
         if not changed:
             if spec.allow_no_changes:
                 return await self.verify_green()
-            where = (
-                f" в {', '.join(allowed or spec.diff_prefixes)}"
-                if allowed or spec.diff_prefixes
-                else ""
-            )
+            scope = allowed or spec.write_prefixes or spec.diff_prefixes
+            where = f" в {', '.join(scope)}" if scope else ""
             return [f"нет изменений{where}: правок не сделано, задача не выполнена"]
         return await self.verify_green()
 
