@@ -3,9 +3,13 @@ from __future__ import annotations
 import pytest
 
 from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab.hub import mcp_tools
 from sa_home_bot.devlab.hub.errors import HubError
+from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
+from sa_home_bot.proto.messages import ProtoError
 from sa_home_bot.utils.process import run
+from tests.unit.support.fakes import FakeNodes
 
 CLIENT = "claude"
 OTHER = "other"
@@ -253,6 +257,115 @@ async def test_resume_all_continues_from_last_mark_after_restart(store):
     assert len(await store.queue.list_jobs(CLIENT)) == 2
 
 
+async def test_stop_stops_current_job_and_blocks_progress(store):
+    view = await submit(store)
+    job = await claim(store)
+    result = await store.epics.stop(view["id"])
+    assert result == {"id": view["id"], "status": S.EPIC_STOPPED}
+    assert (await store.queue.get_job(job.id)).status == S.STATUS_STOPPED
+    now = await store.epics.view(CLIENT, view["id"])
+    assert now["status"] == S.EPIC_STOPPED
+    assert now["tasks"][1]["job_id"] is None
+    await store.epics.resume_all()
+    assert (await store.epics.view(CLIENT, view["id"]))["status"] == S.EPIC_STOPPED
+    assert await store.epics.active_summaries() == []
+
+
+async def test_resume_returns_stopped_job_to_queue_and_epic_runs(store):
+    view = await submit(store, plan(2))
+    job = await claim(store)
+    await store.epics.stop(view["id"])
+    result = await store.epics.resume(view["id"])
+    assert result["status"] == S.EPIC_RUNNING
+    assert (await store.queue.get_job(job.id)).status == S.STATUS_QUEUED
+    claimed = await claim(store)
+    assert claimed.id == job.id
+    await executor_finishes(store, job.id)
+    after = await store.epics.view(CLIENT, view["id"])
+    assert after["tasks"][1]["job_id"] is not None
+
+
+async def test_resume_after_wait_resets_failures_and_requeues(store):
+    view = await submit(store, plan(2))
+    await fail(store)
+    job = await fail(store)
+    assert (await store.epics.view(CLIENT, view["id"]))["status"] == S.EPIC_WAITING_OWNER
+    await store.epics.resume(view["id"])
+    now = await store.epics.view(CLIENT, view["id"])
+    assert now["status"] == S.EPIC_RUNNING
+    assert now["tasks"][0]["failures"] == 0
+    assert (await store.queue.get_job(job.id)).status == S.STATUS_QUEUED
+
+
+async def test_finished_epic_cannot_be_resumed_or_stopped(store):
+    view = await submit(store, plan(1))
+    job = await claim(store)
+    await executor_finishes(store, job.id)
+    for action in (store.epics.resume, store.epics.stop):
+        with pytest.raises(HubError, match="завершён"):
+            await action(view["id"])
+
+
+async def test_active_summaries_and_task_totals(store):
+    view = await submit(store, plan(3))
+    job = await claim(store)
+    await executor_finishes(store, job.id)
+    [summary] = await store.epics.active_summaries()
+    assert summary["id"] == view["id"]
+    assert summary["title"] == "шаг 0"
+    assert (summary["done"], summary["total"]) == (1, 3)
+    assert summary["current_title"] == "шаг 1"
+    assert summary["status"] == S.EPIC_RUNNING
+    assert await store.epics.task_totals([view["id"], "zzzzzz"]) == {view["id"]: 3}
+    assert await store.epics.task_totals([]) == {}
+
+
+async def test_owner_jobs_carry_epics_and_epic_total(store):
+    view = await submit(store, plan(2))
+    await claim(store)
+    service = HubService(store, FakeNodes())
+    reply = await service.run_command(S.ACTION_OWNER_JOBS, {})
+    assert [e["id"] for e in reply[S.FIELD_EPICS]] == [view["id"]]
+    assert reply[S.FIELD_JOBS][0][S.FIELD_EPIC_TOTAL] == 2
+
+
+async def test_owner_epic_post_resume_and_stop(store):
+    view = await submit(store)
+    await claim(store)
+    service = HubService(store, FakeNodes())
+    stopped = await service.run_command(
+        S.ACTION_OWNER_EPIC_POST, {"id": view["id"], "kind": S.MSG_STOP}
+    )
+    assert stopped["status"] == S.EPIC_STOPPED
+    resumed = await service.run_command(
+        S.ACTION_OWNER_EPIC_POST, {"id": view["id"], "kind": S.MSG_RESUME}
+    )
+    assert resumed["status"] == S.EPIC_RUNNING
+    with pytest.raises(ProtoError):
+        await service.run_command(
+            S.ACTION_OWNER_EPIC_POST, {"id": view["id"], "kind": S.MSG_ANSWER}
+        )
+    with pytest.raises(ProtoError):
+        await service.run_command(S.ACTION_OWNER_EPIC_POST, {"id": "zzzzzz", "kind": S.MSG_STOP})
+
+
+async def test_mcp_epic_tools_respect_owner_and_status_shows_live(store):
+    view = await submit(store)
+    job = await claim(store)
+    await store.queue.note_live(
+        {job.id: {S.FIELD_CONTEXT_TOKENS: 46000, S.FIELD_CONTEXT_LIMIT: 118000, S.FIELD_FOLDS: 2}}
+    )
+    status = await mcp_tools.status(mcp_tools.Context(store, CLIENT), job.id)
+    assert status[S.FIELD_CONTEXT_TOKENS] == 46000
+    assert status[S.FIELD_FOLDS] == 2
+    with pytest.raises(HubError, match="нет"):
+        await mcp_tools.epic_stop(mcp_tools.Context(store, OTHER), view["id"])
+    result = await mcp_tools.epic_stop(mcp_tools.Context(store, CLIENT), view["id"])
+    assert result["status"] == S.EPIC_STOPPED
+    result = await mcp_tools.epic_resume(mcp_tools.Context(store, CLIENT), view["id"])
+    assert result["status"] == S.EPIC_RUNNING
+
+
 async def test_epic_is_visible_only_to_its_client(store):
     view = await submit(store)
     with pytest.raises(HubError, match="нет"):
@@ -321,3 +434,29 @@ async def test_unknown_base_branch_is_refused(store):
         await store.epics.submit(CLIENT, PROJECT, "base/nope", plan(1))
     with pytest.raises(HubError, match="базовая ветка"):
         await store.epics.submit(CLIENT, PROJECT, "master", plan(1))
+
+
+async def test_jobs_get_later_test_files_to_skip_and_tester_files_locked(store):
+    tasks = plan()
+    tasks[0]["profile"] = S.PROFILE_TESTER
+    tasks[2]["profile"] = S.PROFILE_TESTER
+    view = await submit(store, tasks)
+    seen = []
+    for i in range(3):
+        job = await claim(store)
+        seen.append(
+            (job.params[S.PARAM_EPIC_SKIP_TESTS], job.params[S.PARAM_EPIC_LOCKED])
+        )
+        await executor_finishes(store, job.id, name=f"f{i}.txt")
+    assert seen == [
+        (["tests/unit/test_m1.py", "tests/unit/test_m2.py"], []),
+        (["tests/unit/test_m2.py"], ["src/m0.py", "tests/unit/test_m0.py"]),
+        ([], []),
+    ]
+    assert view["tasks"][0]["profile"] == S.PROFILE_TESTER
+
+
+async def test_job_outside_epic_has_no_skip_or_locked(store):
+    job = await store.queue.submit(CLIENT, PROJECT, MODEL, "задача", base_branch=BASE)
+    assert S.PARAM_EPIC_SKIP_TESTS not in job.params
+    assert S.PARAM_EPIC_LOCKED not in job.params

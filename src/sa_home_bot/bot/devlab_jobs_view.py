@@ -32,6 +32,13 @@ SLOT_WAIT_ICON = "📌"
 SLOT_WAIT_TEXT = "ждёт слот"
 FINISH_TESTS_ICON = "🧪"
 FINISH_TESTS_TEXT = "финиш: тесты"
+EPIC_ICON = "🧩"
+EPIC_SECTION_TITLE = "🧩 Эпики"
+EPIC_STATE_TEXTS = {
+    protocol.EPIC_RUNNING: "идёт",
+    protocol.EPIC_WAITING_OWNER: "❓ ждёт владельца",
+}
+CONTEXT_UNIT = 1000
 USAGE_UNKNOWN_TEXT = "н/д (модель не отдаёт usage)"
 STATUS_ICONS = {
     protocol.STATUS_RUNNING: "🟢",
@@ -128,6 +135,46 @@ def _tokens_text(job: dict[str, Any], tokens: int) -> str:
     return str(tokens)
 
 
+def _epic_position(job: dict[str, Any]) -> tuple[str, int, int] | None:
+    params = job.get(protocol.FIELD_PARAMS) or {}
+    epic_id = params.get(protocol.PARAM_EPIC)
+    index = params.get(protocol.PARAM_EPIC_INDEX)
+    total = job.get(protocol.FIELD_EPIC_TOTAL)
+    if not epic_id or not isinstance(index, int) or not total:
+        return None
+    return str(epic_id), index + 1, total
+
+
+def _thousands(tokens: int) -> int:
+    return round(tokens / CONTEXT_UNIT)
+
+
+def _context_text(job: dict[str, Any]) -> str | None:
+    used = job.get(protocol.FIELD_CONTEXT_TOKENS)
+    if not used:
+        return None
+    limit = job.get(protocol.FIELD_CONTEXT_LIMIT)
+    if limit:
+        return f"окно {_thousands(used)}/{_thousands(limit)} тыс."
+    return f"окно {_thousands(used)} тыс."
+
+
+def epic_line(epic: dict[str, Any]) -> str:
+    epic_id = escape(str(epic.get(protocol.FIELD_ID, "")))
+    name = escape(clip(str(epic.get(protocol.FIELD_TITLE, "")), TITLE_CHARS))
+    state = EPIC_STATE_TEXTS.get(str(epic.get(protocol.FIELD_STATUS, "")), "")
+    parts = [
+        f"{EPIC_ICON} <code>{epic_id}</code> · {name}",
+        f"· {epic.get('done', 0)}/{epic.get('total', 0)}",
+    ]
+    current = epic.get("current_title")
+    if current:
+        parts.append(f"· {escape(clip(str(current), TITLE_CHARS))}")
+    if state:
+        parts.append(f"· {state}")
+    return f"<p>{' '.join(parts)}</p>"
+
+
 def _finishing(job: dict[str, Any]) -> bool:
     return (
         job.get(protocol.FIELD_STATUS) == protocol.STATUS_RUNNING
@@ -199,6 +246,10 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     if role_str:
         parts.append(f"· {role_str}")
 
+    position = _epic_position(job)
+    if position:
+        parts.append(f"· эпик {position[1]}/{position[2]}")
+
     parts.append(escape(title))
     return f"<p>{' '.join(parts)}</p>"
 
@@ -210,8 +261,10 @@ def page_html(
     size: int,
     now: datetime,
     counts: dict[str, int] | None = None,
+    epics: list[dict[str, Any]] | None = None,
 ) -> str:
-    if not jobs:
+    shown_epics = epics if epics and offset == 0 else []
+    if not jobs and not shown_epics:
         return "<p>Активных заданий нет.</p>"
     pages_total = (total + size - 1) // size
     current_page = offset // size + 1
@@ -234,6 +287,9 @@ def page_html(
             header_parts.append(" (" + " ".join(parts) + ")")
     header_parts.append(f" · стр. {current_page} из {pages_total}")
     lines = ["<p>" + "".join(header_parts) + "</p>"]
+    if shown_epics:
+        lines.append(f"<p><b>{EPIC_SECTION_TITLE}</b></p>")
+        lines.extend(epic_line(epic) for epic in shown_epics)
 
     page_jobs = jobs[:size]
     by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in SECTION_ORDER}
@@ -262,14 +318,15 @@ def render_page(
     total: int,
     now: datetime | None = None,
     counts: dict[str, int] | None = None,
+    epics: list[dict[str, Any]] | None = None,
 ) -> tuple[InputRichMessage, InlineKeyboardMarkup, int]:
     if now is None:
         now = datetime.now(UTC)
     size = PAGE_SIZE
-    html = page_html(jobs[:size], offset, total, size, now, counts)
+    html = page_html(jobs[:size], offset, total, size, now, counts, epics)
     if len(html) > TEXT_LIMIT:
         size = SMALL_PAGE_SIZE
-        html = page_html(jobs[:size], offset, total, size, now, counts)
+        html = page_html(jobs[:size], offset, total, size, now, counts, epics)
     keyboard_rows: list[list[InlineKeyboardButton]] = []
     nav = nav_row(offset, size, total, page_cb)
     if nav:
@@ -364,6 +421,10 @@ def render_card(
     lines.append(f"<p>Ветка: {escape(protocol.AGENT_BRANCH_PREFIX + job_id)}</p>")
     if role_str:
         lines.append(f"<p>Роль: {escape(role_str)}</p>")
+    position = _epic_position(job)
+    if position:
+        epic_id, number, total = position
+        lines.append(f"<p>Эпик: {escape(epic_id)}, задача {number} из {total}</p>")
     deps_text = _deps_text(job)
     if deps_text:
         lines.append(f"<p>Зависимости: {escape(deps_text)}</p>")
@@ -390,6 +451,12 @@ def render_card(
     reasoning = job.get(protocol.FIELD_REASONING_TOKENS)
     if reasoning:
         lines.append(f"<p>Токены размышления: {reasoning}</p>")
+    context = _context_text(job)
+    if context:
+        lines.append(f"<p>Контекст: {context}</p>")
+        folds = job.get(protocol.FIELD_FOLDS)
+        if folds is not None:
+            lines.append(f"<p>Свёрток истории: {folds}</p>")
     if steps > 0 and last_step:
         clipped = clip(str(last_step), QUESTION_CHARS)
         lines.append(f"<p>Последний шаг ({steps}): {escape(clipped)}</p>")

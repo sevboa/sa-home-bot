@@ -74,6 +74,8 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_reviews` | `model`, `since` | журнал оценок с фильтром по модели и дате (Этап Р20.2, 2026-11-20) |
 | `devlab_epic_submit` | `project`, `base_branch`, `tasks` | эпик: задачи по очереди в ветке `epic/<id>`, план проверяется кодом ([epic.md](epic.md), 2026-11-24) |
 | `devlab_epic` | `id` | состояние эпика и отметки по задачам (2026-11-24) |
+| `devlab_epic_resume` | `id` | продолжить эпик: текущее задание в очередь, ожидание снято ([epic.md](epic.md), 2026-11-24) |
+| `devlab_epic_stop` | `id` | остановить эпик и его текущее задание (2026-11-24) |
 
 `answer`, `resume`, `stop`, `release` возвращают `seq` сообщения и новый `status`. Текст `answer` и
 `resume` лежит в `payload.text` (`protocol.PAYLOAD_TEXT`).

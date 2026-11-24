@@ -266,7 +266,9 @@ class AgentLoop:
         trace: TraceSink | None = None,
         clock: Callable[[], float] = time.monotonic,
         overflow_hint: str = "",
+        on_fold: Callable[[], None] | None = None,
     ) -> None:
+        self._on_fold = on_fold
         self._model = model
         self._tools = tools
         self._guard = guard
@@ -374,7 +376,11 @@ class AgentLoop:
             crane = self._crane(seg)
             if crane is not None:
                 return self._crane_result(seg, messages, *crane)
-            before = estimate_tokens(messages) if self._trace is not None else 0
+            before = (
+                estimate_tokens(messages)
+                if self._trace is not None or self._on_fold is not None
+                else 0
+            )
             window = fold_old_results(
                 messages,
                 budget,
@@ -382,6 +388,8 @@ class AgentLoop:
                 self._tools.notes_text,
                 self._tools.reset_reads,
             )
+            if self._on_fold is not None and window < before:
+                self._on_fold()
             if window > budget:
                 return self._result(
                     AgentStatus.CONTEXT_OVERFLOW,

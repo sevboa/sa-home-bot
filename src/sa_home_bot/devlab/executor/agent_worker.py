@@ -522,6 +522,11 @@ class AgentWorker(WorkerLoops):
                 prompt_style=profile.prompt_style,
                 remote_style=REMOTE_R1 if is_glm(job.model) else profile.remote_style,
             )
+        spec = replace(
+            spec,
+            locked_paths=tuple(job.params.get(protocol.PARAM_EPIC_LOCKED) or ()),
+            skip_tests=tuple(job.params.get(protocol.PARAM_EPIC_SKIP_TESTS) or ()),
+        )
         role_text = self._role_text(profile_name, profile)
         intro_text, reminder_text = self._code_mode_overrides(profile_name, profile)
         await self._warn_closed_tracked(run, repo.base, spec)
@@ -538,6 +543,7 @@ class AgentWorker(WorkerLoops):
         entries = await self._catalog.entries(job.model)
         rules = await self._rules(run, project, repo.base, external)
         limits = self._limits_for(spend, entries, profile)
+        spend.set_context_limit(limits.context_tokens)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id, spec.chat_style, reminder_text), spend),
             ToolBox(
@@ -563,6 +569,7 @@ class AgentWorker(WorkerLoops):
             tokens=spend.total_tokens,
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
+            on_fold=spend.note_fold,
         )
         system = build_system(
             rules,

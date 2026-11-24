@@ -374,6 +374,8 @@ def _matches(relative, patterns):
 def _violation(relative):
     if relative.startswith("../") or os.path.isabs(relative):
         return f"путь {relative} недопустим: нужен относительный путь внутри проекта"
+    if _matches(relative, _CONFIG.get("locked", [])):
+        return f"путь {relative}: файл тестера, не меняй; не согласен — ask_owner"
     if _matches(relative, _CONFIG["closed"]):
         return f"путь {relative} закрыт для правок правилами проекта"
     prefixes = _CONFIG["write_prefixes"]

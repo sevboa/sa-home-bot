@@ -115,6 +115,9 @@ LIVE_KEYS = (
     protocol.FIELD_REASONING_TOKENS,
     protocol.FIELD_USAGE_KNOWN,
     protocol.FIELD_PHASE,
+    protocol.FIELD_CONTEXT_TOKENS,
+    protocol.FIELD_CONTEXT_LIMIT,
+    protocol.FIELD_FOLDS,
 )
 
 

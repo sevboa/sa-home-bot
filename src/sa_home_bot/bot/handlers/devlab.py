@@ -28,6 +28,10 @@ from sa_home_bot.bot.devlab_jobs_view import (
 from sa_home_bot.bot.devlab_notify import (
     CB_CANCEL,
     CB_CANCEL_STALLED,
+    CB_EPIC_CANCEL,
+    CB_EPIC_RESUME,
+    CB_EPIC_STOP,
+    CB_EPIC_STOP_CONFIRM,
     CB_PREFIX,
     CB_RELEASE,
     CB_RESUME,
@@ -35,6 +39,7 @@ from sa_home_bot.bot.devlab_notify import (
     CB_STOP_CONFIRM,
     CB_STOP_STALLED,
     DevlabNotifier,
+    epic_keyboard,
     hub_address,
     question_keyboard,
     stalled_keyboard,
@@ -59,6 +64,11 @@ POST_KINDS = {
     CB_RELEASE: protocol.MSG_RELEASE,
     CB_STOP_CONFIRM: protocol.MSG_STOP,
     CB_RESUME: protocol.MSG_RESUME,
+}
+
+EPIC_POST_KINDS = {
+    CB_EPIC_RESUME: protocol.MSG_RESUME,
+    CB_EPIC_STOP_CONFIRM: protocol.MSG_STOP,
 }
 
 JOBS_POST_KINDS = {
@@ -181,6 +191,25 @@ async def on_devlab_callback(
     elif code == CB_CANCEL:
         await _clear_markup(callback, question_keyboard(job_id))
         await callback.answer()
+    elif code == CB_EPIC_STOP:
+        await _clear_markup(
+            callback,
+            stop_confirm_keyboard(job_id, CB_EPIC_CANCEL, CB_EPIC_STOP_CONFIRM),
+        )
+        await callback.answer()
+    elif code == CB_EPIC_CANCEL:
+        await _clear_markup(callback, epic_keyboard(job_id))
+        await callback.answer()
+    elif code in EPIC_POST_KINDS:
+        await _post_button(
+            callback,
+            node_link,
+            config,
+            job_id,
+            EPIC_POST_KINDS[code],
+            devlab_notifier,
+            protocol.ACTION_OWNER_EPIC_POST,
+        )
     elif code in POST_KINDS:
         await _post_button(callback, node_link, config, job_id, POST_KINDS[code], devlab_notifier)
     else:
@@ -194,9 +223,10 @@ async def _post_button(
     job_id: str,
     kind: str,
     devlab_notifier: DevlabNotifier | None,
+    action: str = protocol.ACTION_OWNER_POST,
 ) -> None:
     args = _post_args(job_id, kind)
-    result = await _hub(node_link, config, protocol.ACTION_OWNER_POST, args)
+    result = await _hub(node_link, config, action, args)
     if result.reply is None:
         await callback.answer(result.error, show_alert=True)
         if not result.down:
@@ -233,7 +263,9 @@ async def cmd_jobs(
     jobs = result.reply.get(protocol.FIELD_JOBS, [])
     total = result.reply.get(protocol.FIELD_TOTAL, 0)
     counts = _counts_by_status(jobs)
-    rich_msg, keyboard, _ = render_page(jobs, 0, total, now=datetime.now(UTC), counts=counts)
+    rich_msg, keyboard, _ = render_page(jobs, 0, total, now=datetime.now(UTC), counts=counts,
+        epics=result.reply.get(protocol.FIELD_EPICS, []),
+    )
     await message.answer_rich(rich_message=rich_msg, reply_markup=keyboard)
 
 
@@ -281,7 +313,12 @@ async def on_jobs_callback(
                 continue
             counts = _counts_by_status(jobs)
             rich_msg, keyboard, _ = render_page(
-                jobs, offset, total, now=datetime.now(UTC), counts=counts
+                jobs,
+                offset,
+                total,
+                now=datetime.now(UTC),
+                counts=counts,
+                epics=result.reply.get(protocol.FIELD_EPICS, []),
             )
             await redraw_rich(callback, rich_msg, keyboard)
             break

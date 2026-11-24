@@ -138,6 +138,7 @@ OWNER_ACTION_IDS = (
     protocol.ACTION_OWNER_TASK,
     protocol.ACTION_OWNER_POST,
     protocol.ACTION_OWNER_JOBS,
+    protocol.ACTION_OWNER_EPIC_POST,
 )
 CLIENT_A = "claude-a"
 CLIENT_B = "claude-b"
@@ -411,6 +412,23 @@ async def test_owner_views_show_live_spend_and_finish_phase(owner):
     view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
     assert view[protocol.PAYLOAD_TOKENS] == 6000
     assert protocol.FIELD_PHASE not in view
+
+
+async def test_owner_views_show_context_window_and_folds(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(job.id, protocol.MSG_STARTED)
+    window = {
+        protocol.FIELD_CONTEXT_TOKENS: 46000,
+        protocol.FIELD_CONTEXT_LIMIT: 118000,
+        protocol.FIELD_FOLDS: 3,
+    }
+    await queue.note_live({job.id: window})
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert {key: view[key] for key in window} == window
+    other = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": jobs[CLIENT_B].id})
+    assert protocol.FIELD_CONTEXT_TOKENS not in other
+    assert protocol.FIELD_FOLDS not in other
 
 
 async def test_owner_views_mark_unknown_usage_only_while_tokens_zero(owner):

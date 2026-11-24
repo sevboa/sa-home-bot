@@ -68,7 +68,15 @@ DEFAULT_FILES = {"src/app.py": "VALUE = 1\n"}
 
 
 def make_loop(
-    tmp_path, model, spec=None, limits=None, files=None, on_change=None, trace=None, clock=None
+    tmp_path,
+    model,
+    spec=None,
+    limits=None,
+    files=None,
+    on_change=None,
+    trace=None,
+    clock=None,
+    on_fold=None,
 ):
     for name, text in (files or DEFAULT_FILES).items():
         target = tmp_path / name
@@ -83,6 +91,7 @@ def make_loop(
         limits,
         on_change=on_change,
         trace=trace,
+        on_fold=on_fold,
         **({"clock": clock} if clock else {}),
     )
     return loop, sandbox
@@ -284,6 +293,35 @@ async def test_old_tool_outputs_are_folded(tmp_path):
     assert len(model.seen[-1]) > 8
 
 
+async def test_fold_callback_fires_only_when_history_shrinks(tmp_path):
+    spec = AgentSpec(
+        test_argv=GREEN_TEST,
+        diff_prefixes=("src/",),
+        allowed_commands=(sys.executable,),
+        output_chars=5000,
+    )
+    command = f"{sys.executable} -c \"print('x'*5000)\""
+    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=f"{command} {i}") for i in range(4)]
+    model = ScriptedChatModel(*runs, edit("e"), tool_reply(TOOL_FINISH, "f", summary="ok"))
+    limits = AgentLimits(context_tokens=7000, reply_tokens=500, keep_recent=2)
+    folds = []
+    loop, _ = make_loop(
+        tmp_path, model, spec=spec, limits=limits, on_fold=lambda: folds.append(1)
+    )
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.FINISHED
+    assert folds
+
+    quiet = []
+    plain_loop, _ = make_loop(
+        tmp_path / "q",
+        ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, summary="ok")),
+        on_fold=lambda: quiet.append(1),
+    )
+    await plain_loop.run("s", "t")
+    assert quiet == []
+
+
 async def test_large_write_arguments_are_folded(tmp_path):
     big = tool_reply(TOOL_WRITE_FILE, "w", path="src/gen.py", content="x = 1\n" * 800)
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",))
@@ -331,6 +369,17 @@ async def test_long_tail_of_big_outputs_converges(tmp_path):
     last = model.seen[-1]
     ids = {c["id"] for m in last if m["role"] == "assistant" for c in m.get("tool_calls") or ()}
     assert all(m["tool_call_id"] in ids for m in last if m["role"] == "tool")
+
+
+async def test_locked_path_rejects_write_but_allows_read(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_a.py").write_text("ok\n")
+    box = ToolBox(LocalSandbox(tmp_path), AgentSpec(locked_paths=("tests/test_a.py",)))
+    with pytest.raises(ToolError, match="файл тестера"):
+        await box.call(TOOL_WRITE_FILE, {"path": "tests/test_a.py", "content": "x"})
+    outcome = await box.call(TOOL_READ_FILE, {"path": "tests/test_a.py"})
+    assert "ok" in outcome.text
+    await box.call(TOOL_WRITE_FILE, {"path": "tests/test_b.py", "content": "x"})
 
 
 async def test_forbidden_paths_and_command_whitelist(tmp_path):

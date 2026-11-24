@@ -7,7 +7,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub.errors import HubError
-from sa_home_bot.devlab.hub.mcp_tools import job_view
+from sa_home_bot.devlab.hub.mcp_tools import job_view, live_fields
 from sa_home_bot.devlab.hub.nodes import NodeDirectory
 from sa_home_bot.devlab.hub.queue import DEFAULT_PAGE, Job
 from sa_home_bot.devlab.hub.store import HubStore
@@ -71,6 +71,18 @@ OWNER_ACTIONS = (
             ActionParam(name=protocol.FIELD_KIND, title="Вид", choices=protocol.CLIENT_MESSAGES),
             ActionParam(name=protocol.PAYLOAD_TEXT, title="Текст", required=False),
             ActionParam(name=protocol.PAYLOAD_MODEL, title="Модель", required=False),
+        ),
+    ),
+    ActionSpec(
+        id=protocol.ACTION_OWNER_EPIC_POST,
+        title="Сообщение эпику (владелец)",
+        params=(
+            ActionParam(name=protocol.FIELD_ID, title="Номер эпика"),
+            ActionParam(
+                name=protocol.FIELD_KIND,
+                title="Вид",
+                choices=(protocol.MSG_RESUME, protocol.MSG_STOP),
+            ),
         ),
     ),
     ActionSpec(
@@ -161,6 +173,10 @@ class HubService:
         ]
         waiting = await queue.slot_waiting(running_agent_ids) if running_agent_ids else set()
         lives = await queue.live_views(job_ids)
+        epic_ids = {
+            job.params[protocol.PARAM_EPIC] for job in jobs if protocol.PARAM_EPIC in job.params
+        }
+        epic_totals = await self._store.epics.task_totals(epic_ids)
         dep_ids_all: list[str] = []
         for job in jobs:
             dep_ids_all.extend(job.params.get(protocol.PARAM_DEPENDS_ON, []))
@@ -177,20 +193,10 @@ class HubService:
                 for dep_id in dep_ids
             ]
             view[protocol.FIELD_SLOT_WAIT] = job.id in waiting
-            live = lives.get(job.id, {})
-            running = job.status == protocol.STATUS_RUNNING
-            view[protocol.PAYLOAD_TOKENS] = max(job.tokens, live.get(protocol.PAYLOAD_TOKENS, 0))
-            for key in (
-                protocol.FIELD_MODEL_STEPS,
-                protocol.FIELD_SEGMENT_TOKENS,
-                protocol.FIELD_REASONING_TOKENS,
-            ):
-                if key in live:
-                    view[key] = live[key]
-            if running and live.get(protocol.FIELD_PHASE):
-                view[protocol.FIELD_PHASE] = live[protocol.FIELD_PHASE]
-            if not live.get(protocol.FIELD_USAGE_KNOWN, True) and not view[protocol.PAYLOAD_TOKENS]:
-                view[protocol.FIELD_USAGE_KNOWN] = False
+            view.update(live_fields(job, lives.get(job.id, {})))
+            epic_id = job.params.get(protocol.PARAM_EPIC)
+            if epic_id in epic_totals:
+                view[protocol.FIELD_EPIC_TOTAL] = epic_totals[epic_id]
             views.append(view)
         return views
 
@@ -227,6 +233,16 @@ class HubService:
         after = await queue.get_job(job.id)
         return {protocol.FIELD_SEQ: message.seq, protocol.FIELD_STATUS: after.status}
 
+    async def _owner_epic_post(self, args: dict[str, Any]) -> dict[str, Any]:
+        epics = self._store.epics
+        epic_id = str(args.get(protocol.FIELD_ID, ""))
+        kind = str(args.get(protocol.FIELD_KIND, ""))
+        if kind == protocol.MSG_RESUME:
+            return await epics.resume(epic_id)
+        if kind == protocol.MSG_STOP:
+            return await epics.stop(epic_id)
+        raise HubError(f"для эпика вид {kind!r} не подходит: resume или stop")
+
     async def _owner_jobs(self, args: dict[str, Any]) -> dict[str, Any]:
         queue = self._store.queue
         offset = _int_arg(args, protocol.FIELD_OFFSET, 0)
@@ -239,6 +255,7 @@ class HubService:
         enriched = await self._owner_views(jobs)
         return {
             protocol.FIELD_JOBS: enriched,
+            protocol.FIELD_EPICS: await self._store.epics.active_summaries(),
             protocol.FIELD_TOTAL: total,
             protocol.FIELD_OFFSET: offset,
         }
@@ -252,6 +269,8 @@ class HubService:
             return await self._owner_task(args)
         if action == protocol.ACTION_OWNER_POST:
             return await self._owner_post(args)
+        if action == protocol.ACTION_OWNER_EPIC_POST:
+            return await self._owner_epic_post(args)
         if action == protocol.ACTION_OWNER_JOBS:
             return await self._owner_jobs(args)
         name = str(args.get("name", ""))
