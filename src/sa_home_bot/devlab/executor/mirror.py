@@ -99,6 +99,10 @@ class ProjectMirror:
         except GitError:
             return None
 
+    async def tracked_files(self, sha: str) -> list[str]:
+        out = await self._git("ls-tree", "-r", "--name-only", "-z", sha)
+        return [name for name in out.decode(errors="replace").split("\0") if name]
+
     async def export(self, sha: str, dest: Path) -> None:
         dest.mkdir(parents=True, exist_ok=True)
         archive = dest.parent / f"{dest.name}{ARCHIVE_NAME}"

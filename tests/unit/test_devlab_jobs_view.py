@@ -18,6 +18,8 @@ from sa_home_bot.bot.devlab_jobs_view import (
     CODE_CARD,
     CODE_PAGE,
     CODE_TASK,
+    FINISH_TESTS_ICON,
+    FINISH_TESTS_TEXT,
     PAGE_SIZE,
     QUESTION_CHARS,
     SLOT_WAIT_ICON,
@@ -569,3 +571,43 @@ def test_page_html_header_no_slot_wait_shows_without_pin() -> None:
     assert "🟢1" in html
     assert f"{SLOT_WAIT_ICON}" not in html
     assert "⏳1" in html
+
+
+def test_job_line_finish_phase_overrides_slot_wait() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_SLOT_WAIT] = True
+    job[protocol.FIELD_PHASE] = protocol.PHASE_FINISH_TESTS
+    line = job_line(1, job, 0, NOW)
+    assert FINISH_TESTS_ICON in line
+    assert FINISH_TESTS_TEXT in line
+    assert SLOT_WAIT_ICON not in line
+    assert SLOT_WAIT_TEXT not in line
+
+
+def test_job_line_shows_model_steps() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_MODEL_STEPS] = 12
+    assert "шаг 12" in job_line(1, job, 0, NOW)
+
+
+def test_card_shows_live_counters_and_hides_missing_ones() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.FIELD_MODEL_STEPS] = 12
+    job[protocol.FIELD_SEGMENT_TOKENS] = 400
+    job[protocol.FIELD_REASONING_TOKENS] = 90
+    msg, _ = render_card(job, 0, NOW)
+    html = msg.html
+    assert "Шагов модели: 12" in html
+    assert "Токены: 1000 всего, 400 в этом отрезке" in html
+    assert "Токены размышления: 90" in html
+    plain, _ = render_card(_base_job(2, status=protocol.STATUS_RUNNING), 0, NOW)
+    assert "размышления" not in plain.html
+    assert "Шагов модели" not in plain.html
+
+
+def test_card_marks_unknown_usage() -> None:
+    job = _base_job(1, status=protocol.STATUS_RUNNING)
+    job[protocol.PAYLOAD_TOKENS] = 0
+    job[protocol.FIELD_USAGE_KNOWN] = False
+    msg, _ = render_card(job, 0, NOW)
+    assert "н/д" in msg.html

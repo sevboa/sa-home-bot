@@ -18,7 +18,7 @@ from sa_home_bot.devlab.agent.tools import (
     EXECUTE_DEFINITION_R2_EN,
     TOOL_EXECUTE,
 )
-from sa_home_bot.devlab.usage import usage_cost
+from sa_home_bot.devlab.usage import reasoning_tokens, usage_cost
 from sa_home_bot.llm.strata_switch import SILENCE_CODE, SILENCE_STATUS
 
 MODEL_TIMEOUT_S = 1800.0
@@ -64,6 +64,7 @@ class ModelReply:
     tokens_out: int = 0
     cost_usd: float | None = None
     paid_free: bool = False
+    tokens_reasoning: int | None = None
     reasoning: dict[str, Any] = field(default_factory=dict)
 
     def as_message(self) -> dict[str, Any]:
@@ -242,6 +243,7 @@ def parse_reply(data: Any, step: int = 0) -> ModelReply:
                 tokens_in=int(usage.get("prompt_tokens") or 0),
                 tokens_out=int(usage.get("completion_tokens") or 0),
                 cost_usd=usage_cost(usage),
+                tokens_reasoning=reasoning_tokens(usage),
                 reasoning={key: message[key] for key in REASONING_FIELDS if message.get(key)},
             )
         except ModelError as exc:

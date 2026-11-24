@@ -535,3 +535,14 @@ async def test_podman_session_call_pulls_first_and_does_not_deadlock_on_exec(wor
     assert seen == [("step_done", b"print(5)\n")]
     assert run.output == "None"
     assert fake.commands().index("sync-out") < fake.commands().index("exec")
+
+
+def test_tracked_but_closed_lists_only_matching_tracked_files():
+    from sa_home_bot.devlab.agent.paths import tracked_but_closed
+
+    tracked = ["tests/fixtures/seeded.sqlite", "src/a.py", ".env"]
+    assert tracked_but_closed(tracked, ["*.sqlite", ".env"]) == [
+        "tests/fixtures/seeded.sqlite",
+        ".env",
+    ]
+    assert tracked_but_closed(tracked, []) == []

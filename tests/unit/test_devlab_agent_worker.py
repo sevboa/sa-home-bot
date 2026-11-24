@@ -233,7 +233,7 @@ async def test_restart_continues_from_wip(env):
     assert await make_worker(env, model).claim_once()
 
     assert await env.status(job_id) == protocol.STATUS_DONE
-    assert await env.inbox_kinds() == STARTED_DONE
+    assert await env.inbox_kinds() == [protocol.MSG_STARTED, *STARTED_DONE]
     assert "out.txt" in model.seen[0][1]["content"]
     assert await hub_branch(env, wip_of(job_id)) is None
     assert await hub_branch(env, agent_of(job_id))

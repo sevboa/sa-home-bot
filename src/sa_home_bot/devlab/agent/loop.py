@@ -27,6 +27,7 @@ from sa_home_bot.devlab.agent.model import (
     PaidFreeModelError,
     ToolCall,
 )
+from sa_home_bot.devlab.agent.sandbox import FAILED_LINE
 from sa_home_bot.devlab.agent.script import SCRIPT_FAILED_HEAD
 from sa_home_bot.devlab.agent.tools import (
     READ_ONLY_TOOLS,
@@ -71,6 +72,15 @@ CODE_STEP_REJECTED = (
     "step_done() необязателен: finish() закроет все шаги сам; "
     "полный вывод стража ниже:\n"
 )
+FINISH_LOOP_LIMIT = 3
+FINISH_LOOP_QUESTION = (
+    "Финиш отклонён {count} раза подряд по одной и той же причине, правки не помогают:\n{reason}\n"
+    "Принять работу как есть, продолжить или остановить?"
+)
+FINISH_LOOP_REASON_CHARS = 600
+FINISH_ACCEPTED = "принято"
+FINISH_ACCEPTED_BASE_RED = "принято; красные на базе, не блокируют: {tests}"
+BASE_RED_SUMMARY = "\n\nКрасные на базе (не блокировали финиш): {tests}"
 STEP_ACCEPTED = "шаг принят"
 CODE_COUNTER = "[вызов {number} · контекст {thousands} тыс. токенов]"
 SCRIPT_REJECTED = re.compile(
@@ -193,6 +203,12 @@ class Segment:
     context_tokens: int = 0
 
 
+def _finish_signature(failures: list[str]) -> str:
+    text = "\n".join(failures)
+    failed = [line[:120] for line in text.splitlines() if FAILED_LINE.match(line)]
+    return "\n".join(failed) if failed else SPACES.sub(" ", NUMBERS.sub("", text))[:300]
+
+
 def _rejected(name: str, text: str) -> bool:
     if name == TOOL_EXECUTE:
         return SCRIPT_REJECTED.search(text) is not None
@@ -265,6 +281,8 @@ class AgentLoop:
         self._script_calls = 0
         self._task_steps: list[int] = []
         self._closed_steps: set[int] = set()
+        self._finish_signature = ""
+        self._finish_repeats = 0
 
     def _emit(self, **entry: Any) -> None:
         if self._trace is not None:
@@ -502,7 +520,7 @@ class AgentLoop:
         if not isinstance(args, dict):
             return "ошибка: аргументы должны быть JSON-объектом", None
         if call.name == TOOL_FINISH:
-            return await self._finish(args)
+            return await self._finish(args, seg)
         if call.name == TOOL_STEP_DONE:
             return await self._step_done(args, seg), None
         if call.name == TOOL_ASK_OWNER:
@@ -580,7 +598,7 @@ class AgentLoop:
     ) -> tuple[str, str | None]:
         summary = None
         if control.tool == TOOL_FINISH:
-            result, summary = await self._finish(control.args)
+            result, summary = await self._finish(control.args, seg)
         else:
             result = self._ask(control.args, seg)
         parts = [text, f"{control.label}: {result}" if result else ""]
@@ -612,16 +630,38 @@ class AgentLoop:
             await self._on_step(title.strip())
         return ""
 
-    async def _finish(self, args: dict[str, Any]) -> tuple[str, str | None]:
+    def _finish_looped(self, failures: list[str], seg: Segment) -> str | None:
+        signature = _finish_signature(failures)
+        same = signature == self._finish_signature
+        self._finish_repeats = self._finish_repeats + 1 if same else 1
+        self._finish_signature = signature
+        if self._finish_repeats < FINISH_LOOP_LIMIT:
+            return None
+        count = self._finish_repeats
+        self._finish_repeats = 0
+        reason = "\n".join(failures)[-FINISH_LOOP_REASON_CHARS:]
+        question = FINISH_LOOP_QUESTION.format(count=count, reason=reason)
+        seg.asked = (question, None)
+        return ASK_SKIPPED
+
+    async def _finish(self, args: dict[str, Any], seg: Segment) -> tuple[str, str | None]:
         summary = args.get("summary")
         if not isinstance(summary, str) or not summary.strip():
             return "ошибка: finish требует непустой summary", None
         failures = self._guard.verify_summary(summary) or await self._guard.verify()
         if failures:
+            looped = self._finish_looped(failures, seg)
+            if looped is not None:
+                return looped, None
             rejected = CODE_FINISH_REJECTED if self._tools.code_mode else FINISH_REJECTED
             return rejected + "\n".join(failures), None
+        self._finish_signature, self._finish_repeats = "", 0
         await self._close_open_steps(summary.strip())
-        return "принято", summary.strip()
+        excused = ", ".join(self._guard.excused)
+        if not excused:
+            return FINISH_ACCEPTED, summary.strip()
+        note = BASE_RED_SUMMARY.format(tests=excused)
+        return FINISH_ACCEPTED_BASE_RED.format(tests=excused), summary.strip() + note
 
     async def _close_open_steps(self, summary: str) -> None:
         if not self._tools.code_mode or self._on_step is None:

@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestServer
 
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.agent.loop import AgentLimits
-from sa_home_bot.devlab.agent.model import GatewayChat, ModelError, ModelReply
+from sa_home_bot.devlab.agent.model import GatewayChat, ModelError, ModelReply, parse_reply
 from sa_home_bot.devlab.agent.prompt import with_flow_reminder
 from sa_home_bot.devlab.agent.spend import JobSpend, SpendState
 from sa_home_bot.devlab.executor.agent_worker import AGENT_STATE_FILE, AgentState
@@ -517,3 +517,30 @@ async def test_connection_error_of_local_model_in_silence_is_silence_not_round()
         await session.close()
 
     assert sleeps == [7.0]
+
+
+def test_parse_reply_reads_reasoning_tokens():
+    body = reply_body("ок", usage={"completion_tokens_details": {"reasoning_tokens": 42}})
+    assert parse_reply(body).tokens_reasoning == 42
+    assert parse_reply(reply_body("ок", usage={"completion_tokens": 5})).tokens_reasoning is None
+
+
+def test_job_spend_live_counts_total_segment_and_reasoning():
+    spend = JobSpend(SpendState(base_tokens=100), lambda state: None)
+    assert spend.live()[protocol.FIELD_USAGE_KNOWN] is True
+    spend.record(ModelReply("", tokens_in=10, tokens_out=5, tokens_reasoning=3))
+    spend.take_report()
+    spend.record(ModelReply("", tokens_in=20, tokens_out=5))
+    live = spend.live()
+    assert live[protocol.FIELD_MODEL_STEPS] == 2
+    assert live[protocol.PAYLOAD_TOKENS] == 140
+    assert live[protocol.FIELD_SEGMENT_TOKENS] == 40
+    assert live[protocol.FIELD_REASONING_TOKENS] == 3
+
+
+def test_job_spend_live_without_usage_is_unknown_and_has_no_reasoning():
+    spend = JobSpend(SpendState(), lambda state: None)
+    spend.record(ModelReply(""))
+    live = spend.live()
+    assert live[protocol.FIELD_USAGE_KNOWN] is False
+    assert protocol.FIELD_REASONING_TOKENS not in live

@@ -66,10 +66,16 @@ class WorkerSettings:
     specs_dir: Path | None = None
 
 
-def heartbeat_body(jobs: Sequence[str], progress: Mapping[str, int] | None = None) -> dict:
+def heartbeat_body(
+    jobs: Sequence[str],
+    progress: Mapping[str, int] | None = None,
+    live: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict:
     body: dict = {protocol.FIELD_BUSY: bool(jobs), protocol.FIELD_JOBS: list(jobs)}
     if progress:
         body[protocol.FIELD_PROGRESS] = dict(progress)
+    if live:
+        body[protocol.FIELD_LIVE] = {job_id: dict(entry) for job_id, entry in live.items()}
     return body
 
 
@@ -78,8 +84,9 @@ async def send_heartbeat(
     busy: BusyTracker,
     jobs: Sequence[str],
     progress: Mapping[str, int] | None = None,
+    live: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    reply = await hub.heartbeat(heartbeat_body(jobs, progress))
+    reply = await hub.heartbeat(heartbeat_body(jobs, progress, live))
     busy.set_queued(int(reply.get(protocol.FIELD_QUEUED, 0)))
     return reply
 
@@ -118,8 +125,12 @@ class WorkerLoops:
     def progress(self) -> dict[str, int]:
         return {}
 
+    @property
+    def live(self) -> dict[str, dict[str, Any]]:
+        return {}
+
     async def beat(self) -> None:
-        await send_heartbeat(self._hub, self._busy, self.jobs, self.progress)
+        await send_heartbeat(self._hub, self._busy, self.jobs, self.progress, self.live)
 
     async def poll_once(self) -> None:
         raise NotImplementedError

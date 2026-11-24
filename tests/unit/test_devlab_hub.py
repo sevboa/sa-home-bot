@@ -385,3 +385,38 @@ async def test_owner_views_include_slot_wait(owner):
     queued = await queue.submit(CLIENT_A, "demo", MODEL, "# queued\nbody")
     view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": queued.id})
     assert view[protocol.FIELD_SLOT_WAIT] is False
+
+
+async def test_owner_views_show_live_spend_and_finish_phase(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(job.id, protocol.MSG_STARTED)
+    live = {
+        protocol.FIELD_MODEL_STEPS: 7,
+        protocol.PAYLOAD_TOKENS: 5000,
+        protocol.FIELD_SEGMENT_TOKENS: 1200,
+        protocol.FIELD_REASONING_TOKENS: 300,
+        protocol.FIELD_PHASE: protocol.PHASE_FINISH_TESTS,
+        "junk": "x",
+    }
+    await queue.note_live({job.id: live, "нет-такого": live})
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert view[protocol.FIELD_MODEL_STEPS] == 7
+    assert view[protocol.PAYLOAD_TOKENS] == 5000
+    assert view[protocol.FIELD_SEGMENT_TOKENS] == 1200
+    assert view[protocol.FIELD_REASONING_TOKENS] == 300
+    assert view[protocol.FIELD_PHASE] == protocol.PHASE_FINISH_TESTS
+    assert "junk" not in view
+    await queue.post_from_executor(job.id, protocol.MSG_DONE, {protocol.PAYLOAD_TOKENS: 6000})
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert view[protocol.PAYLOAD_TOKENS] == 6000
+    assert protocol.FIELD_PHASE not in view
+
+
+async def test_owner_views_mark_unknown_usage_only_while_tokens_zero(owner):
+    service, queue, jobs = owner
+    job = jobs[CLIENT_A]
+    await queue.post_from_executor(job.id, protocol.MSG_STARTED)
+    await queue.note_live({job.id: {protocol.PAYLOAD_TOKENS: 0, protocol.FIELD_USAGE_KNOWN: False}})
+    view = await service.run_command(protocol.ACTION_OWNER_JOB, {"id": job.id})
+    assert view[protocol.FIELD_USAGE_KNOWN] is False

@@ -208,6 +208,7 @@ async def test_question_answer_continues_same_dialog(env):
         protocol.MSG_STARTED,
         protocol.MSG_STEP_DONE,
         protocol.MSG_QUESTION,
+        protocol.MSG_STARTED,
         protocol.MSG_DONE,
     ]
     assert await hub_branch(env, agent_of(job_id))
@@ -237,6 +238,7 @@ async def test_restart_between_question_and_answer(env):
     assert await env.inbox_kinds() == [
         protocol.MSG_STARTED,
         protocol.MSG_QUESTION,
+        protocol.MSG_STARTED,
         protocol.MSG_DONE,
     ]
 

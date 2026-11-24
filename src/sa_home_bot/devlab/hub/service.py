@@ -160,6 +160,7 @@ class HubService:
             if job.status == protocol.STATUS_RUNNING and job.kind == protocol.JOB_KIND_AGENT
         ]
         waiting = await queue.slot_waiting(running_agent_ids) if running_agent_ids else set()
+        lives = await queue.live_views(job_ids)
         dep_ids_all: list[str] = []
         for job in jobs:
             dep_ids_all.extend(job.params.get(protocol.PARAM_DEPENDS_ON, []))
@@ -176,6 +177,20 @@ class HubService:
                 for dep_id in dep_ids
             ]
             view[protocol.FIELD_SLOT_WAIT] = job.id in waiting
+            live = lives.get(job.id, {})
+            running = job.status == protocol.STATUS_RUNNING
+            view[protocol.PAYLOAD_TOKENS] = max(job.tokens, live.get(protocol.PAYLOAD_TOKENS, 0))
+            for key in (
+                protocol.FIELD_MODEL_STEPS,
+                protocol.FIELD_SEGMENT_TOKENS,
+                protocol.FIELD_REASONING_TOKENS,
+            ):
+                if key in live:
+                    view[key] = live[key]
+            if running and live.get(protocol.FIELD_PHASE):
+                view[protocol.FIELD_PHASE] = live[protocol.FIELD_PHASE]
+            if not live.get(protocol.FIELD_USAGE_KNOWN, True) and not view[protocol.PAYLOAD_TOKENS]:
+                view[protocol.FIELD_USAGE_KNOWN] = False
             views.append(view)
         return views
 
