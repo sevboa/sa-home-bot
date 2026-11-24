@@ -38,6 +38,7 @@ from sa_home_bot.domain.vpn_link import (
     resource_bad_targets,
     scope_levels,
     scope_of,
+    servers_unusable_from_russia,
 )
 from sa_home_bot.domain.vpn_series import (
     failure_at_bytes,
@@ -62,6 +63,7 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_SERIES_RECOVERED,
     PROBE_TRANSPORT_REALITY_ALT,
     PROBE_TRANSPORT_REALITY_XHTTP,
+    REALITY_PROBE_TRANSPORTS,
     TELEGRAM_EGRESS_TARGET,
     TELEGRAM_EGRESS_TRANSPORT,
     TRANSPORT_REALITY,
@@ -431,6 +433,31 @@ class ChecksMixin:
             [(row["node"], row["server"], row["announced"]) for row in rows],
             self._cfg.russia_observers,
             self._cfg.ignored_observers,
+        )
+
+    async def _servers_unusable_from_russia(self) -> set[str]:
+        now = utc_now()
+        cur = await self._db.conn.execute(
+            "SELECT node, server, announced FROM vpn_layer_states "
+            "WHERE layer = ? AND updated_at >= ?",
+            (LAYER_NET, self._stale_before(now)),
+        )
+        net = [(row["node"], row["server"], row["announced"]) for row in await cur.fetchall()]
+        net_down = {(node, server) for node, server, level in net if level == LEVEL_DOWN}
+        fresh, fresh_params = self._fresh_clause("updated_at", now)
+        marks = ", ".join("?" for _ in REALITY_PROBE_TRANSPORTS)
+        cur = await self._db.conn.execute(
+            f"SELECT node, server, announced FROM vpn_link_states "
+            f"WHERE transport IN ({marks}) AND {fresh}",
+            [*REALITY_PROBE_TRANSPORTS, *fresh_params],
+        )
+        links = [
+            (row["node"], row["server"], row["announced"])
+            for row in await cur.fetchall()
+            if (row["node"], row["server"]) not in net_down
+        ]
+        return servers_unusable_from_russia(
+            net, links, self._cfg.russia_observers, self._cfg.ignored_observers
         )
 
     async def _node_levels(self) -> dict[str, str]:
