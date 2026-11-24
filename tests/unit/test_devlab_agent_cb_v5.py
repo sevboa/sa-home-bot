@@ -8,7 +8,7 @@ from sa_home_bot.devlab.agent.context import fold_old_results
 from sa_home_bot.devlab.agent.notes import AgentNotes
 from sa_home_bot.devlab.agent.prompt import CODE_MODE_INTRO_CB_V3_EN, build_system, reminder_for
 from sa_home_bot.devlab.agent.prompt_en import CODE_MODE_INTRO_CB_V5_EN
-from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5, RepeatLog
+from sa_home_bot.devlab.agent.readstate import STYLE_CB_V5, UNCHANGED_NOTE, RepeatLog
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.script import worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
@@ -147,13 +147,28 @@ async def test_repeat_mark_for_unchanged_range_and_reset_by_edit(project):
         first = await run(box, "x = read('src/a.py', 1, 50)\nprint(len(x))")
         assert "unchanged" not in first
         again = await run(box, "print(read('src/a.py', 10, 20))")
-        assert again.startswith("[unchanged since call 1 — the content is above")
+        assert "[note] src/a.py unchanged since call 1" in again
+        assert "line 10" in again
         partial = await run(box, "print(len(read('src/a.py', 40, 60)))")
         assert "unchanged" not in partial
-        assert "since call 3" in await run(box, "print(read('src/a.py', 1, 60))")
+        assert "unchanged since call 3" in await run(box, "print(read('src/a.py', 1, 60))")
         await run(box, "edit('src/a.py', 'line 5\\n', 'line five\\n')")
         assert "line five" in await run(box, "print(read('src/a.py', 4, 6))")
         assert "unchanged" in await run(box, "print(read_numbered('src/a.py', 4, 6))")
+    finally:
+        await box._sandbox.session_close()
+
+
+async def test_repeat_read_returns_full_text_with_note_in_output(project):
+    box = box_for(project)
+    try:
+        await run(box, "x = read('src/a.py')\nprint(len(x))")
+        out = await run(box, "t = read('src/a.py')\nprint(t.index('line 50'))")
+        assert "[note]" in out and "unchanged since call 1" in out
+        assert out.endswith("383")
+        await run(box, "edit('src/a.py', 'line 5\\n', 'line five\\n')")
+        changed = await run(box, "print(read('src/a.py', 4, 6))")
+        assert "line five" in changed and "unchanged" not in changed
     finally:
         await box._sandbox.session_close()
 
@@ -215,16 +230,16 @@ def test_forget_call_and_consecutive_unit():
     assert log.check("f", "d", 1, 10, 1) == ""
     log.forget_call(1)
     assert log.check("f", "d", 1, 10, 2) == ""
-    assert "call 2" in log.check("f", "d", 1, 10, 3)
+    assert log.check("f", "d", 1, 10, 3) == UNCHANGED_NOTE.format(path="f", call=2)
     assert log.check("f", "d", 1, 10, 4) == ""
-    assert "unchanged" in log.check("f", "d", 1, 10, 5)
+    assert log.check("f", "d", 1, 10, 5) == UNCHANGED_NOTE.format(path="f", call=2)
 
 
 def test_repeat_log_unit():
     log = RepeatLog()
     assert log.check("f", "d1", 1, 10, 1) == ""
     assert log.check("f", "d1", 11, 20, 2) == ""
-    assert "call 2" in log.check("f", "d1", 5, 15, 3)
+    assert log.check("f", "d1", 5, 15, 3) == UNCHANGED_NOTE.format(path="f", call=2)
     assert log.check("f", "d1", 5, 25, 3) == ""
     assert log.check("f", "d2", 5, 15, 4) == ""
     log.reset()

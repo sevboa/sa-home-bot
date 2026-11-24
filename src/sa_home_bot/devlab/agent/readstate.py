@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 STYLE_CB_V5 = "cb_v5"
-UNCHANGED = (
-    "[unchanged since call {call} — the content is above in this conversation or in your "
-    "script variables]"
+UNCHANGED_NOTE = (
+    "[note] {path} unchanged since call {call} - the content is above in this "
+    "conversation or in your script variables"
 )
 
 
@@ -31,7 +31,7 @@ class RepeatLog:
         covering = _covering_call(spans, start, end)
         if covering is not None and self._marked.get(path) != call - 1:
             self._marked[path] = call
-            return UNCHANGED.format(call=covering)
+            return UNCHANGED_NOTE.format(path=path, call=covering)
         self._marked.pop(path, None)
         spans.append((start, end, call))
         return ""
