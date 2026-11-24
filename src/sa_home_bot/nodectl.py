@@ -130,7 +130,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "тайм-аут — код 124; "
         "reviews: сводка журнала приёмки по моделям",
     )
-    p.add_argument("devlab_names", nargs="*", help="base/fetch/drop: имена веток или id")
+    p.add_argument(
+        "devlab_names",
+        nargs="*",
+        help="base/fetch/drop: имена веток; wait/watch: id задания",
+    )
     p.add_argument("--ref", default="HEAD", help="base: что пушить (по умолчанию HEAD)")
     p.add_argument(
         "--project",
@@ -565,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 timeout=args.timeout,
                 kinds=kinds,
+                jobs=args.devlab_names or None,
             )
         if args.devlab_command == "reviews":
             return devlab_snapshot.reviews_command(

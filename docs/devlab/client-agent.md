@@ -23,7 +23,7 @@
 4. `nodectl devlab base <имя>` (push `base/<имя>`), затем `devlab_submit`.
 5. При каждом возвращении к работе: `devlab_inbox` и `devlab_ack`, ответы через `devlab_answer`,
    `devlab_resume` (замечания, другая модель), `devlab_stop`, `devlab_release`. Ожидание вне MCP:
-   инструмент Monitor на `nodectl devlab watch --timeout 1790 --kinds …` — каждое сообщение ящика
+   инструмент Monitor на `nodectl devlab watch <id> --timeout 1790 --kinds …` — каждое сообщение ящика
    приходит событием, перезапуск по истечении. Запасной путь без Monitor: `nodectl devlab wait <id>`
    фоновым вызовом Bash (останавливается и на `waiting_owner`), затем `devlab_status`; последняя
    строка stdout `wait` — JSON `{"id","status","result"?}`. (2026-11-01: `sleep 60` в Bash
