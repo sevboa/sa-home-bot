@@ -482,11 +482,19 @@ async def test_hub_reports_structured_status_and_recover_drops_branch(env):
     assert not await repos.branch_exists(env.store.git_root, PROJECT, ref)
 
 
-def test_refused_as_final_prefers_field_and_falls_back_to_text():
-    assert refused_as_final(HubRequestError("x", 400, "done"))
-    assert not refused_as_final(HubRequestError("переход done → failed", 400, "queued"))
-    assert refused_as_final(HubRequestError("переход stopped → failed недопустим", 400))
-    assert not refused_as_final(HubRequestError("отказ", 400))
+@pytest.mark.parametrize(
+    "exc,final",
+    [
+        (HubRequestError("x", 400, "done"), True),
+        (HubRequestError("переход done → failed", 400, "queued"), False),
+        (HubRequestError("переход stopped → failed недопустим", 400), True),
+        (HubRequestError("задание x: step_done в статусе stopped невозможен", 400), True),
+        (HubRequestError("задание x: step_done в статусе running невозможен", 400), False),
+        (HubRequestError("отказ", 400), False),
+    ],
+)
+def test_refused_as_final_prefers_field_and_falls_back_to_text(exc, final):
+    assert refused_as_final(exc) == final
 
 
 def test_external_spec_found_or_missing(tmp_path):

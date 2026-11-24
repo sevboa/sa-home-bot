@@ -219,6 +219,49 @@ async def test_stop_closes_job_and_keeps_partial_branch(env):
     assert not worker.pending_messages
 
 
+async def test_hub_stopped_job_is_dropped_on_refused_message(env, monkeypatch):
+    job_id = await submit(env)
+    model = BlockingModel(WRITE_DONE)
+    worker = make_worker(env, model)
+    running = await start_blocked(worker, model)
+    real_post = worker._hub.post
+
+    async def refusing_post(job_id, kind, payload):
+        if kind != protocol.MSG_STOPPED:
+            raise HubRequestError(f"задание {job_id}: {kind} в статусе stopped невозможен", 400)
+        return await real_post(job_id, kind, payload)
+
+    monkeypatch.setattr(worker._hub, "post", refusing_post)
+    await env.mcp.call(protocol.TOOL_STOP, id=job_id)
+    await worker.send(job_id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: "шаг"})
+    assert await running
+
+    assert await env.status(job_id) == protocol.STATUS_STOPPED
+    assert worker._settings.slots.busy_bases == []
+    assert not worker.pending_messages
+
+
+async def test_restart_drops_job_closed_on_hub_at_first_refusal(env):
+    job_id = await submit(env)
+    first_model = BlockingModel(WRITE_DONE)
+    running = await start_blocked(make_worker(env, first_model), first_model)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await env.mcp.call(protocol.TOOL_STOP, id=job_id)
+    assert await env.status(job_id) == protocol.STATUS_STOPPED
+
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    worker = make_worker(env, model)
+    async with asyncio.timeout(10):
+        assert await worker.claim_once()
+
+    assert model.seen == []
+    assert await env.status(job_id) == protocol.STATUS_STOPPED
+    assert worker._settings.slots.busy_bases == []
+    assert not worker.pending_messages
+
+
 async def test_restart_continues_from_wip(env):
     job_id = await submit(env)
     first_model = BlockingModel(WRITE_DONE)
