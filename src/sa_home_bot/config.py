@@ -792,6 +792,7 @@ class VpnConfig(BaseModel):
     sub_secret: str = ""
     sub_update_interval_h: int = Field(default=12, ge=1)
     sub_support_url: str = ""
+    sub_hide_blocked_from_russia: bool = True
 
 
 class VpnCheckConfig(BaseModel):

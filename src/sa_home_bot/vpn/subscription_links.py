@@ -10,6 +10,7 @@ from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.domain.vpn_check import (
     OK as CHECK_OK,
 )
+from sa_home_bot.domain.vpn_link import LEVEL_DOWN, SCOPE_RUSSIA
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     Address,
@@ -246,6 +247,27 @@ class SubscriptionLinksMixin:
         except (ProtoError, TimeoutError, OSError):
             return {"found": False}
 
+    async def _sub_hide_blocked(
+        self,
+        entries: list[subs.SubEntry],
+        awg_entries: list[subs.AwgSubEntry],
+        nodes: list[subs.NodeInfo],
+    ) -> tuple[list[subs.SubEntry], list[subs.AwgSubEntry], list[subs.NodeInfo]]:
+        if not self._cfg.sub_hide_blocked_from_russia:
+            return entries, awg_entries, nodes
+        levels = (await self._net_scope_levels()).get(SCOPE_RUSSIA, {})
+        blocked = {server for server, level in levels.items() if level == LEVEL_DOWN}
+        if not blocked:
+            return entries, awg_entries, nodes
+        kept = [e for e in entries if e.node not in blocked]
+        if not kept:
+            return entries, awg_entries, nodes
+        return (
+            kept,
+            [e for e in awg_entries if e.node not in blocked],
+            [n for n in nodes if n.node not in blocked],
+        )
+
     async def resolve_subscription(self, token: str) -> subs.Subscription | None:
         if not subs.valid_token_shape(token):
             return None
@@ -321,6 +343,7 @@ class SubscriptionLinksMixin:
             newest_gen = max(newest_gen, int(reply.get("gen") or 0))
             used += int(reply.get("used_bytes") or 0)
             total += int(reply.get("limit_bytes") or 0)
+        entries, awg_entries, nodes = await self._sub_hide_blocked(entries, awg_entries, nodes)
         result: subs.Subscription | None = None
         if entries and (subs.token_gen(token) or 0) >= newest_gen:
             if not label:
