@@ -13,12 +13,13 @@ from sa_home_bot.devlab.agent.tools import (
     DIFF_EMPTY,
     SCRIPT_ONLY_TEXT,
     SCRIPT_STATE_RESET,
-    TOOL_ASK_OWNER,
+    SCRIPT_TOOL_NOTE,
+    TOOL_EDIT_FILE,
     TOOL_EXECUTE,
-    TOOL_FINISH,
-    TOOL_READ_FILE,
+    TOOL_LIST_FILES,
+    TOOL_RUN_COMMAND,
     TOOL_SEARCH,
-    TOOL_STEP_DONE,
+    TOOL_WRITE_FILE,
     ToolBox,
     ToolError,
 )
@@ -67,7 +68,12 @@ async def test_without_code_mode_new_tools_are_absent(project):
 async def test_code_mode_offers_only_search_and_execute(project):
     box = toolbox(project)
     assert [d["function"]["name"] for d in box.definitions] == [TOOL_SEARCH, TOOL_EXECUTE]
-    for name in (TOOL_READ_FILE, TOOL_STEP_DONE, TOOL_FINISH, TOOL_ASK_OWNER):
+    for name in (
+        TOOL_LIST_FILES,
+        TOOL_EDIT_FILE,
+        TOOL_WRITE_FILE,
+        TOOL_RUN_COMMAND,
+    ):
         with pytest.raises(ToolError, match=SCRIPT_ONLY_TEXT):
             await box.call(name, {})
 
@@ -459,3 +465,51 @@ async def test_assigning_api_name_is_restored_with_note(project):
     assert "assigning read shadowed the API function read; it is restored" in first.text
     second = await box.call(TOOL_EXECUTE, {"code": "print(read('src/a.py'), count)"})
     assert second.text.endswith(" 3")
+
+
+async def test_api_function_called_as_tool_runs_through_execute(project):
+    box = toolbox(project)
+    note = SCRIPT_TOOL_NOTE.format(name="read")
+    outcome = await box.call("read", {"path": "src/a.py"})
+    assert outcome.text == f"{note}\nvalue = 1"
+    await box._sandbox.session_close()
+
+
+async def test_edit_called_as_tool_mutates(project):
+    box = toolbox(project)
+    note = SCRIPT_TOOL_NOTE.format(name="edit")
+    outcome = await box.call(
+        "edit", {"path": "src/a.py", "old": "value = 1", "new": "value = 2"}
+    )
+    assert outcome.mutating
+    assert outcome.text == f"{note}\nNone"
+    assert (project / "src" / "a.py").read_text() == "value = 2\n"
+    await box._sandbox.session_close()
+
+
+async def test_run_tests_called_as_tool_keeps_green(project):
+    box = toolbox(project, test_argv=PYTEST_ARGV)
+    outcome = await box.call("run_tests", {"paths": "test_ok.py"})
+    assert outcome.green is True
+    await box._sandbox.session_close()
+
+
+async def test_failing_api_function_as_tool_reports_the_error(project):
+    box = toolbox(project)
+    note = SCRIPT_TOOL_NOTE.format(name="read")
+    outcome = await box.call("read", {"path": "src/нет"})
+    assert outcome.text.startswith(note)
+    assert SCRIPT_FAILED_HEAD in outcome.text
+    assert "не найден" in outcome.text
+    await box._sandbox.session_close()
+
+
+async def test_unknown_tool_name_in_code_mode_still_fails(project):
+    with pytest.raises(ToolError, match="неизвестный инструмент"):
+        await toolbox(project).call("нет-такого", {})
+
+
+async def test_api_name_outside_code_mode_is_still_unknown(project):
+    box = ToolBox(LocalSandbox(project), AgentSpec())
+    with pytest.raises(ToolError, match="неизвестный инструмент"):
+        await box.call("read", {"path": "src/a.py"})

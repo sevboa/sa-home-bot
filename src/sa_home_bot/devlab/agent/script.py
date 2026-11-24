@@ -995,6 +995,15 @@ def api_stubs(query: str = "", api: tuple[tuple[str, str, str], ...] = SCRIPT_AP
     )
 
 
+def api_functions(claude_read: bool = False, compact: bool = False) -> frozenset[str]:
+    names = {name for name, stub, _ in SCRIPT_API if stub.startswith("def ")}
+    if claude_read:
+        return frozenset(names | {"glob", "todo"})
+    if compact:
+        return frozenset(names | {"check"})
+    return frozenset(names)
+
+
 def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
     full = {
         **config,
