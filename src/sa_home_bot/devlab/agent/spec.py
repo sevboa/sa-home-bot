@@ -27,6 +27,7 @@ class AgentSpec:
     diff_prefixes: tuple[str, ...] = ()
     write_prefixes: tuple[str, ...] = ()
     allow_no_changes: bool = False
+    expect_red: bool = False
     require_verdict: bool = False
     code_mode: bool = False
     prompt_lang: str = "ru"

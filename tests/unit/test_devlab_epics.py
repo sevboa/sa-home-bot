@@ -460,3 +460,24 @@ async def test_job_outside_epic_has_no_skip_or_locked(store):
     job = await store.queue.submit(CLIENT, PROJECT, MODEL, "задача", base_branch=BASE)
     assert S.PARAM_EPIC_SKIP_TESTS not in job.params
     assert S.PARAM_EPIC_LOCKED not in job.params
+
+
+async def test_developer_after_tester_gets_red_tests_of_tester(store):
+    tasks = plan(2)
+    tasks[0]["profile"] = S.PROFILE_TESTER
+    await submit(store, tasks)
+    first = await claim(store)
+    assert first.params[S.PARAM_EPIC_RED_TESTS] == []
+    items = "\n- tests/unit/test_m0.py::test_a\n- tests/unit/test_m0.py::test_b"
+    summary = "готово\n\n" + S.RED_TESTS_MARKER + items
+    job = await store.queue.get_job(first.id)
+    parent = await git(store, "rev-parse", S.HEADS_REF_PREFIX + job.base_branch)
+    sha = await commit(store, parent, "f.txt", "x")
+    await git(store, "update-ref", S.HEADS_REF_PREFIX + S.AGENT_BRANCH_PREFIX + first.id, sha)
+    await store.queue.post_from_executor(
+        first.id, S.MSG_DONE, {S.PAYLOAD_SUMMARY: summary}, executor=EXECUTOR
+    )
+    second = await claim(store)
+    expected = ["tests/unit/test_m0.py::test_a", "tests/unit/test_m0.py::test_b"]
+    assert second.params[S.PARAM_EPIC_RED_TESTS] == expected
+    assert "tests/unit/test_m0.py::test_b" in second.task

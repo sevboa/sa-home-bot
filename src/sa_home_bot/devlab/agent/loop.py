@@ -18,7 +18,7 @@ from sa_home_bot.devlab.agent.context import (
     task_text,
 )
 from sa_home_bot.devlab.agent.dialog import Dialog
-from sa_home_bot.devlab.agent.guard import FinishGuard
+from sa_home_bot.devlab.agent.guard import FinishGuard, red_tests_block
 from sa_home_bot.devlab.agent.markup import task_steps
 from sa_home_bot.devlab.agent.model import (
     ChatModel,
@@ -665,11 +665,13 @@ class AgentLoop:
             return rejected + "\n".join(failures), None
         self._finish_signature, self._finish_repeats = "", 0
         await self._close_open_steps(summary.strip())
+        final = summary.strip() + red_tests_block(self._guard.red_tests)
         excused = ", ".join(self._guard.excused)
         if not excused:
-            return FINISH_ACCEPTED, summary.strip()
-        note = BASE_RED_SUMMARY.format(tests=excused)
-        return FINISH_ACCEPTED_BASE_RED.format(tests=excused), summary.strip() + note
+            return FINISH_ACCEPTED, final
+        return FINISH_ACCEPTED_BASE_RED.format(tests=excused), final + BASE_RED_SUMMARY.format(
+            tests=excused
+        )
 
     async def _close_open_steps(self, summary: str) -> None:
         if not self._tools.code_mode or self._on_step is None:
