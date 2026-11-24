@@ -11,7 +11,7 @@ from typing import Any
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub import queue, repos
+from sa_home_bot.devlab.hub import epics, queue, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
@@ -66,13 +66,14 @@ class HubStore:
         self.git_root = data_dir / GIT_DIR_NAME
         self.logs_root = data_dir / LOGS_DIR_NAME
         self.queue = queue.HubQueue(self._db, self.logs_root, bench_windows)
+        self.epics = epics.HubEpics(self._db, self.queue, self.git_root)
 
     async def open(self) -> None:
         await self._db.open()
         legacy = [t for t in KEYED_TABLES if await self._keyed_by_name_only(t)]
         for table in legacy:
             await self._db.conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
-        await self._db.conn.executescript(SCHEMA + queue.SCHEMA)
+        await self._db.conn.executescript(SCHEMA + queue.SCHEMA + epics.SCHEMA)
         for table in legacy:
             columns = KEYED_TABLES[table]
             await self._db.conn.execute(

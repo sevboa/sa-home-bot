@@ -10,6 +10,7 @@
 - [git.md](git.md) — bare-репозитории, `http-backend`, права веток, хук `pre-receive`.
 - [api.md](api.md) — HTTP API исполнителя и шлюзов, каталог моделей, MCP клиента.
 - [models.md](models.md) — шлюз моделей `devlab_models`: проксирование, лимиты, учёт, introspect.
+- [epic.md](epic.md) — эпик: задачи по очереди в ветке `epic/<id>`, проверка плана (Б1–Б2, 2026-11-24).
 - [wake.md](wake.md) — пробуждение ноды исполнителя.
 - [deploy.md](deploy.md) — выкат шлюзов (jeeves, wooster) и исполнителя (mycraft), чек-лист владельца.
 - [client-test.md](client-test.md) — клиент тестов: `nodectl devlab snapshot`, скил `devlab-test`, предел `wait` (61.3).

@@ -610,9 +610,9 @@ _API_V5_READ = (
         "def read(path: str, offset: int | None = None, limit: int | None = None) -> str: ...",
         "file text; offset is the first line (1-based), limit is how many lines; without them "
         "the whole file; exact text, suitable for old in edit(); a repeated read of an "
-        "unchanged range that is already above in this conversation returns a short "
-        "[unchanged since call N] mark instead of the text; missing file or offset beyond the "
-        "end - EditError",
+        "unchanged range that is already above in this conversation prints a note "
+        "\"[note] ... unchanged since call N\" in the call output; missing file or offset "
+        "beyond the end - EditError",
     ),
     (
         "read_numbered",
@@ -680,8 +680,9 @@ CODE_MODE_INTRO_CB_V5_EN = (
     "and imports persist between calls. What you see is what the script printed. search(query) "
     "lists the functions matching a word. Several steps fit in one call when you do not need to "
     "see an intermediate result.\n"
-    "A read of a file range that has not changed and is already in this conversation returns a "
-    "short [unchanged since call N] mark: use the text above or your variables.\n"
+    "A repeated read of an unchanged range that is already above in this conversation prints a "
+    "note \"[note] ... unchanged since call N\" in the call output: use the text above or your "
+    "variables.\n"
     "Keep your own work list with todo([...]) and save facts worth keeping with note(\"...\"); "
     "both survive history folding and restarts and are shown at the start of the task.\n"
     "\n"

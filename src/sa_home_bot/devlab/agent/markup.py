@@ -33,6 +33,7 @@ PATH_SUFFIXES = frozenset(
 BACKTICKED = re.compile(r"`([^`\s]+)`")
 PATH_SHAPE = re.compile(r"^[\w./\-]+$")
 LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
+ALLOWED_PATHS_MARK = "**Менять можно только**"
 STEPS_HEADING = re.compile(r"^#{1,6}\s*(?:шаги|steps)\b", re.IGNORECASE)
 ANY_HEADING = re.compile(r"^#{1,6}\s")
 STEP_LINE = re.compile(r"^\s*(\d+)[.)]\s+(\S.*)$")
@@ -74,6 +75,17 @@ def render_plan(steps: Iterable[tuple[int, str]], closed: Collection[int]) -> st
         for number, title in steps
     ]
     return _fit(lines, PLAN_LIMIT_CHARS)
+
+
+def task_paths(task: str) -> tuple[str, ...]:
+    paths: dict[str, None] = {}
+    for line in task.splitlines():
+        body = line.lstrip()
+        if not body.startswith(ALLOWED_PATHS_MARK):
+            continue
+        for token in BACKTICKED.finditer(body[len(ALLOWED_PATHS_MARK) :]):
+            paths.setdefault(LINE_SUFFIX.sub("", token.group(1)), None)
+    return tuple(paths)
 
 
 def mentioned_paths(task: str) -> list[str]:

@@ -554,6 +554,7 @@ class AgentWorker(WorkerLoops):
                 lambda active: self._set_phase(
                     job.id, protocol.PHASE_FINISH_TESTS if active else None
                 ),
+                task=job.task,
             ),
             limits,
             on_change=repo.on_change,

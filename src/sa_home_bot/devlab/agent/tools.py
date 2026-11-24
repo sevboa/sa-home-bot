@@ -46,6 +46,7 @@ from sa_home_bot.devlab.agent.script import (
     SCRIPT_CLIPPED_HINT,
     SCRIPT_FAILED_HEAD,
     SCRIPT_OUTPUT_CHARS,
+    api_functions,
     api_stubs,
     parse_reply,
     request_payload,
@@ -96,6 +97,7 @@ SCRIPT_BUDGET_MARGIN_S = 20.0
 DIFF_EMPTY = "изменений относительно базы нет"
 STEP_GATE_MISSING = "закрыть шаг из скрипта сейчас нельзя"
 CALL_UNKNOWN = "неизвестный вызов хоста {name!r}"
+SCRIPT_TOOL_NOTE = "[note] {name} выполнен через execute; вызывай функции внутри execute"
 COMMENTS_RULE_MARKER = "tests/unit/test_no_comments_in_code.py"
 COMMENTS_ROOTS = ("src/", "tests/")
 COMMENTS_FORBIDDEN = "комментарии запрещены: {path}:{line} {text}"
@@ -351,6 +353,9 @@ class ToolBox:
         self._repeats = RepeatLog() if cb_v5 else None
         self._calls = 0
         self._read_lines = read_lines
+        self._script_names = api_functions(
+            claude_read=self._repeats is not None, compact=self._remote_r2
+        )
         self._step_gate: StepGate | None = None
         self._handlers = {
             TOOL_LIST_FILES: self._list_files,
@@ -408,6 +413,8 @@ class ToolBox:
         self, name: str, args: dict[str, Any], step_gate: StepGate | None = None
     ) -> ToolOutcome:
         self._step_gate = step_gate
+        if self._spec.code_mode and name in self._script_names:
+            return await self._as_script(name, args)
         if self._spec.code_mode and name in PLAIN_TOOLS:
             raise ToolError(SCRIPT_ONLY_TEXT)
         handler = self._handlers.get(name)
@@ -538,6 +545,12 @@ class ToolBox:
         result = await self._sandbox.exec(argv, timeout_s)
         text = result.summary(self._spec.output_chars, timeout_s)
         return ToolOutcome(text, green=result.ok)
+
+    async def _as_script(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        code = f"print({name}(**{args!r}))"
+        outcome = await self._execute({"code": code})
+        note = SCRIPT_TOOL_NOTE.format(name=name)
+        return replace(outcome, text=f"{note}\n{outcome.text}")
 
     async def _search(self, args: dict[str, Any]) -> str:
         api = SCRIPT_API_EN if self._spec.prompt_lang == EN else SCRIPT_API

@@ -67,12 +67,13 @@ description: Отдать задачу агенту-разработчику н�
    - `fallback=<модель>` — запасная удалённая модель: берётся, если основная занята или недоступна,
      фактическая модель видна в `devlab_status` (`model`, `params.original_model`).
 5. Сразу после постановки подпишись на ящик событиями: инструмент Monitor с командой
-   `nodectl devlab watch --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed,test_done,fix_exhausted`
+   `nodectl devlab watch <id> --timeout 1790 --kinds step_done,question,done,failed,stopped,stalled,dependency_failed,test_done,fix_exhausted`
    из каталога репозитория и `timeout_ms` 1800000. Каждая строка — JSON
-   `{"seq","job_id","kind","payload"}` — приходит уведомлением сразу, без опроса; в ящике и чужие
-   задания, свои отличай по `job_id`. Монитор истёк или упал (хаб недоступен, например при рестарте
+   `{"seq","job_id","kind","payload"}` — приходит уведомлением сразу, без опроса; с `<id>` в команде
+   печатаются только сообщения своего задания, чужие не видны. Монитор истёк или упал (хаб недоступен, например при рестарте
    ноды хаба), а задания ещё идут — запусти заново и сразу сверь `devlab_status` своих заданий:
-   итоги, пришедшие пока монитора не было, сами не повторятся. Нет
+   итоги, пришедшие пока монитора не было, перепечатаются при запуске заново (ack с фильтром не
+   ставится). Нет
    инструмента Monitor — `nodectl devlab wait <id>` вызовом Bash с `run_in_background` (одно
    уведомление на `done`/`failed`/`stopped`/`waiting_owner`, предел 1800 с, код 124 — запусти снова).
 

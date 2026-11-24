@@ -10,6 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from sa_home_bot import nodectl
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import connect as devlab_connect
 from sa_home_bot.devlab import protocol, snapshot
@@ -763,3 +764,106 @@ def test_watch_prints_unread_backlog_of_wanted_kinds(tmp_path, capsys):
     lines = capsys.readouterr().out.strip().splitlines()
     assert [json.loads(line)["seq"] for line in lines] == [1]
     assert acks == [{"upto": 1}]
+
+
+def test_watch_with_job_names_prints_only_own_messages_and_acks_nothing(tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text("t\n")
+    stream = [
+        {"seq": 1, "job_id": "j1", "kind": protocol.MSG_DONE, "payload": {}, "read": False},
+        {"seq": 2, "job_id": "j2", "kind": protocol.MSG_DONE, "payload": {}, "read": False},
+    ]
+    calls = []
+
+    def call(url, tok, name, arguments):
+        calls.append((name, arguments))
+        if name == protocol.TOOL_ACK:
+            return {protocol.FIELD_OK: True}
+        if arguments["since"] == 0:
+            return {protocol.FIELD_MESSAGES: stream, protocol.FIELD_CURSOR: 2}
+        return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: arguments["since"]}
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    code = snapshot.watch_command(
+        Settings.model_validate({"swarm": {"token": "x"}}),
+        timeout=0.1,
+        token_path=str(token_file),
+        call=call,
+        sleep=lambda seconds: None,
+        clock=clock,
+        jobs=["j2"],
+    )
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line)["job_id"] for line in lines] == ["j2"]
+    names = [name for name, _ in calls]
+    assert names == [protocol.TOOL_INBOX] * 3
+    since = [arguments["since"] for _, arguments in calls]
+    assert since == [0, 2, 2]
+
+
+@pytest.mark.parametrize(
+    ("argv", "job_ids", "acks"),
+    [
+        (["devlab", "watch"], ["j1", "j2"], [{"upto": 2}]),
+        (["devlab", "watch", "j2"], ["j2"], []),
+        (["devlab", "watch", "j2", "--kinds", "done"], ["j2"], []),
+    ],
+)
+def test_nodectl_watch_prints_all_without_names_and_own_with_names(
+    monkeypatch, tmp_path, capsys, argv, job_ids, acks
+):
+    token_file = tmp_path / "token"
+    token_file.write_text("t\n")
+    stream = [
+        {"seq": 1, "job_id": "j1", "kind": protocol.MSG_DONE, "payload": {}, "read": False},
+        {"seq": 2, "job_id": "j2", "kind": protocol.MSG_DONE, "payload": {}, "read": False},
+    ]
+    calls = []
+
+    def call(url, tok, name, arguments):
+        calls.append((name, arguments))
+        if name == protocol.TOOL_ACK:
+            return {protocol.FIELD_OK: True}
+        if arguments["since"] == 0:
+            return {protocol.FIELD_MESSAGES: stream, protocol.FIELD_CURSOR: 2}
+        return {protocol.FIELD_MESSAGES: [], protocol.FIELD_CURSOR: arguments["since"]}
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    captured = {}
+    real = snapshot.watch_command
+
+    def wrapper(settings, **kwargs):
+        captured.update(kwargs)
+        return real(
+            settings,
+            interval=kwargs["interval"],
+            timeout=kwargs["timeout"],
+            kinds=kwargs["kinds"],
+            jobs=kwargs["jobs"],
+            token_path=str(token_file),
+            call=call,
+            sleep=lambda seconds: None,
+            clock=clock,
+        )
+
+    monkeypatch.setattr(snapshot, "watch_command", wrapper)
+    monkeypatch.setattr(
+        nodectl, "_load_settings", lambda args: Settings.model_validate({"swarm": {"token": "x"}})
+    )
+    code = nodectl.main(argv)
+    assert code == 0
+    assert captured["jobs"] == (None if argv == ["devlab", "watch"] else ["j2"])
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert [json.loads(line)["job_id"] for line in lines] == job_ids
+    assert [arguments for name, arguments in calls if name == protocol.TOOL_ACK] == acks

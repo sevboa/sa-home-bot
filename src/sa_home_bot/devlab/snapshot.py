@@ -447,6 +447,7 @@ def watch_command(
     interval: float = WATCH_INTERVAL_S,
     timeout: float = WAIT_TIMEOUT_S,
     kinds: Collection[str] | None = None,
+    jobs: Collection[str] | None = None,
     token_path: str = TOKEN_PATH,
     call: Callable[[str, str, str, dict[str, Any]], dict[str, Any]] = call_tool,
     sleep: Callable[[float], None] = time.sleep,
@@ -483,8 +484,10 @@ def watch_command(
                 break
             for message in messages:
                 if not message.get("read") and watch_wants(message["kind"], kinds):
-                    print(watch_line(message), flush=True)
-                    printed_upto = message["seq"]
+                    if jobs is None or message["job_id"] in jobs:
+                        print(watch_line(message), flush=True)
+                        if jobs is None:
+                            printed_upto = message["seq"]
             continue
         remaining = deadline - clock()
         if remaining <= 0:
@@ -502,9 +505,12 @@ def watch_command(
             fresh = reply.get(protocol.FIELD_CURSOR, cursor)
             if messages:
                 for message in messages:
-                    if watch_wants(message["kind"], kinds):
+                    if (jobs is None or message["job_id"] in jobs) and watch_wants(
+                        message["kind"], kinds
+                    ):
                         print(watch_line(message), flush=True)
-                call(url, token, protocol.TOOL_ACK, {"upto": fresh})
+                if jobs is None:
+                    call(url, token, protocol.TOOL_ACK, {"upto": fresh})
                 cursor = fresh
         except HubUnavailable as exc:
             failures += 1

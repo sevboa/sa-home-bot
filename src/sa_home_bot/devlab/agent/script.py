@@ -500,14 +500,16 @@ def _unchanged(path, text, start, end, total):
         {"path": _relative(path), "digest": digest, "start": start, "end": end, "total": total},
     )
     value = reply.get("value") if reply.get("ok") else None
-    return value if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        print(value)
 
 
 def _read_offset(path, offset=None, limit=None):
     text = _text(path)
     lines = text.splitlines(keepends=True)
     start, end = _window(path, lines, offset, limit)
-    return _unchanged(path, text, start, end, len(lines)) or "".join(lines[start - 1 : end])
+    _unchanged(path, text, start, end, len(lines))
+    return "".join(lines[start - 1 : end])
 
 
 def _read_numbered_offset(path, offset=None, limit=None):
@@ -515,7 +517,8 @@ def _read_numbered_offset(path, offset=None, limit=None):
     lines = text.splitlines()
     start, end = _window(path, lines, offset, limit)
     shown = "\n".join(f"{n}\t{lines[n - 1]}" for n in range(start, end + 1))
-    return _unchanged(path, text, start, end, len(lines)) or shown
+    _unchanged(path, text, start, end, len(lines))
+    return shown
 
 
 if _CONFIG.get("claude_read"):
@@ -990,6 +993,15 @@ def api_stubs(query: str = "", api: tuple[tuple[str, str, str], ...] = SCRIPT_AP
         for name, stub, about in api
         if needle in name.lower() or needle in about.lower()
     )
+
+
+def api_functions(claude_read: bool = False, compact: bool = False) -> frozenset[str]:
+    names = {name for name, stub, _ in SCRIPT_API if stub.startswith("def ")}
+    if claude_read:
+        return frozenset(names | {"glob", "todo"})
+    if compact:
+        return frozenset(names | {"check"})
+    return frozenset(names)
 
 
 def worker_argv(config: dict[str, object], python: str = "python") -> list[str]:
