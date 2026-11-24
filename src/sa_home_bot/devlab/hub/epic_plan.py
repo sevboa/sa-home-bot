@@ -58,6 +58,26 @@ def tester_locked_files(tasks: Sequence[Planned], index: int) -> list[str]:
     return [path for path in dict.fromkeys(earlier) if path not in own]
 
 
+def parse_red_tests(summary: str) -> list[str]:
+    lines = summary.splitlines()
+    if protocol.RED_TESTS_MARKER not in lines:
+        return []
+    tail = lines[lines.index(protocol.RED_TESTS_MARKER) + 1 :]
+    items = []
+    for line in tail:
+        if not line.startswith(protocol.RED_TESTS_ITEM):
+            break
+        items.append(line[len(protocol.RED_TESTS_ITEM) :].strip())
+    return [item for item in items if item]
+
+
+def red_tests_note(tests: Sequence[str]) -> str:
+    if not tests:
+        return ""
+    body = "\n".join(protocol.RED_TESTS_ITEM + test for test in tests)
+    return f"\n\n**Красные тесты тестера, твоя цель их озеленить:**\n{body}\n"
+
+
 def _label(index: int, task: PlanTask) -> str:
     return f"задача {index + 1} ({task.title or 'без названия'})"
 

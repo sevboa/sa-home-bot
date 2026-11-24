@@ -13,12 +13,27 @@ from sa_home_bot.devlab.agent.sandbox import (
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import changed_test_files, without_xdist
+from sa_home_bot.devlab.protocol import RED_TESTS_ITEM, RED_TESTS_MARKER
 
 VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
 VERDICT_REWORK = "ВЕРДИКТ: доработать"
 PYTEST_FAILED_EXIT = 1
 BASE_RED_NOTE = "красные на базе, не блокируют: {tests}"
 PhaseListener = Callable[[bool], None]
+COLLECT_ARGS = ("--collect-only", "-q")
+COLLECT_BROKEN = (
+    "тест не собирается (ошибка на уровне модуля), а тесты до кода обязаны собираться:\n"
+    "{output}\n"
+    "Правило: на уровне модуля импортируй только то, что уже есть в репозитории; ещё не "
+    "написанный код импортируй внутри тела тестовой функции (`from пакет import новое`). "
+    "Тогда без кода тест падает красным, а не ломает сбор. Синтаксис должен быть корректным."
+)
+
+
+def red_tests_block(tests: list[str]) -> str:
+    if not tests:
+        return ""
+    return "\n\n" + RED_TESTS_MARKER + "\n" + "\n".join(RED_TESTS_ITEM + test for test in tests)
 
 
 def _in_allowed(path: str, allowed: tuple[str, ...]) -> bool:
@@ -44,10 +59,41 @@ class FinishGuard:
         self._on_phase = on_phase
         self._base_red: set[str] = set()
         self._excused: list[str] = []
+        self._red: list[str] = []
 
     @property
     def excused(self) -> list[str]:
         return list(self._excused)
+
+    @property
+    def red_tests(self) -> list[str]:
+        return list(self._red)
+
+    async def _own_test_files(self) -> list[str]:
+        if not self._spec.expect_red:
+            return []
+        return changed_test_files(await self._sandbox.changed_digests())
+
+    async def _uncollectable(self, files: list[str]) -> list[str]:
+        spec = self._spec
+        argv = without_xdist([*spec.test_argv, *COLLECT_ARGS, *files])
+        result = await self._sandbox.exec(argv, spec.narrow_test_timeout_s)
+        if result.ok:
+            return []
+        return [
+            COLLECT_BROKEN.format(
+                output=result.failure_summary(spec.output_chars, spec.narrow_test_timeout_s)
+            )
+        ]
+
+    async def _record_red(self, files: list[str]) -> None:
+        spec = self._spec
+        argv = without_xdist([*spec.test_argv, *files])
+        result = await self._sandbox.exec(argv, spec.test_timeout_s)
+        if result.ok:
+            self._red = []
+            return
+        self._red = failed_test_ids(result.output) or list(files)
 
     async def verify(self) -> list[str]:
         spec = self._spec
@@ -86,18 +132,25 @@ class FinishGuard:
         spec = self._spec
         failures: list[str] = []
         self._excused = []
+        self._red = []
         if self._on_phase is not None:
             self._on_phase(True)
         try:
             async with self._heavy:
+                own = await self._own_test_files() if spec.test_argv else []
+                if own:
+                    failures += await self._uncollectable(own)
                 if spec.test_argv:
-                    argv = [*spec.test_argv, *await self._skip_args()]
+                    ignored = [f"--ignore={path}" for path in own]
+                    argv = [*spec.test_argv, *await self._skip_args(), *ignored]
                     result = await self._sandbox.exec(argv, spec.test_timeout_s)
                     if not result.ok and not await self._red_only_on_base(result):
                         failures.append(
                             "тесты не зелёные:\n"
                             + result.failure_summary(spec.output_chars, spec.test_timeout_s)
                         )
+                if own and not failures:
+                    await self._record_red(own)
                 failures += await self._checks()
         finally:
             if self._on_phase is not None:
@@ -138,6 +191,9 @@ class FinishGuard:
         spec = self._spec
         failures: list[str] = []
         paths = changed_test_files(await self._sandbox.changed_digests())
+        if spec.expect_red and spec.test_argv and paths:
+            failures += await self._uncollectable(paths)
+            return failures + await self._checks()
         if spec.test_argv and paths:
             argv = without_xdist([*spec.test_argv, *paths])
             result = await self._sandbox.exec(argv, spec.narrow_test_timeout_s)

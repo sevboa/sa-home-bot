@@ -17,6 +17,8 @@ from sa_home_bot.devlab.hub.epic_plan import (
     PlanTask,
     check_plan,
     later_test_files,
+    parse_red_tests,
+    red_tests_note,
     tester_locked_files,
 )
 from sa_home_bot.devlab.hub.errors import HubError
@@ -404,14 +406,27 @@ class HubEpics:
                 (*fields.values(), epic_id, idx),
             )
 
+    async def _red_tests_before(self, task: EpicTask, tasks: Sequence[EpicTask]) -> list[str]:
+        red: list[str] = []
+        for earlier in tasks[: task.idx]:
+            if earlier.profile != protocol.PROFILE_TESTER or earlier.job_id is None:
+                continue
+            message = await self._queue.last_message(earlier.job_id, protocol.MSG_DONE)
+            summary = message.payload.get(protocol.PAYLOAD_SUMMARY) if message else None
+            if isinstance(summary, str):
+                red += parse_red_tests(summary)
+        return list(dict.fromkeys(red))
+
     async def _enqueue(self, epic: Epic, task: EpicTask, tasks: Sequence[EpicTask]) -> None:
+        is_tester = task.profile == protocol.PROFILE_TESTER
+        red = [] if is_tester else await self._red_tests_before(task, tasks)
         async with self._db.transaction() as conn:
             job = await HubQueue._insert_agent_job(
                 conn,
                 epic.client,
                 epic.project,
                 task.model,
-                task.task,
+                task.task + red_tests_note(red),
                 epic.branch,
                 0,
                 task.profile,
@@ -422,6 +437,7 @@ class HubEpics:
                     protocol.PARAM_PATHS: task.paths,
                     protocol.PARAM_EPIC_SKIP_TESTS: later_test_files(tasks, task.idx),
                     protocol.PARAM_EPIC_LOCKED: tester_locked_files(tasks, task.idx),
+                    protocol.PARAM_EPIC_RED_TESTS: red,
                 },
             )
             await conn.execute(

@@ -173,6 +173,7 @@ class DevlabProfileConfig(BaseModel):
     max_wall_s: float | None = Field(default=None, gt=0)
     write_prefixes: list[str] = Field(default_factory=list)
     allow_no_changes: bool = False
+    expect_red: bool = False
     require_verdict: bool = False
     code_mode: bool = False
     prompt_lang: Literal["ru", "en"] = "ru"

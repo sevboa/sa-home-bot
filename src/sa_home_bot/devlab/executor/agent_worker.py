@@ -516,6 +516,7 @@ class AgentWorker(WorkerLoops):
                 spec,
                 write_prefixes=tuple(profile.write_prefixes),
                 allow_no_changes=profile.allow_no_changes,
+                expect_red=profile.expect_red,
                 require_verdict=profile.require_verdict,
                 code_mode=profile.code_mode,
                 prompt_lang=profile.prompt_lang,

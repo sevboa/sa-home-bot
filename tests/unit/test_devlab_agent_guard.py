@@ -1,9 +1,12 @@
+import sys
+
 import pytest
 
-from sa_home_bot.devlab.agent.guard import FinishGuard
+from sa_home_bot.devlab.agent.guard import FinishGuard, red_tests_block
 from sa_home_bot.devlab.agent.markup import task_paths
 from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.agent.spec import AgentSpec
+from sa_home_bot.devlab.hub.epic_plan import parse_red_tests
 
 LINE_HEAD = "**Менять можно только**"
 FILES = {"README.md": "OLD\n", "src/app.py": "VALUE = 1\n", "docs/devlab/agent.md": "текст\n"}
@@ -123,3 +126,61 @@ async def test_full_run_without_skip_keeps_argv(tmp_path):
     sandbox = RecordingSandbox(tmp_path)
     await FinishGuard(sandbox, AgentSpec(test_argv=("pytest", "-q"))).verify_green()
     assert sandbox.argvs == [["pytest", "-q"]]
+
+
+PYTEST = (sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider")
+GREEN_TEST = "def test_ok():\n    assert True\n"
+RED_TEST = "def test_new():\n    from newmod import value\n\n    assert value == 1\n"
+BROKEN_TEST = "from newmod import value\n\n\ndef test_new():\n    assert value == 1\n"
+
+
+def red_sandbox(tmp_path, name, text):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_base.py").write_text(GREEN_TEST)
+    sandbox = LocalSandbox(tmp_path)
+    (tmp_path / name).write_text(text)
+    return sandbox
+
+
+async def test_expect_red_allows_red_own_test_and_lists_it(tmp_path):
+    sandbox = red_sandbox(tmp_path, "tests/test_new.py", RED_TEST)
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=PYTEST, expect_red=True))
+    assert await guard.verify_green() == []
+    assert guard.red_tests == ["tests/test_new.py::test_new"]
+
+
+async def test_without_expect_red_own_red_test_blocks(tmp_path):
+    sandbox = red_sandbox(tmp_path, "tests/test_new.py", RED_TEST)
+    failures = await FinishGuard(sandbox, AgentSpec(test_argv=PYTEST)).verify_green()
+    assert failures and failures[0].startswith("тесты не зелёные")
+
+
+async def test_expect_red_rejects_module_level_import_of_missing_code(tmp_path):
+    sandbox = red_sandbox(tmp_path, "tests/test_new.py", BROKEN_TEST)
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=PYTEST, expect_red=True))
+    failures = await guard.verify_green()
+    assert len(failures) == 1
+    assert "внутри тела тестовой функции" in failures[0]
+    assert guard.red_tests == []
+
+
+async def test_expect_red_keeps_rest_of_suite_required_green(tmp_path):
+    sandbox = red_sandbox(tmp_path, "tests/test_new.py", RED_TEST)
+    (tmp_path / "tests/test_base.py").write_text("def test_ok():\n    assert False\n")
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=PYTEST, expect_red=True))
+    failures = await guard.verify_green()
+    assert len(failures) == 1
+    assert failures[0].startswith("тесты не зелёные")
+
+
+async def test_expect_red_step_only_collects(tmp_path):
+    sandbox = red_sandbox(tmp_path, "tests/test_new.py", RED_TEST)
+    spec = AgentSpec(test_argv=PYTEST, expect_red=True)
+    assert await FinishGuard(sandbox, spec).verify_step() == []
+
+
+def test_red_tests_block_roundtrip():
+    block = red_tests_block(["tests/a.py::t1", "tests/b.py::t2"])
+    assert parse_red_tests("итог" + block + "\n\nхвост") == ["tests/a.py::t1", "tests/b.py::t2"]
+    assert red_tests_block([]) == ""
+    assert parse_red_tests("без маркера") == []
