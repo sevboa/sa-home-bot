@@ -23,6 +23,13 @@ from .vpn_support import (
     press,
 )
 
+SUB_ANSWER = {
+    "page_url": "https://1.2.3.4:8444/s/tok",
+    "sub_url": "https://1.2.3.4:8444/sub/tok",
+    "singbox_url": "https://1.2.3.4:8444/sub/tok?format=singbox",
+}
+ADD_URL = "https://1.2.3.4:8444/s/tok/hiddify"
+
 OWNER = Subscription(chat_id=1, name="owner", allowed_commands=frozenset({"*"}))
 
 
@@ -47,7 +54,7 @@ class Link(FakeNodeLink):
         if action == vpn_protocol.ACTION_GET_VLESS:
             return {"config_text": '{"singbox": 1}', "location": "🇳🇱 Нидерланды"}
         if action == vpn_protocol.ACTION_GET_SUBSCRIPTION:
-            return {"page_url": "https://1.2.3.4:8444/s/tok"}
+            return SUB_ANSWER
         return {}
 
 
@@ -79,7 +86,7 @@ def _env(monkeypatch):
 
     async def fake_fanout(node_link, action, args):
         if action == vpn_protocol.ACTION_GET_SUBSCRIPTION:
-            return [{"page_url": "https://1.2.3.4:8444/s/tok"}]
+            return [SUB_ANSWER]
         if action == vpn_protocol.ACTION_DEVICE_ONLINE:
             state["online_args"] = args
             return state.get("online", [])
@@ -152,7 +159,12 @@ async def test_pick_screen():
     cb, _, _ = await _press("act:vpn:vpn_card:wp")
     text, markup = last_edit(cb)
     assert text == "Какое у вас устройство?"
-    assert button_texts(markup) == ["🍎 iPhone", "🤖 Android", "💻 Компьютер", "⬅️ Назад"]
+    assert button_texts(markup) == [
+        "🍎 iPhone / iPad / Mac",
+        "🤖 Android",
+        "💻 Компьютер",
+        "⬅️ Назад",
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -171,27 +183,38 @@ async def test_create_issues_vless_in_every_country_and_shows_page_step():
     assert all(
         a == {"chat_id": 778, "device_label": "📱 Rose", "transport": "reality"} for _, a in issues
     )
+    assert all(a["transport"] == "reality" for _, a in issues)
     text, markup = last_edit(cb)
-    assert text == (
-        "📶 <b>Настройки VPN · 📱 Rose</b>\n"
-        "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
-        "по шагам: сначала резервный Hiddify, потом основной AmneziaVPN (он быстрее) и проверка, "
-        "что VPN включён.\n"
-        "https://1.2.3.4:8444/s/tok\n"
-        "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
-    )
-    assert "⋮" not in text
-    page = all_buttons(markup)[0]
-    assert page.text == "📶 Открыть настройки" and page.url == "https://1.2.3.4:8444/s/tok"
-    assert button_texts(markup)[1:] == ["✅ Готово", "🙋 Не получается"]
+    assert text == w.connect_text("📱 Rose", SUB_ANSWER["singbox_url"])
+    assert "<code>https://1.2.3.4:8444/sub/tok?format=singbox</code>" in text
+    assert "AmneziaVPN" not in text
+    buttons = all_buttons(markup)
+    store = VpnConfig().hiddify_ios_app_store_url
+    assert (buttons[0].text, buttons[0].url) == ("🍎 App Store", store)
+    assert (buttons[1].text, buttons[1].url) == ("➕ Добавить в Hiddify", ADD_URL)
+    assert button_texts(markup)[2:] == ["✅ Готово", "🙋 Не получается"]
 
 
-@pytest.mark.parametrize(("code", "label"), [("a", "🤖 Rose"), ("c", "💻 Rose")])
-async def test_platforms(code, label):
+@pytest.mark.parametrize(
+    ("code", "label", "store"),
+    [
+        ("i", "📱 Rose", VpnConfig().hiddify_ios_app_store_url),
+        ("a", "🤖 Rose", VpnConfig().hiddify_google_play_url),
+        ("c", "💻 Rose", VpnConfig().hiddify_site_url),
+    ],
+)
+async def test_platforms(code, label, store):
     cb, link, _ = await _press(f"act:vpn:issue:~w{code}", cfg=_cfg(wizard_settings_file=False))
     assert link.calls[0][1]["device_label"] == label
-    first = all_buttons(last_edit(cb)[1])[0]
-    assert first.text == "📶 Открыть настройки" and "/s/tok" in first.url
+    first, add = all_buttons(last_edit(cb)[1])[:2]
+    assert first.url == store and add.url == ADD_URL
+
+
+async def test_default_path_never_issues_awg():
+    _, link, _ = await _press("act:vpn:issue:~wa", cfg=_cfg(wizard_settings_file=False))
+    issued = [a for act, a in link.calls if act == vpn_protocol.ACTION_ISSUE]
+    assert issued and {a["transport"] for a in issued} == {"reality"}
+    assert not [c for c in link.calls if c[0] == vpn_protocol.ACTION_GET_VLESS]
 
 
 def test_device_names_are_flowers_with_platform_emoji():
@@ -214,7 +237,7 @@ async def test_partial_node_failure_continues():
     cb, link, _ = await _press(
         "act:vpn:issue:~wi", link=Link(fail_nodes={"wooster"}), cfg=_cfg(wizard_settings_file=False)
     )
-    assert last_edit(cb)[0].startswith("📶 <b>Настройки VPN")
+    assert last_edit(cb)[0].startswith("📶 <b>VPN · ")
 
 
 async def test_all_nodes_failing_says_so_and_offers_help():
@@ -237,7 +260,7 @@ KEY = vd.device_key(LABEL)
 async def test_no_file_step_by_default_page_first(_env):
     _env["servers"] = _with(LABEL)
     cb, _, notifier = await _press(f"act:vpn:vpn_card:wbi{KEY}")
-    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
+    assert cb.message.edits[-1].startswith("📶 <b>VPN · ")
     assert not notifier.documents
 
 
@@ -248,7 +271,7 @@ async def test_no_file_step_when_vless_already_worked(_env):
     _env["servers"] = other
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
     text, markup = last_edit(cb)
-    assert text.startswith("📶 <b>Настройки VPN") and "Шаг" not in text
+    assert text.startswith("📶 <b>VPN · ") and "Шаг" not in text
     ready = [b for b in all_buttons(markup) if b.text == "✅ Готово"][0]
     assert ready.callback_data.endswith(f":wdi{KEY}")
 
@@ -256,13 +279,13 @@ async def test_no_file_step_when_vless_already_worked(_env):
 async def test_no_file_step_when_flag_off(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}", cfg=_cfg(wizard_settings_file=False))
-    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
+    assert cb.message.edits[-1].startswith("📶 <b>VPN · ")
 
 
 async def test_own_handshake_still_page_step(_env):
     _env["servers"] = _with(LABEL, hs="2026-10-10T10:00:00+00:00")
     cb, _, _ = await _press(f"act:vpn:vpn_card:wai{KEY}")
-    assert cb.message.edits[-1].startswith("📶 <b>Настройки VPN")
+    assert cb.message.edits[-1].startswith("📶 <b>VPN · ")
 
 
 async def test_file_step_never_in_group(_env):
@@ -274,18 +297,18 @@ async def test_file_step_never_in_group(_env):
 async def test_connect_step_has_subscription_button(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wci{KEY}")
-    connect = all_buttons(last_edit(cb)[1])[0]
-    assert connect.text == "📶 Открыть настройки" and connect.url == "https://1.2.3.4:8444/s/tok"
+    connect = all_buttons(last_edit(cb)[1])[1]
+    assert connect.text == "➕ Добавить в Hiddify" and connect.url == ADD_URL
 
 
 async def test_check_and_done_screens(_env):
     _env["servers"] = _with(LABEL)
     cb, _, _ = await _press(f"act:vpn:vpn_card:wdi{KEY}")
     text, markup = last_edit(cb)
-    assert text == w.CHECK_TEXT and "«Нажмите для подключения»" in text
+    assert text == w.CHECK_TEXT and "«Нажмите для подключения»" in text and "Amnezia" not in text
     assert button_texts(markup) == ["✅ Да!", "❌ Нет"]
     cb, _, _ = await _press("act:vpn:vpn_card:wy")
-    assert last_edit(cb)[0] == w.DONE_TEXT and "«Подключиться»" in w.DONE_TEXT
+    assert last_edit(cb)[0] == w.DONE_TEXT and "Amnezia" not in w.DONE_TEXT
     assert button_texts(last_edit(cb)[1]) == ["📶 На главную"]
 
 
@@ -294,7 +317,7 @@ async def test_fail_screen_and_other_country(_env):
     text, markup = last_edit(cb)
     assert text == "Ничего страшного."
     assert button_texts(markup) == [
-        "🔁 Попробовать другую страну",
+        "🔄 Обновить подписку в Hiddify",
         "🙋 Позвать на помощь",
         "⬅️ Назад к шагу",
     ]
@@ -302,7 +325,7 @@ async def test_fail_screen_and_other_country(_env):
     back = all_buttons(markup)[-1].callback_data
     assert back.endswith(f":wci{KEY}")
     cb, _, _ = await _press(f"act:vpn:vpn_card:woci{KEY}")
-    assert last_edit(cb)[0] == w.OTHER_TEXT and "AmneziaVPN" in w.OTHER_TEXT
+    assert last_edit(cb)[0] == w.OTHER_TEXT and "Amnezia" not in w.OTHER_TEXT
 
 
 def _book():
@@ -368,7 +391,9 @@ def test_every_wizard_callback_fits_64_bytes():
             markups.append(w.back_to_step_keyboard(step, p, key, help_button=True))
             markups.append(w.unavailable_keyboard(step, p, key))
         for step in (w.CONNECT, w.CHECK):
-            markups.append(w.step_keyboard(step, platform, key, page_url="https://x/s/t"))
+            markups.append(
+                w.step_keyboard(step, platform, key, page_url="https://x/s/t", cfg=VpnConfig())
+            )
     for markup in markups:
         for button in all_buttons(markup):
             if button.callback_data:
@@ -391,22 +416,22 @@ async def test_check_not_connected_offers_recheck_settings_help_home(_env):
     assert cb.message.edits[0] == f"⏳ Проверяю подключение «{LABEL}»…"
     text, markup = last_edit(cb)
     assert text == w.not_connected_text(LABEL)
-    assert f"профиль «VPN · {LABEL}»" in text and f"подключение «{LABEL}» с флагом" in text
+    assert f"профиль «VPN · {LABEL}»" in text and "Amnezia" not in text
     assert button_texts(markup) == [
         "🔄 Проверить ещё раз",
-        "📶 Открыть настройки",
+        "➕ Добавить в Hiddify",
         vpn_keyboards.CALL_FOR_HELP_TEXT,
         vpn_keyboards.HOME_TEXT,
     ]
     recheck, settings, help_, home = all_buttons(markup)
     assert recheck.callback_data == f"act:vpn:vpn_card:wdi{KEY}"
-    assert settings.url == "https://1.2.3.4:8444/s/tok"
+    assert settings.url == ADD_URL
     assert help_.callback_data.endswith(f":whdi{KEY}")
     _env["online"] = [_online({"transport": "reality", "online": True, "seen_at": "x"})]
     cb, _, _ = await _press(recheck.callback_data)
     assert last_edit(cb)[0].startswith("🎉 Готово! Подключено через <b>VLESS · Hiddify</b>")
     cb, _, _ = await _press(home.callback_data)
-    assert "📶 Открыть настройки" not in button_texts(last_edit(cb)[1])
+    assert all(b.url is None for b in all_buttons(last_edit(cb)[1]))
 
 
 async def test_check_connected_names_method_and_freshest_server(_env):
@@ -432,3 +457,50 @@ def test_online_connection_ignores_offline_and_empty():
         "reality",
         "🇳🇱 Нидерланды",
     )
+
+
+async def test_home_with_single_device_puts_hiddify_buttons_first(_env):
+    _env["servers"] = _with(LABEL)
+    cb, _, _ = await _press("act:vpn:vpn_card")
+    add, link = all_buttons(last_edit(cb)[1])[:2]
+    assert (add.text, link.text) == ("➕ Добавить в Hiddify", "🔗 Ссылка подписки")
+    assert add.callback_data.endswith(f":h{KEY}") and link.callback_data.endswith(f":k{KEY}")
+
+
+async def test_home_with_two_devices_has_no_device_buttons(_env):
+    servers = _with(LABEL)
+    for s, other in zip(servers, _with("🤖 Android"), strict=True):
+        s["device_usage"] += other["device_usage"]
+    _env["servers"] = servers
+    cb, _, _ = await _press("act:vpn:vpn_card")
+    assert "🔗 Ссылка подписки" not in button_texts(last_edit(cb)[1])
+
+
+async def test_add_to_hiddify_screen_sends_steps_with_store_and_bridge(_env):
+    _env["servers"] = _with(LABEL)
+    _, _, notifier = await _press(f"act:vpn:vpn_card:h{KEY}")
+    assert notifier.sent[0][1] == w.connect_text(LABEL, SUB_ANSWER["singbox_url"])
+    store, add = all_buttons(notifier.markups[0])
+    assert store.url == VpnConfig().hiddify_ios_app_store_url and add.url == ADD_URL
+
+
+async def test_subscription_link_screen_sends_link_and_qr(_env):
+    _env["servers"] = _with(LABEL)
+    _, _, notifier = await _press(f"act:vpn:vpn_card:k{KEY}")
+    assert "<code>https://1.2.3.4:8444/sub/tok?format=singbox</code>" in notifier.sent[0][1]
+    assert all_buttons(notifier.markups[0])[0].url == ADD_URL
+    assert len(notifier.photos) == 1
+
+
+async def test_hiddify_screens_refused_in_group(_env):
+    _env["servers"] = _with(LABEL)
+    _, _, notifier = await _press(f"act:vpn:vpn_card:k{KEY}", chat_id=-100)
+    assert not notifier.sent and not notifier.photos
+
+
+async def test_old_page_and_other_country_callbacks_still_work(_env):
+    _env["servers"] = _with(LABEL)
+    _, _, notifier = await _press(f"act:vpn:vpn_card:l{KEY}")
+    assert "https://1.2.3.4:8444/s/tok" in notifier.sent[0][1]
+    cb, _, _ = await _press(f"act:vpn:vpn_card:wbi{KEY}")
+    assert last_edit(cb)[0].startswith("📶 <b>VPN · ")

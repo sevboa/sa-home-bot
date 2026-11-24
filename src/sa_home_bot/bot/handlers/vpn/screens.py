@@ -57,6 +57,7 @@ def render_main(
                 subscription=subscription,
                 self_serve_nodes=self_serve,
                 has_devices=has_devices,
+                single_device=single_reality_device(servers),
             ),
         )
     if wizard and wizard_available(servers, subscription):
@@ -67,6 +68,15 @@ def render_main(
             servers, subscription=subscription, self_serve_nodes=self_serve
         ),
     )
+
+
+def single_reality_device(servers: list[dict]) -> vpn_devices.Device | None:
+    devices = vpn_devices.build_devices(servers)
+    if len(devices) != 1:
+        return None
+    if not any(c.transport == vpn_protocol.TRANSPORT_REALITY for c in devices[0].issued):
+        return None
+    return devices[0]
 
 
 def proxy_only_card(error: str | None, subscription: Subscription | None) -> bool:
@@ -92,12 +102,25 @@ async def redraw_card(ctx: Ctx, *, expert: bool = False) -> None:
     await ctx.edit(text, keyboard)
 
 
+async def subscription_answer(
+    node_link: ServiceLink, chat_id: int, device: vpn_devices.Device
+) -> dict | None:
+    if not any(c.transport == vpn_protocol.TRANSPORT_REALITY for c in device.issued):
+        return None
+    return await subscription_answer_by_label(node_link, chat_id, device.label)
+
+
 async def subscription_page_url(
     node_link: ServiceLink, chat_id: int, device: vpn_devices.Device
 ) -> str | None:
-    if not any(c.transport == vpn_protocol.TRANSPORT_REALITY for c in device.issued):
+    answer = await subscription_answer(node_link, chat_id, device)
+    return str(answer["page_url"]) if answer else None
+
+
+def subscription_link(answer: dict | None) -> str | None:
+    if not answer:
         return None
-    return await page_url_by_label(node_link, chat_id, device.label)
+    return str(answer.get("singbox_url") or answer.get("sub_url") or "") or None
 
 
 def page_url_rank(url: str) -> int:
@@ -111,14 +134,21 @@ def page_url_rank(url: str) -> int:
     return 1
 
 
-async def page_url_by_label(node_link: ServiceLink, chat_id: int, label: str) -> str | None:
+async def subscription_answer_by_label(
+    node_link: ServiceLink, chat_id: int, label: str
+) -> dict | None:
     answers = await vpn_nodes.fanout(
         node_link,
         vpn_protocol.ACTION_GET_SUBSCRIPTION,
         {"chat_id": chat_id, "device_label": label},
     )
-    urls = [str(a["page_url"]) for a in answers if a.get("page_url")]
-    return min(urls, key=page_url_rank) if urls else None
+    found = [a for a in answers if a.get("page_url")]
+    return min(found, key=lambda a: page_url_rank(str(a["page_url"]))) if found else None
+
+
+async def page_url_by_label(node_link: ServiceLink, chat_id: int, label: str) -> str | None:
+    answer = await subscription_answer_by_label(node_link, chat_id, label)
+    return str(answer["page_url"]) if answer else None
 
 
 async def show_screen(ctx: Ctx, screen: str, key: str = "", *, answered: bool = True) -> None:
@@ -148,7 +178,8 @@ async def show_screen(ctx: Ctx, screen: str, key: str = "", *, answered: bool = 
         text, keyboard = vpn_devices.delete_text(device), vpn_screens.delete_keyboard(device)
     elif screen == _cb.SCREEN_PICK:
         text = vpn_settings.pick_text(device.label)
-        keyboard = vpn_settings.pick_keyboard(device.key)
+        page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
+        keyboard = vpn_settings.pick_keyboard(device.key, page_url=page_url)
     elif screen == _cb.SCREEN_AWG:
         awg_servers = vpn_nodes.awg_servers(servers)
         text = vpn_settings.awg_pick_text(device.label) if awg_servers else vpn_settings.NO_AWG_TEXT
