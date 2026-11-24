@@ -538,6 +538,7 @@ class AgentWorker(WorkerLoops):
         entries = await self._catalog.entries(job.model)
         rules = await self._rules(run, project, repo.base, external)
         limits = self._limits_for(spend, entries, profile)
+        spend.set_context_limit(limits.context_tokens)
         loop = AgentLoop(
             MeteredChat(self._models(job.model, job.id, spec.chat_style, reminder_text), spend),
             ToolBox(
@@ -563,6 +564,7 @@ class AgentWorker(WorkerLoops):
             tokens=spend.total_tokens,
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
+            on_fold=spend.note_fold,
         )
         system = build_system(
             rules,

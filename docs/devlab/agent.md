@@ -916,3 +916,17 @@ resume состояние начинается с чистого листа.
 **4. `secret_paths` прятал отслеживаемые эталоны.** На старте первого сегмента задания (не при возобновлении) `AgentWorker._warn_closed_tracked` сверяет `git ls-tree` базы (`ProjectMirror.tracked_files`) с `secret_paths`; при совпадении пишет предупреждение в журнал шагов (`{"event": "warning"}`), в лог и шлёт владельцу сообщение `step_done` с первыми 5 путями. Поведение закрытия не менялось.
 
 Тесты: `test_devlab_agent.py` (красные на базе, петля финиша), `test_devlab_agent_spend.py`, `test_devlab_hub.py`, `test_devlab_jobs_view.py`, `test_devlab_agent_sandbox.py`; `test_devlab_agent_worker.py` и `test_devlab_agent_owner.py` обновлены под `started` при возобновлении.
+
+## Окно контекста и свёртки в карточке (2026-11-24)
+- `SpendState` хранит `context_tokens` (`tokens_in` последнего ответа модели, то есть размер последнего
+  запроса), `context_limit` (окно модели, `AgentLimits.context_tokens` после `window_tokens`; пишет
+  `AgentWorker` перед запуском петли) и `folds`. `AgentLoop` получил `on_fold`: вызывается на шаге, где
+  `fold_old_results` сократил историю (та же проверка, что поле `folded` в журнале шагов). Счётчик
+  держится за задание и переживает рестарт исполнителя вместе с расходом.
+- `live` теперь несёт `context_tokens`, `folds` (только после первого ответа с usage) и `context_limit`
+  (если известен); хаб хранит их в `job_live` (`LIVE_KEYS`), виды заданий копируют по
+  `protocol.LIVE_VIEW_FIELDS` (`mcp_tools.live_fields`, общий для `owner_*` и `devlab_status`).
+- `devlab_status` до этого `live` не показывал; теперь добавляет `tokens` (всего), `model_steps`,
+  `segment_tokens`, `reasoning_tokens`, окно, свёртки и `phase`.
+- Карточка /jobs: «Контекст: окно 46/118 тыс.» (без лимита «окно 46 тыс.») и «Свёрток истории: N»;
+  нет данных, строк нет. Живьём не проверено.

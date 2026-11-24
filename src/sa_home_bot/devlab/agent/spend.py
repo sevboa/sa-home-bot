@@ -23,6 +23,9 @@ class SpendState(BaseModel):
     usage_replies: int = 0
     extensions: int = 0
     model: str = ""
+    context_tokens: int = 0
+    context_limit: int = 0
+    folds: int = 0
 
 
 class JobSpend:
@@ -55,7 +58,15 @@ class JobSpend:
             cost=state.cost + (reply.cost_usd or 0.0),
             reasoning_tokens=state.reasoning_tokens + (reply.tokens_reasoning or 0),
             usage_replies=state.usage_replies + (1 if reply.tokens_in + reply.tokens_out else 0),
+            context_tokens=reply.tokens_in or state.context_tokens,
         )
+
+    def note_fold(self) -> None:
+        self._update(folds=self._state.folds + 1)
+
+    def set_context_limit(self, limit: int) -> None:
+        if limit != self._state.context_limit:
+            self._update(context_limit=limit)
 
     def extend(self) -> None:
         self._update(extensions=self._state.extensions + 1)
@@ -76,6 +87,11 @@ class JobSpend:
         }
         if state.reasoning_tokens:
             live[protocol.FIELD_REASONING_TOKENS] = state.reasoning_tokens
+        if state.context_tokens:
+            live[protocol.FIELD_CONTEXT_TOKENS] = state.context_tokens
+            live[protocol.FIELD_FOLDS] = state.folds
+            if state.context_limit:
+                live[protocol.FIELD_CONTEXT_LIMIT] = state.context_limit
         return live
 
     def take_report(self) -> dict[str, Any]:

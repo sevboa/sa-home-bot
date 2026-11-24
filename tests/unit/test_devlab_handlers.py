@@ -121,6 +121,69 @@ async def test_post_codes(code, kind):
     assert notifier.kicked == 1
 
 
+def epic_link():
+    return FakeNodeLink(
+        results={protocol.ACTION_OWNER_EPIC_POST: {protocol.FIELD_STATUS: "running"}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"), [("epr", protocol.MSG_RESUME), ("epsc", protocol.MSG_STOP)]
+)
+async def test_epic_buttons_post_to_epic_action(code, kind):
+    link = epic_link()
+    notifier = FakeKicker()
+    cb = callback(f"dl:{code}:ab12cd")
+    await press(cb, link, notifier=notifier)
+    action, args = link.commands[0]
+    assert action == protocol.ACTION_OWNER_EPIC_POST
+    assert args == {protocol.FIELD_ID: "ab12cd", protocol.FIELD_KIND: kind}
+    assert cb.message.reply_markup_edits == [None]
+    assert notifier.kicked == 1
+
+
+async def test_epic_stop_needs_second_press():
+    link = epic_link()
+    cb = callback("dl:eps:ab12cd")
+    await press(cb, link)
+    assert link.calls == []
+    markup = cb.message.reply_markup_edits[0]
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["dl:epsc:ab12cd", "dl:epc:ab12cd"]
+    cancel = callback("dl:epc:ab12cd")
+    await press(cancel, link)
+    restored = cancel.message.reply_markup_edits[0]
+    assert [b.callback_data for row in restored.inline_keyboard for b in row] == [
+        "dl:epr:ab12cd",
+        "dl:eps:ab12cd",
+    ]
+
+
+@pytest.mark.parametrize("code", ["epr", "eps", "epsc", "epc"])
+async def test_guest_is_denied_for_epic_codes(code):
+    link = epic_link()
+    cb = callback(f"dl:{code}:ab12cd", GUEST)
+    await press(cb, link, guest_sub())
+    assert cb.answered[0][0] == (DENIED_ALERT_TEXT,)
+    assert link.calls == []
+
+
+async def test_cmd_jobs_shows_epics_from_hub():
+    link = jobs_link([], 0)
+    link.results[protocol.ACTION_OWNER_JOBS][protocol.FIELD_EPICS] = [
+        {
+            protocol.FIELD_ID: "ab12cd",
+            protocol.FIELD_TITLE: "Эпик",
+            protocol.FIELD_STATUS: protocol.EPIC_RUNNING,
+            "done": 1,
+            "total": 3,
+        }
+    ]
+    msg = FakeMessage(chat_id=OWNER, user_id=OWNER, text="/jobs")
+    await handlers.cmd_jobs(msg, config=Settings(), node_link=link, subscription=owner_sub())
+    assert "ab12cd" in msg.rich_answers[0][0].html
+
+
 async def test_stop_needs_second_press():
     link = waiting_link()
     cb = callback("dl:stop:j1")

@@ -175,3 +175,9 @@ Callback-схема:
 `MSG_RELEASE` / `MSG_RESUME` (свод `POST_KINDS` в `bot/handlers/devlab.py`), тост
 `DEVLAB_POSTED_TOAST`, `DevlabNotifier.kick()`, затем заново `owner_job` и перерисовка карточки;
 ошибка хаба — alert, карточка не меняется. Коды не пересекаются с кнопками оповещений (`dl:`).
+
+## Эпики в /jobs и оповещение (2026-11-24)
+Секция «🧩 Эпики» (первая страница), пометка «эпик N/M» у заданий эпика, оповещение `epic_waiting` с
+кнопками «Продолжить эпик»/«Остановить эпик» (`dl:epr|eps|epsc|epc:<эпик>`, обработчик в
+`bot/handlers/devlab.py`, действие хаба `owner_epic_post`), строки «Контекст»/«Свёрток истории» в
+карточке задания. Подробности: [epic.md](epic.md), [agent.md](agent.md).

@@ -83,6 +83,20 @@ def job_view(job: Any, with_task: bool = True) -> dict[str, Any]:
     return data
 
 
+def live_fields(job: Any, live: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        protocol.PAYLOAD_TOKENS: max(job.tokens, live.get(protocol.PAYLOAD_TOKENS, 0))
+    }
+    for key in protocol.LIVE_VIEW_FIELDS:
+        if key in live:
+            fields[key] = live[key]
+    if job.status == protocol.STATUS_RUNNING and live.get(protocol.FIELD_PHASE):
+        fields[protocol.FIELD_PHASE] = live[protocol.FIELD_PHASE]
+    if not live.get(protocol.FIELD_USAGE_KNOWN, True) and not fields[protocol.PAYLOAD_TOKENS]:
+        fields[protocol.FIELD_USAGE_KNOWN] = False
+    return fields
+
+
 async def model_warnings(ctx: Context, model: str) -> list[str]:
     names = {entry[protocol.MODEL_NAME] for entry in await ctx.store.models()}
     if model.strip() in names:
@@ -174,6 +188,16 @@ async def epic(ctx: Context, id: str) -> Any:
     return await ctx.store.epics.view(ctx.client, id)
 
 
+async def epic_resume(ctx: Context, id: str) -> Any:
+    await ctx.store.epics.view(ctx.client, id)
+    return await ctx.store.epics.resume(id)
+
+
+async def epic_stop(ctx: Context, id: str) -> Any:
+    await ctx.store.epics.view(ctx.client, id)
+    return await ctx.store.epics.stop(id)
+
+
 async def test_outcome(ctx: Context, job: Any) -> Any:
     if job.status == protocol.STATUS_DONE:
         message = await ctx.store.queue.last_message(job.id, protocol.MSG_TEST_DONE)
@@ -247,6 +271,8 @@ async def list_jobs(ctx: Context, statuses: list[str] | None = None) -> Any:
 async def status(ctx: Context, id: str) -> Any:
     job = await ctx.store.queue.get_job(id, ctx.client)
     view = job_view(job)
+    lives = await ctx.store.queue.live_views([job.id])
+    view.update(live_fields(job, lives.get(job.id, {})))
     if job.kind == protocol.JOB_KIND_TEST:
         view["result"] = await test_outcome(ctx, job)
     return view
@@ -417,6 +443,19 @@ TOOLS: tuple[Tool, ...] = (
         " (задание, итог, коммит, время).",
         (Param("id", "string", "Номер эпика.", required=True),),
         epic,
+    ),
+    Tool(
+        protocol.TOOL_EPIC_RESUME,
+        "Продолжить свой эпик: вернуть в очередь текущую задачу (провалилась или остановлена)"
+        " и снять ожидание владельца; остановленный эпик снова идёт.",
+        (Param("id", "string", "Номер эпика.", required=True),),
+        epic_resume,
+    ),
+    Tool(
+        protocol.TOOL_EPIC_STOP,
+        "Остановить свой эпик: текущее задание останавливается, следующие задачи не стартуют.",
+        (Param("id", "string", "Номер эпика.", required=True),),
+        epic_stop,
     ),
     Tool(
         protocol.TOOL_TEST,

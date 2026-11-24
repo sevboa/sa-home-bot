@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -284,6 +284,85 @@ class HubEpics:
             ],
         }
 
+    async def task_totals(self, epic_ids: Collection[str]) -> dict[str, int]:
+        if not epic_ids:
+            return {}
+        marks = ", ".join("?" for _ in epic_ids)
+        cur = await self._db.conn.execute(
+            f"SELECT epic_id, COUNT(*) AS total FROM epic_tasks WHERE epic_id IN ({marks})"
+            " GROUP BY epic_id",
+            tuple(epic_ids),
+        )
+        return {row["epic_id"]: row["total"] for row in await cur.fetchall()}
+
+    async def active_summaries(self) -> list[dict[str, Any]]:
+        cur = await self._db.conn.execute(
+            "SELECT id FROM epics WHERE status IN (?, ?) ORDER BY created",
+            (protocol.EPIC_RUNNING, protocol.EPIC_WAITING_OWNER),
+        )
+        summaries = []
+        for row in await cur.fetchall():
+            epic = await self._load(row["id"])
+            tasks = await self._tasks(epic.id)
+            current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+            summaries.append(
+                {
+                    protocol.FIELD_ID: epic.id,
+                    protocol.FIELD_TITLE: tasks[0].title if tasks else "",
+                    "project": epic.project,
+                    protocol.FIELD_STATUS: epic.status,
+                    protocol.FIELD_QUESTION: epic.question,
+                    "done": sum(1 for t in tasks if t.outcome == OUTCOME_DONE),
+                    "total": len(tasks),
+                    "current_title": current.title if current else "",
+                    "current_job": current.job_id if current else None,
+                }
+            )
+        return summaries
+
+    async def resume(self, epic_id: str) -> dict[str, Any]:
+        async with self._lock:
+            epic = await self._load(epic_id)
+            if epic.status == protocol.EPIC_DONE:
+                raise HubError(f"эпик {epic_id!r} уже завершён")
+            tasks = await self._tasks(epic_id)
+            current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+            if current is not None and current.job_id is not None:
+                job = await self._queue.get_job(current.job_id)
+                if job.status in (protocol.STATUS_FAILED, protocol.STATUS_STOPPED):
+                    await self._queue.post_from_client(
+                        job.client,
+                        job.id,
+                        protocol.MSG_RESUME,
+                        {protocol.PAYLOAD_TEXT: "Продолжение по слову владельца."},
+                        observe=False,
+                    )
+                await self._update_task(epic_id, current.idx, outcome="", marked=None, failures=0)
+            await self._set_epic(epic_id, protocol.EPIC_RUNNING)
+            await self._advance(epic_id)
+            status = (await self._load(epic_id)).status
+            return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: status}
+
+    async def stop(self, epic_id: str) -> dict[str, Any]:
+        async with self._lock:
+            epic = await self._load(epic_id)
+            if epic.status == protocol.EPIC_DONE:
+                raise HubError(f"эпик {epic_id!r} уже завершён")
+            await self._set_epic(epic_id, protocol.EPIC_STOPPED)
+            tasks = await self._tasks(epic_id)
+            current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+            if current is not None and current.job_id is not None:
+                job = await self._queue.get_job(current.job_id)
+                if job.status in (
+                    protocol.STATUS_QUEUED,
+                    protocol.STATUS_RUNNING,
+                    protocol.STATUS_WAITING_OWNER,
+                ):
+                    await self._queue.post_from_client(
+                        job.client, job.id, protocol.MSG_STOP, observe=False
+                    )
+            return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: protocol.EPIC_STOPPED}
+
     async def sync(self, job_id: str) -> None:
         cur = await self._db.conn.execute(
             "SELECT epic_id FROM epic_tasks WHERE job_id = ?", (job_id,)
@@ -296,7 +375,8 @@ class HubEpics:
 
     async def resume_all(self) -> None:
         cur = await self._db.conn.execute(
-            "SELECT id FROM epics WHERE status != ?", (protocol.EPIC_DONE,)
+            "SELECT id FROM epics WHERE status NOT IN (?, ?)",
+            (protocol.EPIC_DONE, protocol.EPIC_STOPPED),
         )
         async with self._lock:
             for row in await cur.fetchall():
@@ -359,6 +439,8 @@ class HubEpics:
                 return
             tasks = await self._tasks(epic_id)
             current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+            if epic.status == protocol.EPIC_STOPPED:
+                return
             if current is None:
                 await self._set_epic(epic_id, protocol.EPIC_DONE, finished=utc_now().isoformat())
                 return

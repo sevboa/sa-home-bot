@@ -37,6 +37,8 @@ TOOL_NAMES = {
     protocol.TOOL_REVIEWS,
     protocol.TOOL_EPIC_SUBMIT,
     protocol.TOOL_EPIC,
+    protocol.TOOL_EPIC_RESUME,
+    protocol.TOOL_EPIC_STOP,
 }
 
 
