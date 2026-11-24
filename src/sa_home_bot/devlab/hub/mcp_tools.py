@@ -161,6 +161,19 @@ async def submit(
     }
 
 
+async def epic_submit(
+    ctx: Context, project: str, base_branch: str, tasks: list[dict[str, Any]]
+) -> Any:
+    view = await ctx.store.epics.submit(ctx.client, project, base_branch, tasks)
+    models = sorted({t["model"] for t in tasks if isinstance(t.get("model"), str)})
+    warnings = [w for name in models for w in await model_warnings(ctx, name)]
+    return {"epic": view, "warnings": warnings}
+
+
+async def epic(ctx: Context, id: str) -> Any:
+    return await ctx.store.epics.view(ctx.client, id)
+
+
 async def test_outcome(ctx: Context, job: Any) -> Any:
     if job.status == protocol.STATUS_DONE:
         message = await ctx.store.queue.last_message(job.id, protocol.MSG_TEST_DONE)
@@ -371,6 +384,39 @@ TOOLS: tuple[Tool, ...] = (
             ),
         ),
         submit,
+    ),
+    Tool(
+        protocol.TOOL_EPIC_SUBMIT,
+        "Поставить эпик: план из задач, которые идут строго по очереди в ветке epic/<id>"
+        " от base_branch. Каждое done вливается в ветку эпика, следующее берёт её новую голову."
+        " План сначала проверяется кодом (длина задач, граф depends_on, paths, уникальные"
+        " тест-файлы); отказ перечисляет причины. Провал задачи останавливает эпик: он ждёт"
+        " владельца, вопрос приходит в ящик (epic_waiting).",
+        (
+            Param("project", "string", "Имя зарегистрированного проекта.", required=True),
+            Param(
+                "base_branch",
+                "string",
+                "Уже запушенная базовая ветка: base/<имя>.",
+                required=True,
+            ),
+            Param(
+                "tasks",
+                "array",
+                "Задачи по порядку: объекты {title, task, model, profile, paths, depends_on};"
+                " paths — непустой список путей, depends_on — индексы прежних задач с нуля.",
+                required=True,
+                items={"type": "object"},
+            ),
+        ),
+        epic_submit,
+    ),
+    Tool(
+        protocol.TOOL_EPIC,
+        "Состояние своего эпика: статус, вопрос владельцу, текущая задача и отметки по каждой"
+        " (задание, итог, коммит, время).",
+        (Param("id", "string", "Номер эпика.", required=True),),
+        epic,
     ),
     Tool(
         protocol.TOOL_TEST,

@@ -105,6 +105,7 @@ async def run_hub(settings: Settings) -> None:
     host = cfg.bind_host or await tailscale_address()
     store = HubStore(cfg.data_dir, cfg.bench_windows)
     await store.open()
+    await store.epics.resume_all()
     wake_db = Database(cfg.data_dir / WAKE_DB_NAME)
     await wake_db.open()
     await apply_migrations(wake_db)
