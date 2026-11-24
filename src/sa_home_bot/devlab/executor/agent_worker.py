@@ -522,6 +522,11 @@ class AgentWorker(WorkerLoops):
                 prompt_style=profile.prompt_style,
                 remote_style=REMOTE_R1 if is_glm(job.model) else profile.remote_style,
             )
+        spec = replace(
+            spec,
+            locked_paths=tuple(job.params.get(protocol.PARAM_EPIC_LOCKED) or ()),
+            skip_tests=tuple(job.params.get(protocol.PARAM_EPIC_SKIP_TESTS) or ()),
+        )
         role_text = self._role_text(profile_name, profile)
         intro_text, reminder_text = self._code_mode_overrides(profile_name, profile)
         await self._warn_closed_tracked(run, repo.base, spec)

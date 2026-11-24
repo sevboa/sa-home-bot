@@ -4,6 +4,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
+from typing import Protocol
 
 from sa_home_bot.devlab import protocol
 
@@ -28,6 +29,33 @@ def plan_test_files(paths: Collection[str]) -> list[str]:
         if pure.parts[:1] == (TESTS_DIR,) and fnmatchcase(pure.name, TEST_FILE_PATTERN):
             result.append(path)
     return result
+
+
+class Planned(Protocol):
+    @property
+    def profile(self) -> str: ...
+
+    @property
+    def paths(self) -> Sequence[str]: ...
+
+
+def later_test_files(tasks: Sequence[Planned], index: int) -> list[str]:
+    own = {path for task in tasks[: index + 1] for path in task.paths}
+    later = [path for task in tasks[index + 1 :] for path in plan_test_files(task.paths)]
+    return [path for path in dict.fromkeys(later) if path not in own]
+
+
+def tester_locked_files(tasks: Sequence[Planned], index: int) -> list[str]:
+    if tasks[index].profile == protocol.PROFILE_TESTER:
+        return []
+    own = set(tasks[index].paths)
+    earlier = [
+        path
+        for task in tasks[:index]
+        if task.profile == protocol.PROFILE_TESTER
+        for path in task.paths
+    ]
+    return [path for path in dict.fromkeys(earlier) if path not in own]
 
 
 def _label(index: int, task: PlanTask) -> str:

@@ -22,6 +22,8 @@ class AgentSpec:
     allowed_commands: tuple[str, ...] = ()
     forbidden_paths: tuple[str, ...] = ()
     secret_paths: tuple[str, ...] = ()
+    locked_paths: tuple[str, ...] = ()
+    skip_tests: tuple[str, ...] = ()
     diff_prefixes: tuple[str, ...] = ()
     write_prefixes: tuple[str, ...] = ()
     allow_no_changes: bool = False

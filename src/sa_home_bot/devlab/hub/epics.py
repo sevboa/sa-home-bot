@@ -13,7 +13,12 @@ import aiosqlite
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import repos
-from sa_home_bot.devlab.hub.epic_plan import PlanTask, check_plan
+from sa_home_bot.devlab.hub.epic_plan import (
+    PlanTask,
+    check_plan,
+    later_test_files,
+    tester_locked_files,
+)
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.queue import (
     JOB_ID_ALPHABET,
@@ -319,7 +324,7 @@ class HubEpics:
                 (*fields.values(), epic_id, idx),
             )
 
-    async def _enqueue(self, epic: Epic, task: EpicTask) -> None:
+    async def _enqueue(self, epic: Epic, task: EpicTask, tasks: Sequence[EpicTask]) -> None:
         async with self._db.transaction() as conn:
             job = await HubQueue._insert_agent_job(
                 conn,
@@ -335,6 +340,8 @@ class HubEpics:
                     protocol.PARAM_EPIC: epic.id,
                     protocol.PARAM_EPIC_INDEX: task.idx,
                     protocol.PARAM_PATHS: task.paths,
+                    protocol.PARAM_EPIC_SKIP_TESTS: later_test_files(tasks, task.idx),
+                    protocol.PARAM_EPIC_LOCKED: tester_locked_files(tasks, task.idx),
                 },
             )
             await conn.execute(
@@ -363,7 +370,7 @@ class HubEpics:
                 await self._set_epic(epic_id, protocol.EPIC_DONE, finished=utc_now().isoformat())
                 return
             if current.job_id is None:
-                await self._enqueue(epic, current)
+                await self._enqueue(epic, current, tasks)
                 return
             job = await self._queue.get_job(current.job_id)
             if job.status == protocol.STATUS_DONE:

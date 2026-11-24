@@ -91,7 +91,8 @@ class FinishGuard:
         try:
             async with self._heavy:
                 if spec.test_argv:
-                    result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)
+                    argv = [*spec.test_argv, *await self._skip_args()]
+                    result = await self._sandbox.exec(argv, spec.test_timeout_s)
                     if not result.ok and not await self._red_only_on_base(result):
                         failures.append(
                             "тесты не зелёные:\n"
@@ -102,6 +103,14 @@ class FinishGuard:
             if self._on_phase is not None:
                 self._on_phase(False)
         return failures
+
+    async def _skip_args(self) -> list[str]:
+        existing = [
+            path
+            for path in self._spec.skip_tests
+            if await self._sandbox.read_bytes(path) is not None
+        ]
+        return [f"--ignore={path}" for path in existing]
 
     async def _red_only_on_base(self, result: ExecResult) -> bool:
         if result.timed_out or result.exit_code != PYTEST_FAILED_EXIT:

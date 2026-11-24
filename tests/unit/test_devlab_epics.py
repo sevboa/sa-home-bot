@@ -321,3 +321,29 @@ async def test_unknown_base_branch_is_refused(store):
         await store.epics.submit(CLIENT, PROJECT, "base/nope", plan(1))
     with pytest.raises(HubError, match="базовая ветка"):
         await store.epics.submit(CLIENT, PROJECT, "master", plan(1))
+
+
+async def test_jobs_get_later_test_files_to_skip_and_tester_files_locked(store):
+    tasks = plan()
+    tasks[0]["profile"] = S.PROFILE_TESTER
+    tasks[2]["profile"] = S.PROFILE_TESTER
+    view = await submit(store, tasks)
+    seen = []
+    for i in range(3):
+        job = await claim(store)
+        seen.append(
+            (job.params[S.PARAM_EPIC_SKIP_TESTS], job.params[S.PARAM_EPIC_LOCKED])
+        )
+        await executor_finishes(store, job.id, name=f"f{i}.txt")
+    assert seen == [
+        (["tests/unit/test_m1.py", "tests/unit/test_m2.py"], []),
+        (["tests/unit/test_m2.py"], ["src/m0.py", "tests/unit/test_m0.py"]),
+        ([], []),
+    ]
+    assert view["tasks"][0]["profile"] == S.PROFILE_TESTER
+
+
+async def test_job_outside_epic_has_no_skip_or_locked(store):
+    job = await store.queue.submit(CLIENT, PROJECT, MODEL, "задача", base_branch=BASE)
+    assert S.PARAM_EPIC_SKIP_TESTS not in job.params
+    assert S.PARAM_EPIC_LOCKED not in job.params
