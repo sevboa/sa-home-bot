@@ -10,7 +10,6 @@ from sa_home_bot.bot.service_link import ServiceUnavailableError
 from sa_home_bot.domain.vpn_check import (
     OK as CHECK_OK,
 )
-from sa_home_bot.domain.vpn_link import LEVEL_DOWN, SCOPE_RUSSIA
 from sa_home_bot.proto.messages import (
     ERR_BAD_REQUEST,
     Address,
@@ -255,8 +254,7 @@ class SubscriptionLinksMixin:
     ) -> tuple[list[subs.SubEntry], list[subs.AwgSubEntry], list[subs.NodeInfo]]:
         if not self._cfg.sub_hide_blocked_from_russia:
             return entries, awg_entries, nodes
-        levels = (await self._net_scope_levels()).get(SCOPE_RUSSIA, {})
-        blocked = {server for server, level in levels.items() if level == LEVEL_DOWN}
+        blocked = await self._servers_unusable_from_russia()
         if not blocked:
             return entries, awg_entries, nodes
         kept = [e for e in entries if e.node not in blocked]
