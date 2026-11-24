@@ -22,6 +22,14 @@ def refused_status_of(text: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def readable_error(text: str) -> str:
+    try:
+        value = json.loads(text).get(protocol.FIELD_ERROR)
+    except (ValueError, AttributeError):
+        return text
+    return value if isinstance(value, str) else text
+
+
 class HubRequestError(Exception):
     def __init__(
         self, message: str, status: int | None = None, refused_status: str | None = None
@@ -44,7 +52,7 @@ class ExecutorHub(HubHttp):
                 text = await resp.text()
                 if resp.status != 200:
                     raise HubRequestError(
-                        f"{path}: HTTP {resp.status} {text[:ERROR_SNIPPET_CHARS]}",
+                        f"{path}: HTTP {resp.status} {readable_error(text)[:ERROR_SNIPPET_CHARS]}",
                         resp.status,
                         refused_status_of(text),
                     )

@@ -46,7 +46,7 @@ from sa_home_bot.devlab.executor.spec import (
     load_project_spec,
     read_external_rule,
 )
-from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings
+from sa_home_bot.devlab.executor.worker import WorkerLoops, WorkerSettings, refused_as_final
 from sa_home_bot.devlab.hub.queue import Job, Message
 from sa_home_bot.utils.files import load_model, save_model
 
@@ -288,6 +288,15 @@ class AgentWorker(WorkerLoops):
                     log.warning(
                         "Сообщение %s по заданию %s отвергнуто: %s", item.kind, item.job_id, text
                     )
+                    if (
+                        item.job_id == self._current
+                        and refused_as_final(exc)
+                        and item.job_id not in self._stopped
+                    ):
+                        log.warning("Задание %s закрыто на хабе, снимаю", item.job_id)
+                        self._stopped.add(item.job_id)
+                        if self._task is not None:
+                            self._task.cancel()
                 self._outbox.items.pop(0)
                 self._save_outbox()
 

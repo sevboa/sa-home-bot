@@ -36,7 +36,7 @@ JOBS_DIR = "jobs"
 PYTEST_WORD = "pytest"
 JUNIT_FLAG = f"--junitxml={JUNIT_FILE}"
 FAILED_TEXT_CHARS = 1000
-REFUSED_STATUS_RE = re.compile(r"переход (\w+) → ")
+REFUSED_STATUS_RE = re.compile(r"переход (\w+) → |в статусе (\w+) невозможен")
 ORPHAN_FAILED_TEXT = "исполнитель перезапущен во время прогона"
 
 
@@ -44,7 +44,8 @@ def refused_as_final(exc: HubRequestError) -> bool:
     status = exc.refused_status
     if status is None:
         match = REFUSED_STATUS_RE.search(str(exc))
-        status = match.group(1) if match else None
+        if match:
+            status = match.group(1) or match.group(2)
     return status in protocol.TERMINAL_STATUSES
 
 
