@@ -110,6 +110,16 @@ def _net_reports(raw: object) -> dict[str, bool]:
     return reports
 
 
+def _net_pings(raw: object) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(server): probe["ping"]
+        for server, probe in raw.items()
+        if isinstance(probe, dict) and isinstance(probe.get("ping"), bool)
+    }
+
+
 def _settle_run(run: dict[str, Any], excluded: set[str]) -> None:
     items = [item for item in run["items"] if item[0] not in excluded] or run["items"]
     run["total"] = len(items)
@@ -190,6 +200,7 @@ class ChecksMixin:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = utc_now()
         net_reports = _net_reports(args.get("net"))
+        net_pings = _net_pings(args.get("net"))
         runs: dict[tuple[str, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
@@ -282,16 +293,17 @@ class ChecksMixin:
             for server, new in after_net[scope].items():
                 old = before_net[scope].get(server)
                 if old is not None and old != new:
-                    outages.append(
-                        {
-                            "layer": LAYER_NET,
-                            "scope": scope,
-                            "server": server,
-                            "from": old,
-                            "to": new,
-                            "scopes": effective,
-                        }
-                    )
+                    data = {
+                        "layer": LAYER_NET,
+                        "scope": scope,
+                        "server": server,
+                        "from": old,
+                        "to": new,
+                        "scopes": effective,
+                    }
+                    if new == LEVEL_DOWN and server in net_pings:
+                        data["ping"] = net_pings[server]
+                    outages.append(data)
             for server, new in after[scope].items():
                 old = before[scope].get(server)
                 if old is None or old == new or LEVEL_DOWN not in (old, new):

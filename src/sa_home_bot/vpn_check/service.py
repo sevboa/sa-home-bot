@@ -66,6 +66,9 @@ _REALITY_STOP_GRACE_S = 5.0
 
 _NET_CONNECT_TIMEOUT_S = 5.0
 _NET_TOTAL_TIMEOUT_S = 8.0
+_NET_PING_COUNT = 2
+_NET_PING_WAIT_S = 2
+_NET_PING_TIMEOUT_S = _NET_PING_COUNT * _NET_PING_WAIT_S + 3.0
 
 
 async def _run(*cmd: str, timeout: float) -> tuple[int, str, str]:
@@ -301,15 +304,37 @@ class VpnCheckService:
                 connect_s = 0.0
             if connect_s > 0:
                 return {"ok": True, "ms": int(connect_s * 1000), "error": None}
+            ping = await self._net_ping(slot.netns, ip_path, target.host)
             log.warning(
-                "vpn_check: %s не отвечает по сети (%s:%s, curl %s)",
+                "vpn_check: %s не отвечает по сети (%s:%s, curl %s, ping %s)",
                 slot.server,
                 target.host,
                 target.port,
                 code,
+                ping,
             )
-            return {"ok": False, "ms": None, "error": f"нет TCP до {target.host}:{target.port}"}
+            error = f"нет TCP до {target.host}:{target.port}"
+            if ping is not None:
+                error += ", ping есть — режут TCP" if ping else ", ping нет — IP закрыт целиком"
+            return {"ok": False, "ms": None, "error": error, "ping": ping}
         return None
+
+    async def _net_ping(self, netns: str, ip_path: str, host: str) -> bool | None:
+        cmd = ["sudo", "-n", ip_path, "netns", "exec", netns, "ping"]
+        if ":" in host:
+            cmd.append("-6")
+        code, _out, err = await _run(
+            *cmd,
+            "-c",
+            str(_NET_PING_COUNT),
+            "-W",
+            str(_NET_PING_WAIT_S),
+            host,
+            timeout=_NET_PING_TIMEOUT_S,
+        )
+        if looks_like_sudo_message(err):
+            return None
+        return code == 0
 
     async def _report_to_vpn(
         self, action: str, results: list[dict[str, Any]], extra: dict[str, Any] | None = None
