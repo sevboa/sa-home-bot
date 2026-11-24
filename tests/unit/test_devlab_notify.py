@@ -235,6 +235,46 @@ def test_notice_keyboard_by_kind(kind, codes):
     assert data == [f"dl:{code}:j1" for code in codes]
 
 
+def epic_message(seq=6, epic="ab12cd"):
+    return message(
+        seq,
+        protocol.MSG_EPIC_WAITING,
+        payload={protocol.PAYLOAD_TEXT: "Эпик встал <тут>", protocol.PARAM_EPIC: epic},
+        status=protocol.STATUS_FAILED,
+    )
+
+
+def test_epic_notice_keyboard_resume_and_stop_by_epic_id():
+    keyboard = devlab_notify.notice_keyboard(protocol.MSG_EPIC_WAITING, "j1", "ab12cd")
+    rows = [(b.text, b.callback_data) for row in keyboard.inline_keyboard for b in row]
+    assert rows == [
+        (ai_lines.DEVLAB_BTN_EPIC_RESUME, "dl:epr:ab12cd"),
+        (ai_lines.DEVLAB_BTN_EPIC_STOP, "dl:eps:ab12cd"),
+    ]
+    assert devlab_notify.notice_keyboard(protocol.MSG_EPIC_WAITING, "j1") is None
+
+
+async def test_epic_waiting_is_delivered_with_epic_buttons(store):
+    await store.set_state(devlab_notify.CURSOR_KEY, "5")
+    link = FakeNodeLink(results=inbox([epic_message()]))
+    notifier_obj, notifier = make(store, link)
+    assert await notifier_obj.tick() == 1
+    text = notifier.sent[0][1]
+    assert text.startswith(ai_lines.DEVLAB_EPIC_WAITING_TEXT)
+    assert "Эпик: ab12cd" in text
+    assert "Эпик встал &lt;тут&gt;" in text
+    data = [b.callback_data for row in notifier.markups[0].inline_keyboard for b in row]
+    assert data == ["dl:epr:ab12cd", "dl:eps:ab12cd"]
+
+
+async def test_epic_waiting_without_epic_id_is_skipped(store):
+    await store.set_state(devlab_notify.CURSOR_KEY, "5")
+    link = FakeNodeLink(results=inbox([epic_message(epic="")]))
+    notifier_obj, notifier = make(store, link)
+    assert await notifier_obj.tick() == 0
+    assert notifier.sent == []
+
+
 async def test_question_sent_with_buttons(store):
     await store.set_state(devlab_notify.CURSOR_KEY, "5")
     link = FakeNodeLink(results=inbox([message(6)]))

@@ -68,7 +68,15 @@ DEFAULT_FILES = {"src/app.py": "VALUE = 1\n"}
 
 
 def make_loop(
-    tmp_path, model, spec=None, limits=None, files=None, on_change=None, trace=None, clock=None
+    tmp_path,
+    model,
+    spec=None,
+    limits=None,
+    files=None,
+    on_change=None,
+    trace=None,
+    clock=None,
+    on_fold=None,
 ):
     for name, text in (files or DEFAULT_FILES).items():
         target = tmp_path / name
@@ -83,6 +91,7 @@ def make_loop(
         limits,
         on_change=on_change,
         trace=trace,
+        on_fold=on_fold,
         **({"clock": clock} if clock else {}),
     )
     return loop, sandbox
@@ -282,6 +291,35 @@ async def test_old_tool_outputs_are_folded(tmp_path):
     assert tool_texts[0].startswith(FOLDED_OUTPUT_PREFIX)
     assert not tool_texts[-2].startswith(FOLDED_OUTPUT_PREFIX)
     assert len(model.seen[-1]) > 8
+
+
+async def test_fold_callback_fires_only_when_history_shrinks(tmp_path):
+    spec = AgentSpec(
+        test_argv=GREEN_TEST,
+        diff_prefixes=("src/",),
+        allowed_commands=(sys.executable,),
+        output_chars=5000,
+    )
+    command = f"{sys.executable} -c \"print('x'*5000)\""
+    runs = [tool_reply(TOOL_RUN_COMMAND, f"r{i}", command=f"{command} {i}") for i in range(4)]
+    model = ScriptedChatModel(*runs, edit("e"), tool_reply(TOOL_FINISH, "f", summary="ok"))
+    limits = AgentLimits(context_tokens=7000, reply_tokens=500, keep_recent=2)
+    folds = []
+    loop, _ = make_loop(
+        tmp_path, model, spec=spec, limits=limits, on_fold=lambda: folds.append(1)
+    )
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.FINISHED
+    assert folds
+
+    quiet = []
+    plain_loop, _ = make_loop(
+        tmp_path / "q",
+        ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, summary="ok")),
+        on_fold=lambda: quiet.append(1),
+    )
+    await plain_loop.run("s", "t")
+    assert quiet == []
 
 
 async def test_large_write_arguments_are_folded(tmp_path):

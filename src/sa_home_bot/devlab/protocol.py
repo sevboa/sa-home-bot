@@ -17,6 +17,7 @@ ACTION_OWNER_JOB = "owner_job"
 ACTION_OWNER_POST = "owner_post"
 ACTION_OWNER_JOBS = "owner_jobs"
 ACTION_OWNER_TASK = "owner_task"
+ACTION_OWNER_EPIC_POST = "owner_epic_post"
 
 ROLE_CLIENT = "client"
 ROLE_EXECUTOR = "executor"
@@ -191,6 +192,19 @@ FIELD_SEGMENT_TOKENS = "segment_tokens"
 FIELD_REASONING_TOKENS = "reasoning_tokens"
 FIELD_USAGE_KNOWN = "usage_known"
 FIELD_PHASE = "phase"
+FIELD_CONTEXT_TOKENS = "context_tokens"
+FIELD_CONTEXT_LIMIT = "context_limit"
+FIELD_FOLDS = "folds"
+FIELD_EPICS = "epics"
+FIELD_EPIC_TOTAL = "epic_total"
+LIVE_VIEW_FIELDS = (
+    FIELD_MODEL_STEPS,
+    FIELD_SEGMENT_TOKENS,
+    FIELD_REASONING_TOKENS,
+    FIELD_CONTEXT_TOKENS,
+    FIELD_CONTEXT_LIMIT,
+    FIELD_FOLDS,
+)
 PHASE_FINISH_TESTS = "finish_tests"
 FIELD_LIMITS = "limits"
 FIELD_OK = "ok"
@@ -244,6 +258,7 @@ PARAM_EPIC_LOCKED = "epic_locked"
 PROFILE_TESTER = "tester"
 EPIC_RUNNING = "running"
 EPIC_WAITING_OWNER = "waiting_owner"
+EPIC_STOPPED = "stopped"
 EPIC_DONE = "done"
 EPIC_MAX_TASK_FAILURES = 2
 EPIC_MAX_TASKS = 40
@@ -291,6 +306,8 @@ TOOL_REVIEW = "devlab_review"
 TOOL_REVIEWS = "devlab_reviews"
 TOOL_EPIC_SUBMIT = "devlab_epic_submit"
 TOOL_EPIC = "devlab_epic"
+TOOL_EPIC_RESUME = "devlab_epic_resume"
+TOOL_EPIC_STOP = "devlab_epic_stop"
 
 RESOURCE_TASK_TEMPLATE = "devlab://task-template"
 RESOURCE_USAGE = "devlab://usage"

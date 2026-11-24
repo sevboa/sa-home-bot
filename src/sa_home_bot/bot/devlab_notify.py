@@ -34,23 +34,30 @@ CB_CANCEL_STALLED = "cnlw"
 CB_STOP_CONFIRM = "stopc"
 CB_CANCEL = "cnl"
 CB_RESUME = "res"
+CB_EPIC_RESUME = "epr"
+CB_EPIC_STOP = "eps"
+CB_EPIC_STOP_CONFIRM = "epsc"
+CB_EPIC_CANCEL = "epc"
 DEDUP_KEY = "devlab:{seq}"
 NOTIFIED_KINDS = (
     protocol.MSG_QUESTION,
     protocol.MSG_DONE,
     protocol.MSG_FAILED,
     protocol.MSG_STALLED,
+    protocol.MSG_EPIC_WAITING,
 )
 LEADS = {
     protocol.MSG_QUESTION: ai_lines.DEVLAB_QUESTION_TEXT,
     protocol.MSG_DONE: ai_lines.DEVLAB_DONE_TEXT,
     protocol.MSG_FAILED: ai_lines.DEVLAB_FAILED_TEXT,
     protocol.MSG_STALLED: ai_lines.DEVLAB_STALLED_TEXT,
+    protocol.MSG_EPIC_WAITING: ai_lines.DEVLAB_EPIC_WAITING_TEXT,
 }
 BODY_FIELDS = {
     protocol.MSG_QUESTION: protocol.PAYLOAD_TEXT,
     protocol.MSG_DONE: protocol.PAYLOAD_SUMMARY,
     protocol.MSG_FAILED: protocol.PAYLOAD_TEXT,
+    protocol.MSG_EPIC_WAITING: protocol.PAYLOAD_TEXT,
 }
 
 
@@ -67,10 +74,21 @@ def question_keyboard(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def stop_confirm_keyboard(job_id: str, cancel: str = CB_CANCEL) -> InlineKeyboardMarkup:
+def epic_keyboard(epic_id: str) -> InlineKeyboardMarkup:
     return markup(
         [
-            button(ai_lines.DEVLAB_BTN_STOP_CONFIRM, pack(CB_PREFIX, CB_STOP_CONFIRM, job_id)),
+            button(ai_lines.DEVLAB_BTN_EPIC_RESUME, pack(CB_PREFIX, CB_EPIC_RESUME, epic_id)),
+            button(ai_lines.DEVLAB_BTN_EPIC_STOP, pack(CB_PREFIX, CB_EPIC_STOP, epic_id)),
+        ]
+    )
+
+
+def stop_confirm_keyboard(
+    job_id: str, cancel: str = CB_CANCEL, confirm: str = CB_STOP_CONFIRM
+) -> InlineKeyboardMarkup:
+    return markup(
+        [
+            button(ai_lines.DEVLAB_BTN_STOP_CONFIRM, pack(CB_PREFIX, confirm, job_id)),
             button(ai_lines.DEVLAB_BTN_CANCEL, pack(CB_PREFIX, cancel, job_id)),
         ]
     )
@@ -84,7 +102,9 @@ def failed_keyboard(job_id: str) -> InlineKeyboardMarkup:
     return markup([button(ai_lines.DEVLAB_BTN_RESUME, pack(CB_PREFIX, CB_RESUME, job_id))])
 
 
-def notice_keyboard(kind: str, job_id: str) -> InlineKeyboardMarkup | None:
+def notice_keyboard(kind: str, job_id: str, epic_id: str = "") -> InlineKeyboardMarkup | None:
+    if kind == protocol.MSG_EPIC_WAITING:
+        return epic_keyboard(epic_id) if epic_id else None
     if kind == protocol.MSG_QUESTION:
         return question_keyboard(job_id)
     if kind == protocol.MSG_FAILED:
@@ -106,6 +126,8 @@ def wants_notice(message: dict[str, Any]) -> bool:
         return status == protocol.STATUS_WAITING_OWNER
     if kind == protocol.MSG_STALLED:
         return status == protocol.STATUS_RUNNING
+    if kind == protocol.MSG_EPIC_WAITING:
+        return bool((message.get(protocol.FIELD_PAYLOAD) or {}).get(protocol.PARAM_EPIC))
     return True
 
 
@@ -125,6 +147,8 @@ def facts_block(message: dict[str, Any], max_chars: int) -> str:
     lines.append(f"Токены: {tokens}, ${cost:.4f}")
     lines.append(f"Ветка: {html.escape(protocol.AGENT_BRANCH_PREFIX + str(job_id))}")
     payload = message.get(protocol.FIELD_PAYLOAD) or {}
+    if kind == protocol.MSG_EPIC_WAITING:
+        lines.append(f"Эпик: {html.escape(str(payload.get(protocol.PARAM_EPIC, '')))}")
     if kind == protocol.MSG_STALLED:
         lines.append(f"Без вестей: {int(payload.get(protocol.PAYLOAD_SILENT_MIN) or 0)} мин")
         alive = "на связи" if payload.get(protocol.PAYLOAD_EXECUTOR_ALIVE) else "не отвечает"
@@ -220,7 +244,10 @@ class DevlabNotifier:
         text = compose_text(message, self._config.devlab_notify.facts_max_chars)
         job_id = str(message[protocol.FIELD_JOB][protocol.FIELD_ID])
         seq = message[protocol.FIELD_SEQ]
-        keyboard = notice_keyboard(message[protocol.FIELD_KIND], job_id)
+        payload = message.get(protocol.FIELD_PAYLOAD) or {}
+        keyboard = notice_keyboard(
+            message[protocol.FIELD_KIND], job_id, str(payload.get(protocol.PARAM_EPIC) or "")
+        )
         for sub in subs:
             await self._notifier.send_direct(
                 sub.chat_id,

@@ -538,6 +538,29 @@ def test_job_spend_live_counts_total_segment_and_reasoning():
     assert live[protocol.FIELD_REASONING_TOKENS] == 3
 
 
+def test_job_spend_live_reports_context_window_and_folds():
+    spend = JobSpend(SpendState(), lambda state: None)
+    assert protocol.FIELD_CONTEXT_TOKENS not in spend.live()
+    spend.set_context_limit(118000)
+    spend.record(ModelReply("", tokens_in=30000, tokens_out=5))
+    spend.note_fold()
+    spend.record(ModelReply("", tokens_in=46000, tokens_out=5))
+    spend.record(ModelReply(""))
+    spend.note_fold()
+    live = spend.live()
+    assert live[protocol.FIELD_CONTEXT_TOKENS] == 46000
+    assert live[protocol.FIELD_CONTEXT_LIMIT] == 118000
+    assert live[protocol.FIELD_FOLDS] == 2
+
+
+def test_job_spend_live_without_limit_has_no_context_limit():
+    spend = JobSpend(SpendState(), lambda state: None)
+    spend.record(ModelReply("", tokens_in=10, tokens_out=5))
+    live = spend.live()
+    assert live[protocol.FIELD_FOLDS] == 0
+    assert protocol.FIELD_CONTEXT_LIMIT not in live
+
+
 def test_job_spend_live_without_usage_is_unknown_and_has_no_reasoning():
     spend = JobSpend(SpendState(), lambda state: None)
     spend.record(ModelReply(""))

@@ -611,3 +611,84 @@ def test_card_marks_unknown_usage() -> None:
     job[protocol.FIELD_USAGE_KNOWN] = False
     msg, _ = render_card(job, 0, NOW)
     assert "н/д" in msg.html
+
+
+def _epic(**fields: Any) -> dict[str, Any]:
+    return {
+        protocol.FIELD_ID: "ab12cd",
+        protocol.FIELD_TITLE: "Первая <задача>",
+        protocol.FIELD_STATUS: protocol.EPIC_RUNNING,
+        "done": 2,
+        "total": 5,
+        "current_title": "Третья",
+        **fields,
+    }
+
+
+def test_page_html_shows_epic_line_on_first_page_only() -> None:
+    jobs = [_base_job(1)]
+    first = page_html(jobs, 0, 1, PAGE_SIZE, NOW, epics=[_epic()])
+    assert "🧩 Эпики" in first
+    assert "<code>ab12cd</code> · Первая &lt;задача&gt; · 2/5 · Третья · идёт" in first
+    later = page_html(jobs, 20, 21, PAGE_SIZE, NOW, epics=[_epic()])
+    assert "🧩" not in later
+
+
+def test_page_html_epic_waiting_owner_state() -> None:
+    html = page_html([], 0, 0, PAGE_SIZE, NOW, epics=[_epic(status=protocol.EPIC_WAITING_OWNER)])
+    assert "❓ ждёт владельца" in html
+    assert "Активных заданий нет" not in html
+
+
+def test_page_html_empty_without_epics_keeps_stub() -> None:
+    assert page_html([], 0, 0, PAGE_SIZE, NOW, epics=[]) == "<p>Активных заданий нет.</p>"
+
+
+def test_render_page_passes_epics() -> None:
+    msg, _, _ = render_page([_base_job(1)], 0, 1, NOW, epics=[_epic()])
+    assert "🧩 Эпики" in msg.html
+
+
+def _epic_job() -> dict[str, Any]:
+    job = _base_job(1)
+    job[protocol.FIELD_PARAMS].update({protocol.PARAM_EPIC: "ab12cd", protocol.PARAM_EPIC_INDEX: 2})
+    job[protocol.FIELD_EPIC_TOTAL] = 5
+    return job
+
+
+def test_job_line_and_card_show_epic_position() -> None:
+    assert "· эпик 3/5" in job_line(1, _epic_job(), 0, NOW)
+    msg, _ = render_card(_epic_job(), 0, NOW)
+    assert "Эпик: ab12cd, задача 3 из 5" in msg.html
+
+
+def test_job_without_epic_total_has_no_epic_mark() -> None:
+    job = _epic_job()
+    del job[protocol.FIELD_EPIC_TOTAL]
+    assert "эпик" not in job_line(1, job, 0, NOW)
+    assert "Эпик:" not in render_card(job, 0, NOW)[0].html
+
+
+def test_card_shows_context_window_and_folds() -> None:
+    job = _base_job(1)
+    job[protocol.FIELD_CONTEXT_TOKENS] = 46200
+    job[protocol.FIELD_CONTEXT_LIMIT] = 118000
+    job[protocol.FIELD_FOLDS] = 3
+    html = render_card(job, 0, NOW)[0].html
+    assert "Контекст: окно 46/118 тыс." in html
+    assert "Свёрток истории: 3" in html
+
+
+def test_card_context_without_limit_and_zero_folds() -> None:
+    job = _base_job(1)
+    job[protocol.FIELD_CONTEXT_TOKENS] = 46200
+    job[protocol.FIELD_FOLDS] = 0
+    html = render_card(job, 0, NOW)[0].html
+    assert "Контекст: окно 46 тыс." in html
+    assert "Свёрток истории: 0" in html
+
+
+def test_card_hides_unknown_context() -> None:
+    html = render_card(_base_job(1), 0, NOW)[0].html
+    assert "Контекст" not in html
+    assert "Свёрток" not in html
