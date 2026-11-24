@@ -33,6 +33,7 @@
 | `answer` | к исполнителю | waiting_owner → running |
 | `resume` | к исполнителю | → queued; `payload.model` меняет модель задания, `payload.text` кладётся в `params.remarks` задания (прошлые замечания заменяются); `params.attempts` обнуляется (ручной перезапуск даёт полный набор возвратов) |
 | `stop` | к исполнителю | → stopped |
+| `epic_waiting` | к клиенту | кладёт хаб: эпик остановился и ждёт владельца, `payload.text` — вопрос, `payload.epic` — id; статус задания не меняет ([epic.md](epic.md), 2026-11-24) |
 | `release` | к исполнителю | только задание в `waiting_owner`, статус не меняется: исполнитель перестаёт держать mycraft бодрым, не дожидаясь `owner_wait_s` (60.6) |
 
 - `claim(executor, models, kinds)` атомарно берёт queued-задание: сначала `test`, затем приоритет по

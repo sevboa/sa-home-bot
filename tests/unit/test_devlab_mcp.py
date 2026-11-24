@@ -35,6 +35,8 @@ TOOL_NAMES = {
     protocol.TOOL_RELEASE,
     protocol.TOOL_REVIEW,
     protocol.TOOL_REVIEWS,
+    protocol.TOOL_EPIC_SUBMIT,
+    protocol.TOOL_EPIC,
 }
 
 
@@ -730,3 +732,26 @@ async def test_devlab_reviews_filter_by_model_and_since(client, store, alice):
     is_error, reviews_list = await call(client, alice, protocol.TOOL_REVIEWS, since=future)
     assert not is_error
     assert reviews_list["reviews"] == []
+
+
+async def test_epic_tools_submit_refuse_and_read(client, store, alice, bob):
+    await register(client, store, alice)
+    task = {"title": "t", "task": "# t", "model": MODEL, "paths": ["src/a.py"]}
+    refused, text = await call(
+        client, alice, protocol.TOOL_EPIC_SUBMIT, project=PROJECT, base_branch=BASE,
+        tasks=[{**task, "paths": []}],
+    )
+    assert refused
+    assert "paths пуст" in text
+    ok, created = await call(
+        client, alice, protocol.TOOL_EPIC_SUBMIT, project=PROJECT, base_branch=BASE, tasks=[task]
+    )
+    assert not ok
+    epic_id = created["epic"]["id"]
+    assert created["epic"]["branch"] == protocol.EPIC_BRANCH_PREFIX + epic_id
+    assert created["warnings"]
+    ok, seen = await call(client, alice, protocol.TOOL_EPIC, id=epic_id)
+    assert not ok
+    assert seen["tasks"][0]["job_id"]
+    foreign, _ = await call(client, bob, protocol.TOOL_EPIC, id=epic_id)
+    assert foreign

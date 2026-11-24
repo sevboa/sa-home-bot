@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import secrets
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
@@ -19,6 +20,8 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import joblogs
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
+
+log = logging.getLogger(__name__)
 
 READY_SQL = (
     "NOT EXISTS (SELECT 1 FROM json_each(jobs.params, '$.depends_on') d "
@@ -183,6 +186,8 @@ def _valid_base_branch(name: str) -> bool:
         tail = name[len(protocol.BASE_BRANCH_PREFIX) :]
     elif name.startswith(protocol.AGENT_BRANCH_PREFIX):
         tail = name[len(protocol.AGENT_BRANCH_PREFIX) :]
+    elif name.startswith(protocol.EPIC_BRANCH_PREFIX):
+        tail = name[len(protocol.EPIC_BRANCH_PREFIX) :]
     else:
         return False
     return bool(tail) and BRANCH_TAIL_RE.match(tail) is not None and ".." not in name
@@ -247,6 +252,7 @@ def in_windows(windows: Collection[str], moment: time) -> bool:
 
 class HubQueue:
     def __init__(self, db: Database, logs_root: Path, bench_windows: Collection[str] = ()) -> None:
+        self.observers: list[Callable[[str], Awaitable[None]]] = []
         self._db = db
         self.logs_root = logs_root
         self._bench_windows = list(bench_windows)
@@ -784,6 +790,21 @@ class HubQueue:
             )
             message = await self._post(conn, job_id, protocol.DIRECTION_TO_CLIENT, kind, payload)
         self._wake_waiters(job_id)
+        await self._observe(job_id)
+        return message
+
+    async def _observe(self, job_id: str) -> None:
+        for observer in self.observers:
+            try:
+                await observer(job_id)
+            except Exception:
+                log.exception("Наблюдатель задания %s упал", job_id)
+
+    async def notify_client(self, job_id: str, kind: str, payload: dict[str, Any]) -> Message:
+        async with self._tx() as conn:
+            await self._load(conn, job_id)
+            message = await self._post(conn, job_id, protocol.DIRECTION_TO_CLIENT, kind, payload)
+        self._wake_waiters(job_id)
         return message
 
     async def _requeue(
@@ -816,7 +837,12 @@ class HubQueue:
         return protocol.MSG_REQUEUE, payload
 
     async def post_from_client(
-        self, client: str, job_id: str, kind: str, payload: dict[str, Any] | None = None
+        self,
+        client: str,
+        job_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        observe: bool = True,
     ) -> Message:
         payload = payload or {}
         if kind not in protocol.CLIENT_MESSAGES:
@@ -865,6 +891,8 @@ class HubQueue:
                 raise HubError(f"release только для задания, ждущего ответа, сейчас {job.status}")
             message = await self._post(conn, job_id, protocol.DIRECTION_TO_EXECUTOR, kind, payload)
         self._wake_waiters(job_id)
+        if observe:
+            await self._observe(job_id)
         return message
 
     async def add_review(
