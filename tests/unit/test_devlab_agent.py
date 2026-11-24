@@ -333,6 +333,17 @@ async def test_long_tail_of_big_outputs_converges(tmp_path):
     assert all(m["tool_call_id"] in ids for m in last if m["role"] == "tool")
 
 
+async def test_locked_path_rejects_write_but_allows_read(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_a.py").write_text("ok\n")
+    box = ToolBox(LocalSandbox(tmp_path), AgentSpec(locked_paths=("tests/test_a.py",)))
+    with pytest.raises(ToolError, match="файл тестера"):
+        await box.call(TOOL_WRITE_FILE, {"path": "tests/test_a.py", "content": "x"})
+    outcome = await box.call(TOOL_READ_FILE, {"path": "tests/test_a.py"})
+    assert "ok" in outcome.text
+    await box.call(TOOL_WRITE_FILE, {"path": "tests/test_b.py", "content": "x"})
+
+
 async def test_forbidden_paths_and_command_whitelist(tmp_path):
     spec = AgentSpec(forbidden_paths=("tests/*", "docs/"), allowed_commands=("echo",))
     box = ToolBox(LocalSandbox(tmp_path), spec)

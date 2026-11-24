@@ -95,3 +95,31 @@ async def test_no_line_no_diff_rejected(tmp_path):
 )
 def test_task_paths(task, paths):
     assert task_paths(task) == paths
+
+
+class RecordingSandbox(LocalSandbox):
+    def __init__(self, root):
+        super().__init__(root)
+        self.argvs = []
+
+    async def exec(self, argv, timeout_s):
+        self.argvs.append(list(argv))
+        return await super().exec(["true"], timeout_s)
+
+
+async def test_full_run_ignores_only_existing_skipped_tests(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_later.py").write_text("")
+    sandbox = RecordingSandbox(tmp_path)
+    spec = AgentSpec(
+        test_argv=("pytest", "-q"),
+        skip_tests=("tests/test_later.py", "tests/test_missing.py"),
+    )
+    assert await FinishGuard(sandbox, spec).verify_green() == []
+    assert sandbox.argvs == [["pytest", "-q", "--ignore=tests/test_later.py"]]
+
+
+async def test_full_run_without_skip_keeps_argv(tmp_path):
+    sandbox = RecordingSandbox(tmp_path)
+    await FinishGuard(sandbox, AgentSpec(test_argv=("pytest", "-q"))).verify_green()
+    assert sandbox.argvs == [["pytest", "-q"]]

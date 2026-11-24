@@ -55,6 +55,7 @@ from sa_home_bot.devlab.agent.script import (
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.utils.code_comments import comment_findings
 
+LOCKED_PATH_TEXT = "путь {path}: файл тестера, не меняй; не согласен — ask_owner"
 TOOL_LIST_FILES = "list_files"
 TOOL_READ_FILE = "read_file"
 TOOL_GREP = "grep"
@@ -430,6 +431,8 @@ class ToolBox:
 
     def _check_writable(self, path: str) -> str:
         relative = safe_relative(path)
+        if matches(relative, self._spec.locked_paths):
+            raise ToolError(LOCKED_PATH_TEXT.format(path=relative))
         if matches(relative, self._spec.forbidden_paths + self._spec.secret_paths):
             raise ToolError(f"путь {relative} закрыт для правок правилами проекта")
         if self._spec.write_prefixes and not any(
@@ -564,6 +567,7 @@ class ToolBox:
         spec = self._spec
         config = {
             "closed": list(spec.forbidden_paths + spec.secret_paths),
+            "locked": list(spec.locked_paths),
             "write_prefixes": list(spec.write_prefixes),
             "allowed": self._allowed(),
             "test_argv": without_xdist(list(spec.test_argv)),
