@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 from collections.abc import Callable
 
+from sa_home_bot.devlab.agent.markup import task_paths
 from sa_home_bot.devlab.agent.sandbox import (
     ExecResult,
     Sandbox,
@@ -19,6 +21,13 @@ BASE_RED_NOTE = "красные на базе, не блокируют: {tests}"
 PhaseListener = Callable[[bool], None]
 
 
+def _in_allowed(path: str, allowed: tuple[str, ...]) -> bool:
+    return any(
+        path.startswith(item) if item.endswith("/") else fnmatch.fnmatch(path, item)
+        for item in allowed
+    )
+
+
 class FinishGuard:
     def __init__(
         self,
@@ -26,9 +35,11 @@ class FinishGuard:
         spec: AgentSpec,
         heavy: asyncio.Lock | None = None,
         on_phase: PhaseListener | None = None,
+        task: str = "",
     ) -> None:
         self._sandbox = sandbox
         self._spec = spec
+        self._task = task
         self._heavy = heavy or asyncio.Lock()
         self._on_phase = on_phase
         self._base_red: set[str] = set()
@@ -41,12 +52,19 @@ class FinishGuard:
     async def verify(self) -> list[str]:
         spec = self._spec
         changed = await self._sandbox.changed_paths()
-        if spec.diff_prefixes:
+        allowed = task_paths(self._task)
+        if allowed:
+            changed = [p for p in changed if _in_allowed(p, allowed)]
+        elif spec.diff_prefixes:
             changed = [p for p in changed if p.startswith(spec.diff_prefixes)]
         if not changed:
             if spec.allow_no_changes:
                 return await self.verify_green()
-            where = f" в {', '.join(spec.diff_prefixes)}" if spec.diff_prefixes else ""
+            where = (
+                f" в {', '.join(allowed or spec.diff_prefixes)}"
+                if allowed or spec.diff_prefixes
+                else ""
+            )
             return [f"нет изменений{where}: правок не сделано, задача не выполнена"]
         return await self.verify_green()
 
