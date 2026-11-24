@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS job_progress (
     counter INTEGER NOT NULL,
     changed TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS job_live (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+    data TEXT NOT NULL,
+    changed TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS reviews (
     job_id TEXT PRIMARY KEY REFERENCES jobs(id),
     verdict TEXT NOT NULL,
@@ -97,6 +102,16 @@ ADD_PARAMS_COLUMN = "ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{
 JOB_COLUMNS = (
     "id, kind, project, client, model, task, base_branch, priority, status, executor, "
     "created, started, finished, tokens, cost_usd, params"
+)
+
+
+LIVE_KEYS = (
+    protocol.FIELD_MODEL_STEPS,
+    protocol.PAYLOAD_TOKENS,
+    protocol.FIELD_SEGMENT_TOKENS,
+    protocol.FIELD_REASONING_TOKENS,
+    protocol.FIELD_USAGE_KNOWN,
+    protocol.FIELD_PHASE,
 )
 
 
@@ -1118,6 +1133,33 @@ class HubQueue:
                     (job_id, counter, stamp),
                 )
 
+    async def note_live(self, live: Any, now: datetime | None = None) -> None:
+        if not isinstance(live, dict):
+            return
+        stamp = (now or utc_now()).isoformat()
+        async with self._tx() as conn:
+            for job_id, entry in live.items():
+                if not isinstance(entry, dict):
+                    continue
+                cur = await conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+                if await cur.fetchone() is None:
+                    continue
+                data = {key: entry[key] for key in LIVE_KEYS if key in entry}
+                await conn.execute(
+                    "INSERT INTO job_live (job_id, data, changed) VALUES (?, ?, ?)"
+                    " ON CONFLICT(job_id) DO UPDATE SET data = excluded.data,"
+                    " changed = excluded.changed",
+                    (job_id, json.dumps(data), stamp),
+                )
+
+    async def live_views(self, job_ids: Collection[str]) -> dict[str, dict[str, Any]]:
+        if not job_ids:
+            return {}
+        cur = await self._db.conn.execute(
+            f"SELECT job_id, data FROM job_live WHERE job_id IN ({_in(job_ids)})", tuple(job_ids)
+        )
+        return {row["job_id"]: json.loads(row["data"]) for row in await cur.fetchall()}
+
     async def flag_stalled(
         self, threshold_s: float, executor_alive: bool, now: datetime | None = None
     ) -> list[Message]:
@@ -1213,6 +1255,11 @@ class HubQueue:
             removed = cur.rowcount
             await conn.execute(
                 "DELETE FROM job_progress WHERE job_id IN"
+                " (SELECT id FROM jobs WHERE finished IS NOT NULL AND finished < ?)",
+                (border,),
+            )
+            await conn.execute(
+                "DELETE FROM job_live WHERE job_id IN"
                 " (SELECT id FROM jobs WHERE finished IS NOT NULL AND finished < ?)",
                 (border,),
             )

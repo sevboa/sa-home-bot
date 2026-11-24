@@ -21,6 +21,7 @@ from sa_home_bot.devlab.agent.guard import FinishGuard
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus, Crane
 from sa_home_bot.devlab.agent.model import ModelFactory
 from sa_home_bot.devlab.agent.notes import NOTES_SUFFIX, AgentNotes, prune_notes
+from sa_home_bot.devlab.agent.paths import tracked_but_closed
 from sa_home_bot.devlab.agent.prompt import build_system, build_task, is_glm
 from sa_home_bot.devlab.agent.remote import REMOTE_R1
 from sa_home_bot.devlab.agent.repo import PUSH_INTERVAL_S, AgentRepo, agent_author
@@ -73,6 +74,11 @@ REMOTE_FORBIDDEN_REASON = (
 )
 MODEL_MISSING_REASON = "модели {model!r} нет на живых шлюзах"
 SPEND_CRANES = (Crane.COST, Crane.TOKENS)
+CLOSED_TRACKED_SHOWN = 5
+CLOSED_TRACKED_WARNING = (
+    "secret_paths закрывает {count} файлов, отслеживаемых в git базы (агент их не видит, "
+    "тесты в песочнице могут падать): {paths}"
+)
 LOST_DIALOG_REASON = "диалог агента потерян, ответ владельца некуда вернуть"
 FAILURE_PREFIX = {
     AgentStatus.MODEL_FAILED: "модель",
@@ -211,6 +217,7 @@ class AgentWorker(WorkerLoops):
         self._sandboxes = sandboxes
         self._catalog = catalog
         self._spends: dict[str, JobSpend] = {}
+        self._phases: dict[str, str] = {}
         prune_notes(settings.work_dir / NOTES_DIR, NOTES_KEEP_S)
         self._state_path = settings.work_dir / AGENT_STATE_FILE
         self._outbox_path = settings.work_dir / OUTBOX_FILE
@@ -338,6 +345,24 @@ class AgentWorker(WorkerLoops):
             job_id: self._spends[job_id].replies() for job_id in self.jobs if job_id in self._spends
         }
 
+    @property
+    def live(self) -> dict[str, dict[str, Any]]:
+        live = {}
+        for job_id in self.jobs:
+            if job_id not in self._spends:
+                continue
+            entry = self._spends[job_id].live()
+            if job_id in self._phases:
+                entry[protocol.FIELD_PHASE] = self._phases[job_id]
+            live[job_id] = entry
+        return live
+
+    def _set_phase(self, job_id: str, phase: str | None) -> None:
+        if phase is None:
+            self._phases.pop(job_id, None)
+        else:
+            self._phases[job_id] = phase
+
     def _spend_of(self, job: Job) -> JobSpend:
         spend = self._spends.get(job.id)
         if spend is None:
@@ -416,8 +441,7 @@ class AgentWorker(WorkerLoops):
         if not resumed:
             await self._forget(job.id)
         self._busy.started(job.id)
-        if not resumed:
-            await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
+        await self.send(job.id, protocol.MSG_STARTED, {protocol.PAYLOAD_MODEL: job.model})
         try:
             if job.id in self._stopped:
                 await self.send(job.id, protocol.MSG_STOPPED, {})
@@ -500,6 +524,7 @@ class AgentWorker(WorkerLoops):
             )
         role_text = self._role_text(profile_name, profile)
         intro_text, reminder_text = self._code_mode_overrides(profile_name, profile)
+        await self._warn_closed_tracked(run, repo.base, spec)
         baseline = await self._baseline(run, repo.base)
         base_dir = run.root / BASE_DIR
         held = self._parked_sandboxes.pop(job.id, None)
@@ -522,7 +547,14 @@ class AgentWorker(WorkerLoops):
                 self._notes_of(job.id),
                 limits.context_tokens,
             ),
-            FinishGuard(sandbox, spec, self._settings.slots.heavy),
+            FinishGuard(
+                sandbox,
+                spec,
+                self._settings.slots.heavy,
+                lambda active: self._set_phase(
+                    job.id, protocol.PHASE_FINISH_TESTS if active else None
+                ),
+            ),
             limits,
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
@@ -624,6 +656,18 @@ class AgentWorker(WorkerLoops):
             raise ModelUnavailable(MODEL_MISSING_REASON.format(model=job.model))
         if not project.agent.allow_remote_models and any(e.remote for e in entries):
             raise ModelUnavailable(REMOTE_FORBIDDEN_REASON.format(model=job.model))
+
+    async def _warn_closed_tracked(self, run: JobRun, base: str, spec: AgentSpec) -> None:
+        if not spec.secret_paths or (run.root / DIALOG_FILE).exists():
+            return
+        closed = tracked_but_closed(await run.mirror.tracked_files(base), spec.secret_paths)
+        if not closed:
+            return
+        shown = ", ".join(closed[:CLOSED_TRACKED_SHOWN])
+        text = CLOSED_TRACKED_WARNING.format(count=len(closed), paths=shown)
+        log.warning("Задание %s: %s", run.job.id, text)
+        self._steps_trace(run.root).record({"event": "warning", "text": text})
+        await self.send(run.job.id, protocol.MSG_STEP_DONE, {protocol.PAYLOAD_TEXT: text})
 
     async def _step_done(self, run: JobRun, title: str) -> None:
         assert run.repo is not None

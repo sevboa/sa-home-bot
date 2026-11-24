@@ -30,6 +30,9 @@ QUESTION_CHARS = 1500
 CARD_TIME_FORMAT = "%d.%m %H:%M"
 SLOT_WAIT_ICON = "📌"
 SLOT_WAIT_TEXT = "ждёт слот"
+FINISH_TESTS_ICON = "🧪"
+FINISH_TESTS_TEXT = "финиш: тесты"
+USAGE_UNKNOWN_TEXT = "н/д (модель не отдаёт usage)"
 STATUS_ICONS = {
     protocol.STATUS_RUNNING: "🟢",
     protocol.STATUS_WAITING_OWNER: "❓",
@@ -116,6 +119,30 @@ def _first_waiting_dep(job: dict[str, Any]) -> str | None:
     return None
 
 
+def _tokens_text(job: dict[str, Any], tokens: int) -> str:
+    if job.get(protocol.FIELD_USAGE_KNOWN) is False:
+        return USAGE_UNKNOWN_TEXT
+    segment = job.get(protocol.FIELD_SEGMENT_TOKENS)
+    if segment and segment != tokens:
+        return f"{tokens} всего, {segment} в этом отрезке"
+    return str(tokens)
+
+
+def _finishing(job: dict[str, Any]) -> bool:
+    return (
+        job.get(protocol.FIELD_STATUS) == protocol.STATUS_RUNNING
+        and job.get(protocol.FIELD_PHASE) == protocol.PHASE_FINISH_TESTS
+    )
+
+
+def _slot_wait(job: dict[str, Any]) -> bool:
+    return bool(
+        job.get(protocol.FIELD_STATUS) == protocol.STATUS_RUNNING
+        and job.get(protocol.FIELD_SLOT_WAIT)
+        and not _finishing(job)
+    )
+
+
 def _role(job: dict[str, Any]) -> str | None:
     params = job.get(protocol.FIELD_PARAMS) or {}
     profile = params.get(protocol.PARAM_PROFILE)
@@ -136,8 +163,15 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     title = clip(str(job.get(protocol.FIELD_TITLE, "")), TITLE_CHARS)
     linked_id = link(job_id, card_cb(job_id, offset))
 
-    slot_wait = status == protocol.STATUS_RUNNING and job.get(protocol.FIELD_SLOT_WAIT)
-    icon = SLOT_WAIT_ICON if slot_wait else STATUS_ICONS.get(status, "")
+    slot_wait = _slot_wait(job)
+    finishing = _finishing(job)
+    icon = (
+        FINISH_TESTS_ICON
+        if finishing
+        else SLOT_WAIT_ICON
+        if slot_wait
+        else STATUS_ICONS.get(status, "")
+    )
 
     parts = [f"{n}. {icon} {linked_id} · {jtype} · {model}"]
 
@@ -147,11 +181,13 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
     if age_sec is not None:
         parts.append(f"· {format_dhms(age_sec)}")
 
-    if slot_wait:
+    if finishing:
+        parts.append(f"· {FINISH_TESTS_TEXT}")
+    elif slot_wait:
         parts.append(f"· {SLOT_WAIT_TEXT}")
 
     if status == protocol.STATUS_RUNNING and not slot_wait:
-        steps = job.get(protocol.FIELD_STEPS, 0)
+        steps = job.get(protocol.FIELD_MODEL_STEPS) or job.get(protocol.FIELD_STEPS, 0)
         if steps:
             parts.append(f"· шаг {steps}")
 
@@ -185,14 +221,12 @@ def page_html(
         running_c = counts.get(protocol.STATUS_RUNNING, 0)
         waiting_c = counts.get(protocol.STATUS_WAITING_OWNER, 0)
         queued_c = counts.get(protocol.STATUS_QUEUED, 0)
-        slot_wait_c = sum(
-            1
-            for job in jobs
-            if job.get(protocol.FIELD_STATUS) == protocol.STATUS_RUNNING
-            and job.get(protocol.FIELD_SLOT_WAIT)
-        )
+        slot_wait_c = sum(1 for job in jobs if _slot_wait(job))
+        finishing_c = sum(1 for job in jobs if _finishing(job))
         if running_c or waiting_c or queued_c:
-            parts = [f"🟢{running_c - slot_wait_c}"]
+            parts = [f"🟢{running_c - slot_wait_c - finishing_c}"]
+            if finishing_c:
+                parts.append(f"{FINISH_TESTS_ICON}{finishing_c}")
             if slot_wait_c:
                 parts.append(f"📌{slot_wait_c}")
             parts.append(f"❓{waiting_c}")
@@ -312,8 +346,12 @@ def render_card(
     original_model = params.get(protocol.PARAM_ORIGINAL_MODEL)
     role_str = _role(job)
 
-    slot_wait = status == protocol.STATUS_RUNNING and job.get(protocol.FIELD_SLOT_WAIT)
-    status_display = f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT}" if slot_wait else escape(status)
+    if _finishing(job):
+        status_display = f"{FINISH_TESTS_ICON} {FINISH_TESTS_TEXT}"
+    elif _slot_wait(job):
+        status_display = f"{SLOT_WAIT_ICON} {SLOT_WAIT_TEXT}"
+    else:
+        status_display = escape(status)
 
     lines = [
         f"<p>Задание <code>{escape(job_id)}</code> · {jtype} · {status_display}</p>",
@@ -345,7 +383,13 @@ def render_card(
         lines.append(f"<p>Взята вместо: {escape(str(original_model))}</p>")
 
     lines.append(f"<p>Создано / начато: {_format_dt(created)} / {_format_dt(started)}</p>")
-    lines.append(f"<p>Токены: {tokens}</p>")
+    lines.append(f"<p>Токены: {_tokens_text(job, tokens)}</p>")
+    model_steps = job.get(protocol.FIELD_MODEL_STEPS)
+    if model_steps:
+        lines.append(f"<p>Шагов модели: {model_steps}</p>")
+    reasoning = job.get(protocol.FIELD_REASONING_TOKENS)
+    if reasoning:
+        lines.append(f"<p>Токены размышления: {reasoning}</p>")
     if steps > 0 and last_step:
         clipped = clip(str(last_step), QUESTION_CHARS)
         lines.append(f"<p>Последний шаг ({steps}): {escape(clipped)}</p>")

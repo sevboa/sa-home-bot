@@ -19,6 +19,8 @@ class SpendState(BaseModel):
     replies: int = 0
     reported_cost: float = 0.0
     reported_tokens: int = 0
+    reasoning_tokens: int = 0
+    usage_replies: int = 0
     extensions: int = 0
     model: str = ""
 
@@ -51,6 +53,8 @@ class JobSpend:
             replies=state.replies + 1,
             tokens=state.tokens + reply.tokens_in + reply.tokens_out,
             cost=state.cost + (reply.cost_usd or 0.0),
+            reasoning_tokens=state.reasoning_tokens + (reply.tokens_reasoning or 0),
+            usage_replies=state.usage_replies + (1 if reply.tokens_in + reply.tokens_out else 0),
         )
 
     def extend(self) -> None:
@@ -61,6 +65,18 @@ class JobSpend:
             self._update(model=model, extensions=self._state.extensions + 1)
         elif not self._state.model:
             self._update(model=model)
+
+    def live(self) -> dict[str, Any]:
+        state = self._state
+        live: dict[str, Any] = {
+            protocol.FIELD_MODEL_STEPS: state.replies,
+            protocol.PAYLOAD_TOKENS: self.total_tokens(),
+            protocol.FIELD_SEGMENT_TOKENS: state.tokens,
+            protocol.FIELD_USAGE_KNOWN: state.usage_replies > 0 or state.replies == 0,
+        }
+        if state.reasoning_tokens:
+            live[protocol.FIELD_REASONING_TOKENS] = state.reasoning_tokens
+        return live
 
     def take_report(self) -> dict[str, Any]:
         state = self._state

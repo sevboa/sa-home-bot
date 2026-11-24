@@ -136,6 +136,7 @@ async def heartbeat(request: web.Request) -> web.Response:
     reply: dict[str, Any] = {protocol.FIELD_OK: True}
     if principal.role == protocol.ROLE_EXECUTOR:
         await store.queue.note_progress(body.get(protocol.FIELD_PROGRESS))
+        await store.queue.note_live(body.get(protocol.FIELD_LIVE))
         reply[protocol.FIELD_QUEUED] = await store.queue.queued_count()
         state = await silence_state(request.app)
         reply[protocol.FIELD_SILENCE] = state and {

@@ -27,6 +27,7 @@ CALL_KEY = "call"
 CALL_UNAVAILABLE = "вызов хоста из скрипта недоступен"
 CALL_FAILED = "сбой хоста при обработке вызова: {error}"
 FAILED_LINE = re.compile(r"^(?:FAILED|ERROR) \S")
+SUMMARY_COUNT = re.compile(r"(\d+) (?:failed|error)")
 FAILED_LIST_MAX = 30
 FAILED_LINE_CHARS = 240
 FAILED_LIST_HEAD = "упавшие тесты:"
@@ -64,6 +65,19 @@ def failed_tests(output: str) -> list[str]:
         if FAILED_LINE.match(line):
             seen.setdefault(line[:FAILED_LINE_CHARS], None)
     return list(seen)[:FAILED_LIST_MAX]
+
+
+def failed_test_ids(output: str) -> list[str]:
+    seen: dict[str, None] = {}
+    for line in output.splitlines():
+        if FAILED_LINE.match(line):
+            seen.setdefault(line.split()[1], None)
+    return list(seen)
+
+
+def reported_failures(output: str) -> int:
+    last = output.rstrip().splitlines()[-1] if output.strip() else ""
+    return sum(int(n) for n in SUMMARY_COUNT.findall(last))
 
 
 def clip_head(text: str, limit: int, hint: str = "") -> str:
@@ -271,6 +285,8 @@ class Sandbox(Protocol):
 
     async def changed_digests(self) -> dict[str, str]: ...
 
+    async def exec_on_base(self, argv: Sequence[str], timeout_s: float) -> ExecResult | None: ...
+
 
 class ManagedSandbox(Sandbox, Protocol):
     async def start(self) -> None: ...
@@ -376,6 +392,22 @@ class LocalSandbox:
         changed = {rel: d for rel, d in current.items() if self._baseline.get(rel) != d}
         removed = {rel: "" for rel in self._baseline.keys() - current.keys()}
         return {**changed, **removed}
+
+    async def exec_on_base(self, argv: Sequence[str], timeout_s: float) -> ExecResult | None:
+        if self._base_root is None:
+            return None
+        try:
+            result = await run(
+                list(argv),
+                timeout=timeout_s,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(self._base_root),
+            )
+        except TimeoutError:
+            return ExecResult(TIMEOUT_EXIT_CODE, "", timed_out=True)
+        except OSError as exc:
+            return ExecResult(NOT_FOUND_EXIT_CODE, f"{type(exc).__name__}: {exc}")
+        return ExecResult(result.returncode, result.stdout_text)
 
     async def base_bytes(self, path: str) -> bytes | None:
         if self._base_root is None:

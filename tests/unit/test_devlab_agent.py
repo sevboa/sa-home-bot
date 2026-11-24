@@ -1245,3 +1245,95 @@ async def test_tree_is_snapshotted_once_across_read_only_calls(tmp_path):
     loop = AgentLoop(model, ToolBox(sandbox, spec), FinishGuard(sandbox, spec))
     await loop.run("правила", "задача")
     assert sandbox.digests_calls == 2
+
+
+BASE_RED_ID = "tests/other_test.py::test_other"
+BASE_RED_OUT = f"FAILED {BASE_RED_ID} - assert 0\n1 failed, 3 passed in 1s"
+
+
+class BaseRedSandbox(LocalSandbox):
+    def __init__(self, root: Path, base_out: str = BASE_RED_OUT, test_out: str = BASE_RED_OUT):
+        super().__init__(root)
+        self.base_out = base_out
+        self.test_out = test_out
+        self.base_runs = 0
+
+    async def exec(self, argv, timeout_s):
+        return ExecResult(1, self.test_out)
+
+    async def exec_on_base(self, argv, timeout_s):
+        self.base_runs += 1
+        return ExecResult(1, self.base_out)
+
+
+async def test_finish_guard_excuses_tests_red_on_base(tmp_path):
+    sandbox = BaseRedSandbox(tmp_path)
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=("pytest", "-n", "auto")))
+    assert await guard.verify_green() == []
+    assert guard.excused == [BASE_RED_ID]
+    assert await guard.verify_green() == []
+    assert sandbox.base_runs == 1
+
+
+async def test_finish_guard_blocks_tests_green_on_base(tmp_path):
+    sandbox = BaseRedSandbox(tmp_path, base_out="1 passed in 1s")
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=("pytest",)))
+    failures = await guard.verify_green()
+    assert failures and "тесты не зелёные" in failures[0]
+    assert guard.excused == []
+
+
+async def test_finish_guard_does_not_excuse_changed_test_file(tmp_path):
+    (tmp_path / "tests").mkdir()
+    sandbox = BaseRedSandbox(tmp_path)
+    (tmp_path / "tests/other_test.py").write_text("x = 1\n")
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=("pytest",)))
+    assert await guard.verify_green()
+    assert sandbox.base_runs == 0
+
+
+async def test_finish_guard_blocks_when_failure_count_unparsed(tmp_path):
+    out = f"FAILED {BASE_RED_ID}\n2 failed in 1s"
+    guard = FinishGuard(BaseRedSandbox(tmp_path, test_out=out), AgentSpec(test_argv=("pytest",)))
+    assert await guard.verify_green()
+
+
+async def test_finish_reports_base_red_in_summary(tmp_path):
+    sandbox = BaseRedSandbox(tmp_path)
+    spec = AgentSpec(test_argv=("pytest",), diff_prefixes=("src/",))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.py").write_text("VALUE = 1\n")
+    loop = AgentLoop(
+        ScriptedChatModel(edit(), tool_reply(TOOL_FINISH, summary="готово")),
+        ToolBox(sandbox, spec),
+        FinishGuard(sandbox, spec),
+    )
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.FINISHED
+    assert result.summary.startswith("готово")
+    assert f"Красные на базе (не блокировали финиш): {BASE_RED_ID}" in result.summary
+
+
+async def test_repeated_finish_rejection_asks_owner(tmp_path):
+    spec = AgentSpec(test_argv=RED_TEST, diff_prefixes=("src/",))
+    finishes = [tool_reply(TOOL_FINISH, f"f{n}", summary="готово") for n in range(3)]
+    model = ScriptedChatModel(edit(), *finishes)
+    loop, _ = make_loop(tmp_path, model, spec=spec)
+    result = await loop.run("s", "t")
+    assert result.status is AgentStatus.ASKED
+    assert result.crane is None
+    assert "Финиш отклонён 3 раза подряд" in result.reason
+    assert "boom" in result.reason
+
+
+async def test_finish_rejection_counter_resets_on_different_failure(tmp_path):
+    spec = AgentSpec(test_argv=RED_TEST, diff_prefixes=("src/",))
+    model = ScriptedChatModel(
+        edit(),
+        tool_reply(TOOL_FINISH, "f0", summary="готово"),
+        tool_reply(TOOL_FINISH, "f1", summary="готово"),
+        tool_reply(TOOL_RUN_TESTS, "t", paths="tests/x.py"),
+    )
+    loop, _ = make_loop(tmp_path, model, spec=spec, limits=AgentLimits(max_steps=4))
+    result = await loop.run("s", "t")
+    assert result.crane is Crane.STEPS

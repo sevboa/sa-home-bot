@@ -68,6 +68,11 @@ class PodmanSandbox:
         self._cpus = cpus
         self._memory = memory
         self._session: PipeSession | None = None
+        self._job_id = job_id
+        self._spawn = spawn
+        self._pause = pause
+        self._base_dir = base_dir
+        self._base_box: PodmanSandbox | None = None
 
     @property
     def name(self) -> str:
@@ -118,8 +123,34 @@ class PodmanSandbox:
         async with self._lock:
             await self._provision()
 
+    async def exec_on_base(self, argv: Sequence[str], timeout_s: float) -> ExecResult | None:
+        if self._base_dir is None:
+            return None
+        if self._base_box is None:
+            box = PodmanSandbox(
+                self._cfg,
+                f"{self._job_id}-base",
+                self._base_dir,
+                self._recipe,
+                self._spec,
+                None,
+                self._spawn,
+                self._pause,
+                self._cpus,
+                self._memory,
+            )
+            await box.start()
+            self._base_box = box
+        return await self._base_box.exec(argv, timeout_s)
+
+    async def _close_base_box(self) -> None:
+        box, self._base_box = self._base_box, None
+        if box is not None:
+            await asyncio.shield(box.aclose())
+
     async def stop(self) -> None:
         await self.session_close()
+        await self._close_base_box()
         async with self._lock:
             if self._running:
                 await self._wrapper.call("stop", self._name, merge_stderr=True)
@@ -137,6 +168,7 @@ class PodmanSandbox:
 
     async def aclose(self) -> None:
         await self.session_close()
+        await self._close_base_box()
         self._running = False
         await asyncio.shield(self._wrapper.cleanup(self._name))
 

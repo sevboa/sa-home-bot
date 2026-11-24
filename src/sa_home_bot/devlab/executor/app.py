@@ -220,7 +220,8 @@ async def beat_forever(
     async def beat() -> None:
         jobs = [job for worker in workers for job in worker.jobs]
         progress = {key: n for worker in workers for key, n in worker.progress.items()}
-        reply = await send_heartbeat(hub, busy, jobs, progress)
+        live = {key: entry for worker in workers for key, entry in worker.live.items()}
+        reply = await send_heartbeat(hub, busy, jobs, progress, live)
         if silence_watch is not None and protocol.FIELD_SILENCE in reply:
             silence_watch.update(bool(reply[protocol.FIELD_SILENCE]))
         if relay is not None:

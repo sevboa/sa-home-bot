@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
-from sa_home_bot.devlab.agent.sandbox import Sandbox
+from sa_home_bot.devlab.agent.sandbox import (
+    ExecResult,
+    Sandbox,
+    failed_test_ids,
+    reported_failures,
+)
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import changed_test_files, without_xdist
 
 VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
 VERDICT_REWORK = "ВЕРДИКТ: доработать"
+PYTEST_FAILED_EXIT = 1
+BASE_RED_NOTE = "красные на базе, не блокируют: {tests}"
+PhaseListener = Callable[[bool], None]
 
 
 class FinishGuard:
@@ -16,10 +25,18 @@ class FinishGuard:
         sandbox: Sandbox,
         spec: AgentSpec,
         heavy: asyncio.Lock | None = None,
+        on_phase: PhaseListener | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._spec = spec
         self._heavy = heavy or asyncio.Lock()
+        self._on_phase = on_phase
+        self._base_red: set[str] = set()
+        self._excused: list[str] = []
+
+    @property
+    def excused(self) -> list[str]:
+        return list(self._excused)
 
     async def verify(self) -> list[str]:
         spec = self._spec
@@ -50,16 +67,45 @@ class FinishGuard:
     async def verify_green(self) -> list[str]:
         spec = self._spec
         failures: list[str] = []
-        async with self._heavy:
-            if spec.test_argv:
-                result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)
-                if not result.ok:
-                    failures.append(
-                        "тесты не зелёные:\n"
-                        + result.failure_summary(spec.output_chars, spec.test_timeout_s)
-                    )
-            failures += await self._checks()
+        self._excused = []
+        if self._on_phase is not None:
+            self._on_phase(True)
+        try:
+            async with self._heavy:
+                if spec.test_argv:
+                    result = await self._sandbox.exec(spec.test_argv, spec.test_timeout_s)
+                    if not result.ok and not await self._red_only_on_base(result):
+                        failures.append(
+                            "тесты не зелёные:\n"
+                            + result.failure_summary(spec.output_chars, spec.test_timeout_s)
+                        )
+                failures += await self._checks()
+        finally:
+            if self._on_phase is not None:
+                self._on_phase(False)
         return failures
+
+    async def _red_only_on_base(self, result: ExecResult) -> bool:
+        if result.timed_out or result.exit_code != PYTEST_FAILED_EXIT:
+            return False
+        ids = failed_test_ids(result.output)
+        if not ids or len(ids) != reported_failures(result.output):
+            return False
+        touched = set(await self._sandbox.changed_paths())
+        if any(test_id.split("::")[0] in touched for test_id in ids):
+            return False
+        unknown = [test_id for test_id in ids if test_id not in self._base_red]
+        if unknown:
+            spec = self._spec
+            argv = without_xdist([*spec.test_argv, *unknown])
+            base = await self._sandbox.exec_on_base(argv, spec.test_timeout_s)
+            if base is None or base.timed_out or base.exit_code != PYTEST_FAILED_EXIT:
+                return False
+            self._base_red |= set(failed_test_ids(base.output)) & set(unknown)
+        if not all(test_id in self._base_red for test_id in ids):
+            return False
+        self._excused = ids
+        return True
 
     async def verify_step(self) -> list[str]:
         spec = self._spec
