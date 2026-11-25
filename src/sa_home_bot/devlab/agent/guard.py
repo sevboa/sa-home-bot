@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 from collections.abc import Callable
+from pathlib import PurePosixPath
 
 from sa_home_bot.devlab.agent.markup import task_paths
 from sa_home_bot.devlab.agent.sandbox import (
@@ -13,6 +15,7 @@ from sa_home_bot.devlab.agent.sandbox import (
 )
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import changed_test_files, without_xdist
+from sa_home_bot.devlab.hub.epic_plan import PlanTask, check_plan, plan_test_files
 from sa_home_bot.devlab.protocol import RED_TESTS_ITEM, RED_TESTS_MARKER
 
 VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
@@ -20,6 +23,13 @@ VERDICT_REWORK = "ВЕРДИКТ: доработать"
 PYTEST_FAILED_EXIT = 1
 BASE_RED_NOTE = "красные на базе, не блокируют: {tests}"
 PhaseListener = Callable[[bool], None]
+PLANS_DIR = "plans/"
+PLAN_SUFFIX = ".json"
+PLAN_HINT = (
+    "Задача говорит, что должно работать и какой тест станет зелёным; "
+    "длинную — раздели на несколько"
+)
+PLAN_FIELDS = ("title", "task", "paths")
 COLLECT_ARGS = ("--collect-only", "-q")
 COLLECT_BROKEN = (
     "тест не собирается (ошибка на уровне модуля), а тесты до кода обязаны собираться:\n"
@@ -34,6 +44,45 @@ def red_tests_block(tests: list[str]) -> str:
     if not tests:
         return ""
     return "\n\n" + RED_TESTS_MARKER + "\n" + "\n".join(RED_TESTS_ITEM + test for test in tests)
+
+
+def _plan_tasks(name: str, raw: bytes) -> tuple[list[PlanTask], str]:
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return [], f"{name}: не JSON ({exc})"
+    if not isinstance(data, list) or not data:
+        return [], f"{name}: ожидается непустой JSON-список задач"
+    tasks = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            return [], f"{name}: элемент {index + 1} не объект"
+        missing = [key for key in PLAN_FIELDS if key not in item]
+        if missing:
+            return [], f"{name}: в элементе {index + 1} нет полей {', '.join(missing)}"
+        paths, deps = item["paths"], item.get("depends_on", [])
+        if not isinstance(item["title"], str) or not isinstance(item["task"], str):
+            return [], f"{name}: в элементе {index + 1} title и task должны быть строками"
+        if not _is_list_of(paths, str) or not _is_list_of(deps, int):
+            return [], f"{name}: в элементе {index + 1} paths и depends_on должны быть списками"
+        fields = {"profile": item["profile"]} if isinstance(item.get("profile"), str) else {}
+        tasks.append(
+            PlanTask(
+                title=item["title"],
+                task=item["task"],
+                model="",
+                paths=tuple(paths),
+                depends_on=tuple(deps),
+                **fields,
+            )
+        )
+    return tasks, ""
+
+
+def _is_list_of(value: object, kind: type) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(v, kind) and not isinstance(v, bool) for v in value
+    )
 
 
 def _in_allowed(path: str, allowed: tuple[str, ...]) -> bool:
@@ -95,6 +144,27 @@ class FinishGuard:
             return
         self._red = failed_test_ids(result.output) or list(files)
 
+    async def _plan_failures(self, changed: list[str]) -> list[str]:
+        plans = [
+            p
+            for p in changed
+            if p.startswith(PLANS_DIR)
+            and PurePosixPath(p).parent.as_posix() + "/" == PLANS_DIR
+            and p.endswith(PLAN_SUFFIX)
+        ]
+        if not plans:
+            return []
+        existing = plan_test_files(await self._sandbox.list_files())
+        failures: list[str] = []
+        for path in plans:
+            raw = await self._sandbox.read_bytes(path)
+            if raw is None:
+                continue
+            tasks, error = _plan_tasks(path, raw)
+            reasons = [error] if error else check_plan(tasks, existing)
+            failures += [f"план {reason}. {PLAN_HINT}" for reason in reasons]
+        return failures
+
     async def verify(self) -> list[str]:
         spec = self._spec
         changed = await self._sandbox.changed_paths()
@@ -105,6 +175,10 @@ class FinishGuard:
             changed = [p for p in changed if p.startswith(spec.write_prefixes)]
         elif spec.diff_prefixes:
             changed = [p for p in changed if p.startswith(spec.diff_prefixes)]
+        if spec.plan_check:
+            plan_failures = await self._plan_failures(changed)
+            if plan_failures:
+                return plan_failures
         if not changed:
             if spec.allow_no_changes:
                 return await self.verify_green()
