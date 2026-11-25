@@ -174,6 +174,7 @@ class DevlabProfileConfig(BaseModel):
     write_prefixes: list[str] = Field(default_factory=list)
     allow_no_changes: bool = False
     expect_red: bool = False
+    draft_after_reads: int = Field(default=0, ge=0)
     require_verdict: bool = False
     code_mode: bool = False
     prompt_lang: Literal["ru", "en"] = "ru"

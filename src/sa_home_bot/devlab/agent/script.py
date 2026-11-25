@@ -246,7 +246,7 @@ for _path in (os.path.join(_ROOT, "src"), _ROOT):
 _real_popen_init = subprocess.Popen.__init__
 _real_open = builtins.open
 _BACKUPS = {}
-_STATE = {"green": None}
+_STATE = {"green": None, "reads": 0, "drafted": False, "depth": 0}
 
 
 def _forbidden(*args, **kwargs):
@@ -617,6 +617,34 @@ def grep(pattern, prefix="", context=0):
     return found
 
 
+def _gated(function):
+    def wrapper(*args, **kwargs):
+        limit = _CONFIG.get("draft_after_reads", 0)
+        if not limit or _STATE["depth"]:
+            return function(*args, **kwargs)
+        if not _STATE["drafted"] and _STATE["reads"] >= limit:
+            raise EditError(
+                "Сначала запиши черновик результата в "
+                + ", ".join(_CONFIG["write_prefixes"])
+                + ": что знаешь уже сейчас, пусть неполный. "
+                "Потом читай код и уточняй файл."
+            )
+        _STATE["reads"] += 1
+        _STATE["depth"] += 1
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _STATE["depth"] -= 1
+
+    wrapper.__name__ = function.__name__
+    wrapper.__doc__ = function.__doc__
+    return wrapper
+
+
+for _name in ("ls", "read", "read_numbered", "read_many", "glob", "grep"):
+    globals()[_name] = _gated(globals()[_name])
+
+
 def _writable(path):
     if not isinstance(path, str) or not path.strip():
         raise EditError("путь должен быть непустой строкой")
@@ -632,6 +660,7 @@ def _store(relative, data):
         crlf = b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
         data += b"\r\n" if crlf else b"\n"
     _backup(relative)
+    _STATE["drafted"] = True
     parent = os.path.dirname(relative)
     if parent:
         os.makedirs(parent, exist_ok=True)
