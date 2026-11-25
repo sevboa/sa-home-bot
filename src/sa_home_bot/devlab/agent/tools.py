@@ -569,6 +569,7 @@ class ToolBox:
             "closed": list(spec.forbidden_paths + spec.secret_paths),
             "locked": list(spec.locked_paths),
             "write_prefixes": list(spec.write_prefixes),
+            "draft_after_reads": spec.draft_after_reads if spec.write_prefixes else 0,
             "allowed": self._allowed(),
             "test_argv": without_xdist(list(spec.test_argv)),
             "command_timeout": spec.command_timeout_s,
