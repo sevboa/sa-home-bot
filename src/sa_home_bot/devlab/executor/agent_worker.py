@@ -662,6 +662,7 @@ class AgentWorker(WorkerLoops):
                 quick_steps=profile.quick_steps,
                 quick_params=dict(profile.quick_params),
                 params=dict(profile.params),
+                max_red_runs=0 if profile.expect_red else limits.max_red_runs,
             )
         return replace(
             limits,
