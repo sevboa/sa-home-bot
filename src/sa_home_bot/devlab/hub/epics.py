@@ -131,28 +131,28 @@ def parse_tasks(raw: Sequence[Any]) -> list[PlanTask]:
         raise HubError(f"в эпике больше {protocol.EPIC_MAX_TASKS} задач")
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
-            reasons.append(f"задача {i + 1}: ожидался объект")
+            reasons.append(f"задача {i}: ожидался объект")
             continue
         unknown = sorted(set(item) - set(protocol.EPIC_TASK_KEYS))
         if unknown:
-            reasons.append(f"задача {i + 1}: неизвестные поля {', '.join(unknown)}")
+            reasons.append(f"задача {i}: неизвестные поля {', '.join(unknown)}")
         title, task, model = item.get("title", ""), item.get("task", ""), item.get("model", "")
         profile = item.get("profile", protocol.DEFAULT_PROFILE)
         paths, deps = item.get("paths", []), item.get("depends_on", [])
         if not all(isinstance(v, str) for v in (title, task, model, profile)):
-            reasons.append(f"задача {i + 1}: title, task, model, profile — строки")
+            reasons.append(f"задача {i}: title, task, model, profile — строки")
             continue
         if not task.strip() or not model.strip() or not title.strip():
-            reasons.append(f"задача {i + 1}: нужны title, task и model")
+            reasons.append(f"задача {i}: нужны title, task и model")
         if not PROJECT_NAME_RE.match(profile.strip()):
-            reasons.append(f"задача {i + 1}: профиль {profile!r} недопустим")
+            reasons.append(f"задача {i}: профиль {profile!r} недопустим")
         if not _str_list(paths):
-            reasons.append(f"задача {i + 1}: paths — список строк")
+            reasons.append(f"задача {i}: paths — список строк")
             continue
         if not isinstance(deps, list) or not all(
             isinstance(d, int) and not isinstance(d, bool) for d in deps
         ):
-            reasons.append(f"задача {i + 1}: depends_on — список целых индексов")
+            reasons.append(f"задача {i}: depends_on — список целых индексов")
             continue
         tasks.append(
             PlanTask(
