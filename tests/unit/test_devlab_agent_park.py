@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from sa_home_bot.devlab.agent.dialog import ANSWER_PREFIX, Dialog
@@ -11,13 +13,20 @@ from sa_home_bot.devlab.agent.tools import TOOL_FINISH, ToolBox
 from tests.unit.support.fakes import ScriptedChatModel, tool_reply
 from tests.unit.test_devlab_agent import GREEN_TEST, edit
 
+_SANDBOXES: dict[Path, LocalSandbox] = {}
+
 
 def park_loop(tmp_path, model, park):
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/app.py").write_text("VALUE = 1\n")
+    (tmp_path / "src").mkdir(exist_ok=True)
+    app = tmp_path / "src/app.py"
+    if not app.exists():
+        app.write_text("VALUE = 1\n")
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",))
-    sandbox = LocalSandbox(tmp_path)
-    return AgentLoop(model, ToolBox(sandbox, spec), FinishGuard(sandbox, spec), park=park)
+    sandbox = _SANDBOXES.setdefault(tmp_path, LocalSandbox(tmp_path))
+    return (
+        AgentLoop(model, ToolBox(sandbox, spec), FinishGuard(sandbox, spec), park=park),
+        sandbox,
+    )
 
 
 def park_dialog(dialog):

@@ -12,8 +12,11 @@ class Dialog(BaseModel):
     question: str = ""
     call_id: str | None = None
     answer: str | None = None
+    parked: bool = False
 
     def resumed_messages(self) -> list[dict[str, Any]]:
+        if self.parked:
+            return self.messages
         if self.answer is None:
             raise ValueError("диалог без ответа владельца не продолжается")
         reply = ANSWER_PREFIX + self.answer
