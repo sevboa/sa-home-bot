@@ -296,6 +296,7 @@ def render_singbox_multi(
     *,
     all_proxy: bool = False,
     endpoints: list[dict] | None = None,
+    default_outbound: str | None = None,
 ) -> str:
     if not servers:
         raise ValueError("нужна хотя бы одна страна")
@@ -316,14 +317,18 @@ def render_singbox_multi(
             "tolerance": 100,
         }
     )
-    outbounds.append(
-        {
-            "type": "selector",
-            "tag": "proxy",
-            "outbounds": ["auto", *names],
-            "default": "auto",
-        }
-    )
+    selector = {
+        "type": "selector",
+        "tag": "proxy",
+        "outbounds": ["auto", *names],
+        "default": "auto",
+    }
+    if default_outbound is not None:
+        selector["default"] = default_outbound
+        selector["outbounds"] = ["auto", default_outbound] + [
+            name for name in names if name != default_outbound
+        ]
+    outbounds.append(selector)
     outbounds.append({"type": "direct", "tag": "direct"})
     config["outbounds"] = outbounds
     if endpoints:
