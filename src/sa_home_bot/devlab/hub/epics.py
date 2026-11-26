@@ -356,19 +356,31 @@ class HubEpics:
             if epic.status == protocol.EPIC_DONE:
                 raise HubError(f"эпик {epic_id!r} уже завершён")
             await self._set_epic(epic_id, protocol.EPIC_STOPPED)
-            tasks = await self._tasks(epic_id)
-            current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
-            if current is not None and current.job_id is not None:
-                job = await self._queue.get_job(current.job_id)
-                if job.status in (
-                    protocol.STATUS_QUEUED,
-                    protocol.STATUS_RUNNING,
-                    protocol.STATUS_WAITING_OWNER,
-                ):
-                    await self._queue.post_from_client(
-                        job.client, job.id, protocol.MSG_STOP, observe=False
-                    )
+            await self._stop_current(epic_id)
             return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: protocol.EPIC_STOPPED}
+
+    async def delete(self, epic_id: str) -> dict[str, Any]:
+        async with self._lock:
+            epic = await self._load(epic_id)
+            await self._stop_current(epic_id)
+            async with self._db.transaction() as conn:
+                await conn.execute("DELETE FROM epic_tasks WHERE epic_id = ?", (epic_id,))
+                await conn.execute("DELETE FROM epics WHERE id = ?", (epic_id,))
+            await repos.delete_branch(self._git_root, epic.project, epic.branch)
+            return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: protocol.EPIC_DELETED}
+
+    async def _stop_current(self, epic_id: str) -> None:
+        tasks = await self._tasks(epic_id)
+        current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+        if current is None or current.job_id is None:
+            return
+        job = await self._queue.get_job(current.job_id)
+        if job.status in (
+            protocol.STATUS_QUEUED,
+            protocol.STATUS_RUNNING,
+            protocol.STATUS_WAITING_OWNER,
+        ):
+            await self._queue.post_from_client(job.client, job.id, protocol.MSG_STOP, observe=False)
 
     async def sync(self, job_id: str) -> None:
         cur = await self._db.conn.execute(

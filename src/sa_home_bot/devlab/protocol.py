@@ -263,6 +263,7 @@ EPIC_RUNNING = "running"
 EPIC_WAITING_OWNER = "waiting_owner"
 EPIC_STOPPED = "stopped"
 EPIC_DONE = "done"
+EPIC_DELETED = "deleted"
 EPIC_MAX_TASK_FAILURES = 2
 EPIC_MAX_TASKS = 40
 EPIC_TASK_KEYS = ("title", "task", "model", "profile", "paths", "depends_on")
@@ -311,6 +312,7 @@ TOOL_EPIC_SUBMIT = "devlab_epic_submit"
 TOOL_EPIC = "devlab_epic"
 TOOL_EPIC_RESUME = "devlab_epic_resume"
 TOOL_EPIC_STOP = "devlab_epic_stop"
+TOOL_EPIC_DELETE = "devlab_epic_delete"
 
 RESOURCE_TASK_TEMPLATE = "devlab://task-template"
 RESOURCE_USAGE = "devlab://usage"

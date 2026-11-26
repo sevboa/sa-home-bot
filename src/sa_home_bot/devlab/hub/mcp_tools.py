@@ -176,9 +176,17 @@ async def submit(
 
 
 async def epic_submit(
-    ctx: Context, project: str, base_branch: str, tasks: list[dict[str, Any]]
+    ctx: Context,
+    project: str,
+    base_branch: str,
+    tasks: list[dict[str, Any]],
+    replaces: str = "",
 ) -> Any:
+    if replaces:
+        await ctx.store.epics.view(ctx.client, replaces)
     view = await ctx.store.epics.submit(ctx.client, project, base_branch, tasks)
+    if replaces:
+        await ctx.store.epics.delete(replaces)
     models = sorted({t["model"] for t in tasks if isinstance(t.get("model"), str)})
     warnings = [w for name in models for w in await model_warnings(ctx, name)]
     return {"epic": view, "warnings": warnings}
@@ -196,6 +204,11 @@ async def epic_resume(ctx: Context, id: str) -> Any:
 async def epic_stop(ctx: Context, id: str) -> Any:
     await ctx.store.epics.view(ctx.client, id)
     return await ctx.store.epics.stop(id)
+
+
+async def epic_delete(ctx: Context, id: str) -> Any:
+    await ctx.store.epics.view(ctx.client, id)
+    return await ctx.store.epics.delete(id)
 
 
 async def test_outcome(ctx: Context, job: Any) -> Any:
@@ -434,6 +447,12 @@ TOOLS: tuple[Tool, ...] = (
                 required=True,
                 items={"type": "object"},
             ),
+            Param(
+                "replaces",
+                "string",
+                "Номер своего прежнего эпика: после постановки нового он удаляется"
+                " (как devlab_epic_delete).",
+            ),
         ),
         epic_submit,
     ),
@@ -456,6 +475,13 @@ TOOLS: tuple[Tool, ...] = (
         "Остановить свой эпик: текущее задание останавливается, следующие задачи не стартуют.",
         (Param("id", "string", "Номер эпика.", required=True),),
         epic_stop,
+    ),
+    Tool(
+        protocol.TOOL_EPIC_DELETE,
+        "Удалить свой эпик: текущее задание останавливается, эпик и ветка epic/<id> удаляются"
+        " из хаба; задания и их ветки agent/* остаются.",
+        (Param("id", "string", "Номер эпика.", required=True),),
+        epic_delete,
     ),
     Tool(
         protocol.TOOL_TEST,
