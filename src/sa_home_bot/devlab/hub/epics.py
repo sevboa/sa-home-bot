@@ -408,7 +408,7 @@ class HubEpics:
 
     async def _red_tests_before(self, task: EpicTask, tasks: Sequence[EpicTask]) -> list[str]:
         red: list[str] = []
-        for earlier in tasks[: task.idx]:
+        for earlier in (tasks[i] for i in task.depends_on):
             if earlier.profile != protocol.PROFILE_TESTER or earlier.job_id is None:
                 continue
             message = await self._queue.last_message(earlier.job_id, protocol.MSG_DONE)
