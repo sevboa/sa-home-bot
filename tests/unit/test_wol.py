@@ -127,3 +127,14 @@ def test_detect_local_wake_iface_on_ethernet(monkeypatch: pytest.MonkeyPatch):
 def test_detect_local_wake_iface_none_on_virtual_iface(monkeypatch: pytest.MonkeyPatch):
     _mock_lan(monkeypatch, "tailscale0")
     assert wol.detect_local_wake_iface() is None
+
+
+@pytest.mark.parametrize(("name", "expected"), [("wlan0", True), ("eth0", False)])
+def test_is_wireless_falls_back_to_name_when_sysfs_denied(
+    monkeypatch: pytest.MonkeyPatch, name: str, expected: bool
+):
+    def deny(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(wol.Path, "exists", deny)
+    assert wol._is_wireless(name) is expected

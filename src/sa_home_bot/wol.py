@@ -78,8 +78,11 @@ class LocalWakeInfo:
 
 def _is_wireless(name: str) -> bool:
     wireless_marker = Path(f"/sys/class/net/{name}/wireless")
-    if wireless_marker.parent.exists():
-        return wireless_marker.exists()
+    try:
+        if wireless_marker.parent.exists():
+            return wireless_marker.exists()
+    except OSError:
+        pass
     return bool(_WIRELESS_NAME_RE.search(name))
 
 
