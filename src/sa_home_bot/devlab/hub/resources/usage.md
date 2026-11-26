@@ -47,7 +47,8 @@
 
 ## Эпик
 Крупная фича идёт эпиком: заданием `profile=architect` (высокий `priority`, `base_branch=base/<имя>`)
-архитектор пишет план в `plans/<имя>.json`, потом `devlab_epic_submit(project, base_branch, tasks)`.
+архитектор пишет план в `plans/<имя>.json`; план читает и проверяет управляющий (сам в эпик он не
+превращается), потом `devlab_epic_submit(project, base_branch, tasks)`.
 Задача плана: `{title, task, profile, paths, depends_on}`, у каждой в submit ещё `model`. Сначала
 задачи `tester` (свой новый тест-файл, имя в тексте), потом `executor-code`. Текст задачи ~1000 знаков,
 больше 1500 отклоняется. `depends_on` — индексы с нуля. Задачи эпика идут по очереди в ветке `epic/<id>`

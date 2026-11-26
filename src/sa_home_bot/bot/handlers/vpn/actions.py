@@ -302,6 +302,10 @@ async def _vpn_card(ctx: Ctx, value: str | None, node_id: str | None) -> None:
         await wizard.show(ctx, value)
     elif value[0] == _cb.SCREEN_LINK:
         await delivery.send_settings_link(ctx, value[1:])
+    elif value[0] == _cb.SCREEN_HIDDIFY:
+        await delivery.send_hiddify_add(ctx, value[1:])
+    elif value[0] == _cb.SCREEN_SUBLINK:
+        await delivery.send_subscription_link(ctx, value[1:])
     elif value[0] == _cb.SCREEN_RESTORE:
         await manage.show_restore_select(ctx, value[1:])
     elif value[0] == _cb.SCREEN_REISSUE:

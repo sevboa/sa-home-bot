@@ -74,8 +74,16 @@ def home_keyboard(
     subscription: Subscription | None,
     self_serve_nodes: list[str],
     has_devices: bool = True,
+    single_device: vpn_devices.Device | None = None,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if single_device is not None:
+        rows.append(
+            [
+                button(vpn_wizard.ADD_BUTTON, _cb.card_cb(_cb.SCREEN_HIDDIFY, single_device.key)),
+                button(vpn_wizard.LINK_BUTTON, _cb.card_cb(_cb.SCREEN_SUBLINK, single_device.key)),
+            ]
+        )
     if not has_devices and vpn_rights.allows(subscription, vpn_protocol.ACTION_ISSUE):
         rows.append([vpn_wizard.wizard_button()])
     rows.append([button("⚙️ Управление устройствами", _cb.card_cb(_cb.SCREEN_LIST))])
@@ -128,20 +136,11 @@ def device_card_keyboard(
     countries = vpn_devices.countries_of(servers)
     rows: list[list[InlineKeyboardButton]] = []
     if page_url:
-        rows.append([InlineKeyboardButton(text=vpn_devices.PAGE_CARD_BUTTON, url=page_url)])
+        rows.append(vpn_wizard.add_row(page_url))
+        rows.append([button(vpn_wizard.LINK_BUTTON, _cb.card_cb(_cb.SCREEN_SUBLINK, device.key))])
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_ISSUE):
-        rows.append(
-            [
-                button(
-                    "📥 Получить настройки",
-                    _cb.card_cb(_cb.SCREEN_LINK if page_url else _cb.SCREEN_PICK, device.key),
-                )
-            ]
-        )
-        if page_url:
-            rows.append(
-                [button(vpn_settings.OTHER_WAYS_BUTTON, _cb.card_cb(_cb.SCREEN_PICK, device.key))]
-            )
+        label = vpn_settings.OTHER_WAYS_BUTTON if page_url else "📥 Получить настройки"
+        rows.append([button(label, _cb.card_cb(_cb.SCREEN_PICK, device.key))])
     if vpn_rights.allows(subscription, vpn_protocol.ACTION_REISSUE):
         rows.append(
             [button(vpn_devices.REISSUE_BUTTON, _cb.card_cb(_cb.SCREEN_REISSUE, device.key))]

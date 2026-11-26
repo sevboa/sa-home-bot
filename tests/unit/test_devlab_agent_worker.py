@@ -406,6 +406,15 @@ async def test_limits_for_token_ceiling(env, entries, expected):
     assert worker._limits_for(spend, entries).max_tokens == expected
 
 
+@pytest.mark.parametrize(("expect_red", "expected"), [(True, 0), (False, 5)])
+async def test_limits_for_expect_red_turns_off_red_runs_crane(env, expect_red, expected):
+    worker = make_worker(env, ScriptedChatModel(), limits=AgentLimits(max_red_runs=5))
+    spend = JobSpend(SpendState(), lambda state: None)
+    profile = DevlabProfileConfig(expect_red=expect_red)
+    entries = [CatalogEntry(MODEL, "or", "http://o", remote=True, free=True)]
+    assert worker._limits_for(spend, entries, profile).max_red_runs == expected
+
+
 async def submit_profile(env, profile) -> str:
     await env.push(BASE, BASE_FILES)
     data = await env.mcp.call(

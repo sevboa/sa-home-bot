@@ -23,6 +23,7 @@ LAYER_UP_TEXT = {
     vpn_link.LAYER_NODE: "нода снова на связи",
     vpn_link.LAYER_VPN: "VPN снова доступен",
 }
+PING_HINT = {True: " — ping есть, режут TCP", False: " — ping нет, IP закрыт целиком"}
 PARTIAL_NOTE = " (частично)"
 SERVER_SEPARATOR = "|"
 
@@ -125,6 +126,8 @@ def outage_text(data: dict, label_of: Callable[[str], str]) -> str | None:
     to = data.get("to")
     if to == vpn_link.LEVEL_DOWN:
         head = f"🚨 {title} — {LAYER_DOWN_TEXT[layer]}{where}"
+        if layer == vpn_link.LAYER_NET:
+            head += PING_HINT.get(data.get("ping"), "")
     elif data.get("from") == vpn_link.LEVEL_DOWN and to == vpn_link.LEVEL_OK:
         head = f"✅ {title} — {LAYER_UP_TEXT[layer]}{where}"
     elif data.get("from") == vpn_link.LEVEL_DOWN and to == vpn_link.LEVEL_PARTIAL:

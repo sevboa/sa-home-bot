@@ -526,6 +526,7 @@ class AgentWorker(WorkerLoops):
                 write_prefixes=tuple(profile.write_prefixes),
                 allow_no_changes=profile.allow_no_changes,
                 expect_red=profile.expect_red,
+                plan_check=profile.plan_check,
                 draft_after_reads=profile.draft_after_reads,
                 require_verdict=profile.require_verdict,
                 code_mode=profile.code_mode,
@@ -661,6 +662,7 @@ class AgentWorker(WorkerLoops):
                 quick_steps=profile.quick_steps,
                 quick_params=dict(profile.quick_params),
                 params=dict(profile.params),
+                max_red_runs=0 if profile.expect_red else limits.max_red_runs,
             )
         return replace(
             limits,
