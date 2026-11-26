@@ -55,8 +55,8 @@ async def test_read_many_counts_once(project):
 
 
 async def test_write_under_prefix_lifts_restriction(project):
-    box = toolbox(project, draft_after_reads=1)
-    await run(box, "read('src/a.py')")
+    box = toolbox(project, draft_after_reads=2)
+    await run(box, "read('src/a.py')\nread('src/a.py')")
     assert REFUSAL in await run(box, "read('src/a.py')")
     await run(box, "write('plans/p.md', 'черновик')")
     out = await run(box, "print(read('src/a.py'))\nprint(len(grep('value')))")
@@ -94,3 +94,15 @@ async def test_write_outside_prefix_does_not_lift(project):
     out = await run(box, attempt)
     assert "вне путей роли" in out
     assert REFUSAL in await run(box, "read('src/a.py')")
+
+
+async def test_reads_refused_again_until_result_changes(project):
+    box = toolbox(project, draft_after_reads=2)
+    await run(box, "write('plans/p.md', 'черновик')")
+    assert REFUSAL not in await run(box, "read('src/a.py')\nread('src/a.py')")
+    refused = await run(box, "read('src/a.py')")
+    assert "2 чтений без правки результата: уточни файл в plans/" in refused
+    await run(box, "write('plans/p.md', 'черновик')")
+    assert "без правки результата" in await run(box, "read('src/a.py')")
+    await run(box, "write('plans/p.md', 'черновик и задача')")
+    assert "без правки результата" not in await run(box, "read('src/a.py')")

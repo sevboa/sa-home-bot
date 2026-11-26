@@ -622,12 +622,18 @@ def _gated(function):
         limit = _CONFIG.get("draft_after_reads", 0)
         if not limit or _STATE["depth"]:
             return function(*args, **kwargs)
-        if not _STATE["drafted"] and _STATE["reads"] >= limit:
+        if _STATE["reads"] >= limit:
+            where = ", ".join(_CONFIG["write_prefixes"])
+            if not _STATE["drafted"]:
+                raise EditError(
+                    "Сначала запиши черновик результата в "
+                    + where
+                    + ": что знаешь уже сейчас, пусть неполный. "
+                    "Потом читай код и уточняй файл."
+                )
             raise EditError(
-                "Сначала запиши черновик результата в "
-                + ", ".join(_CONFIG["write_prefixes"])
-                + ": что знаешь уже сейчас, пусть неполный. "
-                "Потом читай код и уточняй файл."
+                f"{limit} чтений без правки результата: уточни файл в {where} тем, что уже "
+                "прочитал, потом читай дальше."
             )
         _STATE["reads"] += 1
         _STATE["depth"] += 1
@@ -655,11 +661,21 @@ def _writable(path):
     return relative
 
 
+def _changed(relative, data):
+    try:
+        with _real_open(relative, "rb") as handle:
+            return handle.read() != data
+    except OSError:
+        return True
+
+
 def _store(relative, data):
     if data and not data.endswith(b"\n") and b"\0" not in data:
         crlf = b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
         data += b"\r\n" if crlf else b"\n"
     _backup(relative)
+    if _changed(relative, data):
+        _STATE["reads"] = 0
     _STATE["drafted"] = True
     parent = os.path.dirname(relative)
     if parent:
