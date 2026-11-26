@@ -376,6 +376,24 @@ async def test_fallback_taken_when_primary_not_live(queue):
     assert claimed.params[S.PARAM_ORIGINAL_MODEL] == MODEL
 
 
+async def test_fallback_local_not_taken_by_remote_claimant(queue):
+    job = await submit(queue, fallback="local")
+    assert await queue.claim(EXECUTOR, ["other-remote"], live_models=[MODEL, "local"]) is None
+    claimed = await queue.claim(EXECUTOR, [MODEL], live_models=[MODEL, "local"])
+    assert claimed.id == job.id
+    assert claimed.model == MODEL
+    assert S.PARAM_ORIGINAL_MODEL not in claimed.params
+
+
+async def test_fallback_local_goes_to_claimant_with_local_models(queue):
+    await running_job(queue)
+    job = await submit(queue, fallback="local")
+    assert await queue.claim(EXECUTOR, ["other-remote"], live_models=[MODEL, "local"]) is None
+    claimed = await queue.claim(EXECUTOR, ["local"], live_models=[MODEL, "local"])
+    assert claimed.id == job.id
+    assert claimed.model == "local"
+
+
 async def test_normal_claim_no_model_swap(queue):
     job = await submit(queue)
     claimed = await queue.claim(EXECUTOR, [MODEL])
