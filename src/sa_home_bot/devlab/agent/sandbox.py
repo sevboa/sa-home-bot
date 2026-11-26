@@ -71,7 +71,7 @@ def failed_test_ids(output: str) -> list[str]:
     seen: dict[str, None] = {}
     for line in output.splitlines():
         if FAILED_LINE.match(line):
-            seen.setdefault(line.split()[1], None)
+            seen.setdefault(line.split(" ", 1)[1].split(" - ", 1)[0].rstrip(), None)
     return list(seen)
 
 

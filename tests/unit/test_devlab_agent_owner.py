@@ -302,7 +302,7 @@ async def test_stop_while_waiting_owner_keeps_partial_branch(env):
 
     assert await env.status(job_id) == protocol.STATUS_STOPPED
     assert not worker.parked_jobs
-    assert await hub_branch(env, wip_of(job_id)) is None
+    assert await hub_branch(env, wip_of(job_id))
     assert await hub_branch(env, agent_of(job_id))
     assert not (env.tmp_path / "exec" / AGENT_DIR / job_id).exists()
     assert not worker.pending_messages

@@ -175,7 +175,7 @@ async def test_resume_keeps_local_unpushed_work(env):
     assert await hub_branch(env, WIP_BRANCH) == head
 
 
-async def test_abandon_publishes_partial_result_and_drops_wip(env):
+async def test_abandon_publishes_partial_result_and_keeps_wip(env):
     await env.push(BASE_BRANCH, BASE_FILES)
     repo = make_repo(env)
     await repo.open()
@@ -183,8 +183,25 @@ async def test_abandon_publishes_partial_result_and_drops_wip(env):
     await repo.on_change("write_file")
     sha = await repo.abandon("бюджет времени")
     assert await hub_branch(env, AGENT_BRANCH) == sha
-    assert await hub_branch(env, WIP_BRANCH) is None
+    assert await hub_branch(env, WIP_BRANCH)
     assert (await show(env, sha, "%s")).startswith(f"{ABANDONED_PREFIX}бюджет времени")
+
+
+async def test_open_after_abandon_continues_from_kept_wip(env):
+    await env.push(BASE_BRANCH, BASE_FILES)
+    first = make_repo(env, "w1")
+    await first.open()
+    (first.workdir / "a.txt").write_bytes(b"half\n")
+    await first.on_change("write_file")
+    await first.abandon("стоп")
+    tip = await hub_branch(env, WIP_BRANCH)
+
+    second = make_repo(env, "w2")
+    assert await second.open() == tip
+    assert (second.workdir / "a.txt").read_bytes() == b"half\n"
+    sha = await second.finish("итог")
+    assert sha
+    assert await hub_branch(env, WIP_BRANCH) is None
 
 
 async def test_abandon_without_changes_leaves_only_base(env):

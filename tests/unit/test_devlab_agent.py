@@ -44,7 +44,12 @@ from sa_home_bot.devlab.agent.prompt import (
     with_flow_reminder,
 )
 from sa_home_bot.devlab.agent.prompt_en import CODE_MODE_REMINDER_REMOTE_EN
-from sa_home_bot.devlab.agent.sandbox import ExecResult, LocalSandbox, SandboxPathError
+from sa_home_bot.devlab.agent.sandbox import (
+    ExecResult,
+    LocalSandbox,
+    SandboxPathError,
+    failed_test_ids,
+)
 from sa_home_bot.devlab.agent.script import worker_argv
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import (
@@ -1322,6 +1327,30 @@ async def test_finish_guard_excuses_tests_red_on_base(tmp_path):
     assert guard.excused == [BASE_RED_ID]
     assert await guard.verify_green() == []
     assert sandbox.base_runs == 1
+
+
+SPACED_ID = "tests/unit/test_vpn.py::test_phone[\\U0001f4f1 Rose]"
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        (f"FAILED {SPACED_ID} - AssertionError: x - y\n", [SPACED_ID]),
+        (f"ERROR {SPACED_ID}\n", [SPACED_ID]),
+        (f"FAILED {BASE_RED_ID}   \n", [BASE_RED_ID]),
+        (f"FAILED {BASE_RED_ID} - assert 0\nFAILED {BASE_RED_ID} - assert 0\n", [BASE_RED_ID]),
+    ],
+)
+def test_failed_test_ids_keep_spaces_inside_parameters(output, expected):
+    assert failed_test_ids(output) == expected
+
+
+async def test_finish_guard_excuses_base_red_test_with_spaced_id(tmp_path):
+    out = f"FAILED {SPACED_ID} - assert 0\n1 failed, 3 passed in 1s"
+    sandbox = BaseRedSandbox(tmp_path, base_out=out, test_out=out)
+    guard = FinishGuard(sandbox, AgentSpec(test_argv=("pytest",)))
+    assert await guard.verify_green() == []
+    assert guard.excused == [SPACED_ID]
 
 
 async def test_finish_guard_blocks_tests_green_on_base(tmp_path):

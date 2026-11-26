@@ -578,7 +578,7 @@ class AgentWorker(WorkerLoops):
             on_change=repo.on_change,
             on_step=lambda title: self._step_done(run, title),
             spend=spend.total_cost,
-            tokens=spend.total_tokens,
+            tokens=spend.segment_tokens,
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
             on_fold=spend.note_fold,
