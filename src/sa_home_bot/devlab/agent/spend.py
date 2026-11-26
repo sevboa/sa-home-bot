@@ -46,6 +46,9 @@ class JobSpend:
     def total_tokens(self) -> int:
         return self._state.base_tokens + self._state.tokens
 
+    def segment_tokens(self) -> int:
+        return self._state.tokens
+
     def _update(self, **changes: Any) -> None:
         self._state = self._state.model_copy(update=changes)
         self._save(self._state)

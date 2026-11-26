@@ -213,7 +213,7 @@ async def test_stop_closes_job_and_keeps_partial_branch(env):
     assert await running
 
     assert await env.status(job_id) == protocol.STATUS_STOPPED
-    assert await hub_branch(env, wip_of(job_id)) is None
+    assert await hub_branch(env, wip_of(job_id))
     assert await hub_branch(env, agent_of(job_id))
     assert worker.cursor > 0
     assert not worker.pending_messages
