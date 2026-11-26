@@ -14,6 +14,7 @@ from sa_home_bot.devlab.executor.agent_sandbox import SandboxFactory, podman_san
 from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker, SlotRegistry
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
+from sa_home_bot.devlab.executor.park import ParkMode
 from sa_home_bot.devlab.executor.podman import PodmanTestRunner
 from sa_home_bot.devlab.executor.routing import (
     MODELS_ANY,
@@ -118,7 +119,8 @@ async def run_executor(
     catalog = ModelCatalog(hub)
     silence_watch = SilenceWatch()
     gateways = GatewayModels(catalog, cfg.hub_token, silence_watch)
-    busy = BusyTracker(cfg.owner_wait_s)
+    park = ParkMode()
+    busy = BusyTracker(cfg.owner_wait_s, park=park)
     worker_settings = WorkerSettings(
         hub_url=cfg.hub_url,
         token=cfg.hub_token,
@@ -126,6 +128,7 @@ async def run_executor(
         poll_interval_s=cfg.poll_interval_s,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
         specs_dir=Path(cfg.specs_dir).expanduser() if cfg.specs_dir else None,
+        park=park,
     )
     tester = TestWorker(hub, runner, worker_settings, busy)
     slots = SlotRegistry()

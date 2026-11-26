@@ -7,7 +7,7 @@ import shlex
 import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from sa_home_bot.devlab.executor.mirror import (
     check_project_name,
     remote_url,
 )
+from sa_home_bot.devlab.executor.park import ParkMode
 from sa_home_bot.devlab.executor.runner import JUNIT_FILE, RunRequest, RunResult, TestRunner
 from sa_home_bot.devlab.executor.spec import SPEC_FILE, load_project_spec
 from sa_home_bot.devlab.hub.queue import Job
@@ -65,6 +66,7 @@ class WorkerSettings:
     poll_interval_s: float
     heartbeat_interval_s: float
     specs_dir: Path | None = None
+    park: ParkMode = field(default_factory=ParkMode)
 
 
 def heartbeat_body(
@@ -270,6 +272,8 @@ class TestWorker(WorkerLoops):
             self._save(cursor=cursor)
 
     async def claim_once(self) -> bool:
+        if self._settings.park.active:
+            return False
         if self._state.current is not None and not await self._settle_orphan():
             return False
         job = await self._hub.claim([protocol.JOB_KIND_TEST])

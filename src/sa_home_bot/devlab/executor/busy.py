@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from sa_home_bot.devlab.executor.park import ParkMode
+
 DEFAULT_OWNER_WAIT_S = 3600.0
 
 
@@ -16,6 +18,7 @@ class BusyTracker:
         owner_wait_s: float = DEFAULT_OWNER_WAIT_S,
         clock: Callable[[], float] = time.time,
         outbox_size: Callable[[], int] = no_outbox,
+        park: ParkMode | None = None,
     ) -> None:
         self._owner_wait_s = owner_wait_s
         self._clock = clock
@@ -23,6 +26,7 @@ class BusyTracker:
         self._running: set[str] = set()
         self._waiting: dict[str, float] = {}
         self._queued = 0
+        self._parked = park or ParkMode()
 
     def restore(self, waiting: dict[str, float]) -> None:
         self._waiting = dict(waiting)
@@ -51,6 +55,9 @@ class BusyTracker:
     def set_queued(self, count: int) -> None:
         self._queued = count
 
+    def set_parked(self, parked: bool) -> None:
+        self._parked.active = parked
+
     def holding_for_owner(self) -> list[str]:
         now = self._clock()
         return sorted(
@@ -61,6 +68,8 @@ class BusyTracker:
         return bool(self._running or self._queued > 0 or self.outbox_size() > 0)
 
     def busy(self) -> bool:
+        if self._parked.active:
+            return bool(self._running or self.outbox_size() > 0)
         return bool(
             self._running or self._queued > 0 or self.holding_for_owner() or self.outbox_size() > 0
         )

@@ -419,6 +419,8 @@ class AgentWorker(WorkerLoops):
         await self.send(job_id, kind, payload)
 
     async def claim_once(self) -> bool:
+        if self._settings.park.active:
+            return False
         resumed, self._resume = self._resume, None
         if resumed is None:
             ready = next((key for key, entry in self._state.parked.items() if entry.answered), None)
