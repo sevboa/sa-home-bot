@@ -154,8 +154,12 @@ async def test_executor_actions_follow_transition_table(queue, status, kind):
     job = await SETUPS[status](queue)
     target = EXECUTOR_ACTIONS[kind]
     confirms_stop = kind == S.MSG_STOPPED and status == S.STATUS_STOPPED
+    late_stop = kind == S.MSG_STOPPED and status == S.STATUS_QUEUED
     repeats_question = kind == S.MSG_QUESTION and status == S.STATUS_WAITING_OWNER
-    if target in S.TRANSITIONS[status] or confirms_stop or repeats_question:
+    if late_stop:
+        await queue.post_from_executor(job.id, kind)
+        assert (await queue.get_job(job.id)).status == S.STATUS_QUEUED
+    elif target in S.TRANSITIONS[status] or confirms_stop or repeats_question:
         await queue.post_from_executor(job.id, kind)
         assert (await queue.get_job(job.id)).status == target
     else:
@@ -567,6 +571,17 @@ async def test_poll_stop_not_filtered_when_resume_then_later_stop(queue):
     kinds = [m.kind for m in await queue.poll(executor=EXECUTOR)]
     assert S.MSG_STOP in kinds
     assert S.MSG_RESUME in kinds
+
+
+async def test_late_stopped_after_resume_keeps_job_queued(queue):
+    job = await running_job(queue)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME)
+    await queue.post_from_executor(job.id, S.MSG_STOPPED, {S.PAYLOAD_TOKENS: 7}, executor=EXECUTOR)
+    after = await queue.get_job(job.id)
+    assert after.status == S.STATUS_QUEUED
+    assert after.tokens == 7
+    assert (await queue.claim(EXECUTOR, [MODEL])).id == job.id
 
 
 async def test_stop_queued_notifies_client_without_executor(queue):
