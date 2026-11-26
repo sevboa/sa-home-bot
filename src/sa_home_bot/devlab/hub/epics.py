@@ -486,13 +486,13 @@ class HubEpics:
                 epic.project,
                 epic.branch,
                 source,
-                f"epic {epic.id}: задача {task.idx + 1} ({task.title}), задание {job.id}",
+                f"epic {epic.id}: задача {task.idx} ({task.title}), задание {job.id}",
             )
         except HubError as exc:
             await self._wait(
                 epic,
                 job,
-                f"Эпик {epic.id}, задача {task.idx + 1}: слить {source} в {epic.branch} не "
+                f"Эпик {epic.id}, задача {task.idx}: слить {source} в {epic.branch} не "
                 f"вышло ({exc}). Исправь ветку и верни задание в очередь или останови.",
             )
             return False
@@ -530,7 +530,7 @@ class HubEpics:
                 failures=failures,
                 marked=utc_now().isoformat(),
             )
-        number = f"Эпик {epic.id}, задача {task.idx + 1} ({task.title}), задание {job.id}"
+        number = f"Эпик {epic.id}, задача {task.idx} ({task.title}), задание {job.id}"
         if outcome == OUTCOME_STOPPED:
             await self._wait(
                 epic, job, f"{number}: остановлено. Верни в очередь (devlab_resume) или правь план."

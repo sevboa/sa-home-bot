@@ -211,6 +211,7 @@ async def test_first_failure_retries_second_stops_epic(store):
     assert len(waiting) == 1
     assert view["id"] in waiting[0].payload[S.PARAM_EPIC]
     assert waiting[0].payload[S.PAYLOAD_TEXT] == now["question"]
+    assert f"Эпик {view['id']}, задача 0 (" in now["question"]
 
 
 async def test_owner_resume_after_wait_continues_epic(store):
