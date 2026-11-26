@@ -96,6 +96,33 @@ def scope_levels(
     }
 
 
+def servers_unusable_from_russia(
+    net: Iterable[tuple[str, str, str]],
+    links: Iterable[tuple[str, str, str]],
+    russia: Collection[str],
+    ignored: Collection[str],
+) -> set[str]:
+    net_levels: dict[tuple[str, str], str] = {}
+    for node, server, level in net:
+        if scope_of(node, russia, ignored) == SCOPE_RUSSIA:
+            net_levels[(node, server)] = level
+    link_levels: dict[tuple[str, str], list[str]] = {}
+    for node, server, level in links:
+        if scope_of(node, russia, ignored) == SCOPE_RUSSIA:
+            link_levels.setdefault((node, server), []).append(level)
+    verdicts: dict[str, list[bool]] = {}
+    for node, server in sorted(net_levels.keys() | link_levels.keys()):
+        if net_levels.get((node, server)) == LEVEL_DOWN:
+            unusable = True
+        else:
+            seen = link_levels.get((node, server))
+            if not seen:
+                continue
+            unusable = all(level == LEVEL_DOWN for level in seen)
+        verdicts.setdefault(server, []).append(unusable)
+    return {server for server, flags in verdicts.items() if all(flags)}
+
+
 def resource_bad_targets(rows: Iterable[tuple[tuple[str, str, str], str, bool]]) -> set[str]:
     by_link: dict[tuple[str, str, str], dict[str, bool]] = {}
     for link, target, ok in rows:

@@ -23,7 +23,7 @@ from sa_home_bot.reality.client_config import (
     render_vless_url,
 )
 from sa_home_bot.vpn import qr
-from sa_home_bot.vpn.protocol import GB, country_flag
+from sa_home_bot.vpn.protocol import GB, SUB_BRIDGE_HIDDIFY, country_flag
 
 TOKEN_LEN = 32
 _TOKEN_RE = re.compile(rf"^[A-Za-z0-9_-]{{{TOKEN_LEN}}}$")
@@ -1041,7 +1041,7 @@ def render_page(
     return _layout(title, body, script)
 
 
-BRIDGE_HIDDIFY = "hiddify"
+BRIDGE_HIDDIFY = SUB_BRIDGE_HIDDIFY
 BRIDGE_AMNEZIA = "amnezia"
 
 _BRIDGE_HIDDIFY_JS = r"""(function () {

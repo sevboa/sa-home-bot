@@ -38,6 +38,7 @@ from sa_home_bot.domain.vpn_link import (
     resource_bad_targets,
     scope_levels,
     scope_of,
+    servers_unusable_from_russia,
 )
 from sa_home_bot.domain.vpn_series import (
     failure_at_bytes,
@@ -62,6 +63,7 @@ from sa_home_bot.vpn.protocol import (
     EVENT_VPN_SERIES_RECOVERED,
     PROBE_TRANSPORT_REALITY_ALT,
     PROBE_TRANSPORT_REALITY_XHTTP,
+    REALITY_PROBE_TRANSPORTS,
     TELEGRAM_EGRESS_TARGET,
     TELEGRAM_EGRESS_TRANSPORT,
     TRANSPORT_REALITY,
@@ -108,6 +110,16 @@ def _net_reports(raw: object) -> dict[str, bool]:
         if isinstance(probe, dict) and isinstance(probe.get("ok"), bool):
             reports[str(server)] = probe["ok"]
     return reports
+
+
+def _net_pings(raw: object) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(server): probe["ping"]
+        for server, probe in raw.items()
+        if isinstance(probe, dict) and isinstance(probe.get("ping"), bool)
+    }
 
 
 def _settle_run(run: dict[str, Any], excluded: set[str]) -> None:
@@ -190,6 +202,7 @@ class ChecksMixin:
             raise ProtoError(ERR_BAD_REQUEST, "нужны node и непустой список results")
         now = utc_now()
         net_reports = _net_reports(args.get("net"))
+        net_pings = _net_pings(args.get("net"))
         runs: dict[tuple[str, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
@@ -282,16 +295,17 @@ class ChecksMixin:
             for server, new in after_net[scope].items():
                 old = before_net[scope].get(server)
                 if old is not None and old != new:
-                    outages.append(
-                        {
-                            "layer": LAYER_NET,
-                            "scope": scope,
-                            "server": server,
-                            "from": old,
-                            "to": new,
-                            "scopes": effective,
-                        }
-                    )
+                    data = {
+                        "layer": LAYER_NET,
+                        "scope": scope,
+                        "server": server,
+                        "from": old,
+                        "to": new,
+                        "scopes": effective,
+                    }
+                    if new == LEVEL_DOWN and server in net_pings:
+                        data["ping"] = net_pings[server]
+                    outages.append(data)
             for server, new in after[scope].items():
                 old = before[scope].get(server)
                 if old is None or old == new or LEVEL_DOWN not in (old, new):
@@ -419,6 +433,31 @@ class ChecksMixin:
             [(row["node"], row["server"], row["announced"]) for row in rows],
             self._cfg.russia_observers,
             self._cfg.ignored_observers,
+        )
+
+    async def _servers_unusable_from_russia(self) -> set[str]:
+        now = utc_now()
+        cur = await self._db.conn.execute(
+            "SELECT node, server, announced FROM vpn_layer_states "
+            "WHERE layer = ? AND updated_at >= ?",
+            (LAYER_NET, self._stale_before(now)),
+        )
+        net = [(row["node"], row["server"], row["announced"]) for row in await cur.fetchall()]
+        net_down = {(node, server) for node, server, level in net if level == LEVEL_DOWN}
+        fresh, fresh_params = self._fresh_clause("updated_at", now)
+        marks = ", ".join("?" for _ in REALITY_PROBE_TRANSPORTS)
+        cur = await self._db.conn.execute(
+            f"SELECT node, server, announced FROM vpn_link_states "
+            f"WHERE transport IN ({marks}) AND {fresh}",
+            [*REALITY_PROBE_TRANSPORTS, *fresh_params],
+        )
+        links = [
+            (row["node"], row["server"], row["announced"])
+            for row in await cur.fetchall()
+            if (row["node"], row["server"]) not in net_down
+        ]
+        return servers_unusable_from_russia(
+            net, links, self._cfg.russia_observers, self._cfg.ignored_observers
         )
 
     async def _node_levels(self) -> dict[str, str]:

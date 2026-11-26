@@ -326,7 +326,11 @@ def _resolve_with_reply(extra: dict):
 
     class FakeMixin(SubscriptionLinksMixin, ClientConfigsMixin):
         _node_id = "jeeves"
-        _cfg = type("obj", (), {"location": "🇳🇱 Нидерланды", "sub_port": 0})()
+        _cfg = type(
+            "obj",
+            (),
+            {"location": "🇳🇱 Нидерланды", "sub_port": 0, "sub_hide_blocked_from_russia": False},
+        )()
         _reality_cfg = RealityTransportConfig(
             endpoint_host="198.51.100.1",
             server_public_key="PUB1",

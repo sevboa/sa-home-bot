@@ -17,9 +17,10 @@ from sa_home_bot.bot.handlers.vpn.context import (
     fetch_card,
 )
 from sa_home_bot.bot.handlers.vpn.screens import (
-    page_url_by_label,
     redraw_card,
-    subscription_page_url,
+    subscription_answer,
+    subscription_answer_by_label,
+    subscription_link,
 )
 from sa_home_bot.vpn import protocol as vpn_protocol
 
@@ -60,7 +61,8 @@ async def create_device(ctx: Ctx, platform_code: str, *, expert: bool = False) -
         )
         return
     key = vpn_devices.device_key(label)
-    page_url = await page_url_by_label(ctx.node_link, ctx.chat_id, label)
+    answer = await subscription_answer_by_label(ctx.node_link, ctx.chat_id, label)
+    page_url = str(answer["page_url"]) if answer else None
     if expert:
         if page_url is not None:
             await ctx.edit(
@@ -70,21 +72,27 @@ async def create_device(ctx: Ctx, platform_code: str, *, expert: bool = False) -
         else:
             await ctx.edit(vpn_settings.pick_text(label), vpn_settings.pick_keyboard(key))
         return
-    await _show_connect_step(ctx, platform, key, label, page_url)
+    await _show_connect_step(ctx, platform, key, label, answer)
 
 
 async def _show_connect_step(
-    ctx: Ctx, platform: vpn_wizard.Platform, key: str, label: str, page_url: str | None
+    ctx: Ctx, platform: vpn_wizard.Platform, key: str, label: str, answer: dict | None
 ) -> None:
-    if page_url is None:
+    if answer is None:
         await ctx.edit(
             vpn_wizard.UNAVAILABLE_TEXT,
             vpn_wizard.unavailable_keyboard(vpn_wizard.CONNECT, platform.code, key),
         )
         return
     await ctx.edit(
-        vpn_wizard.page_link_text(label, page_url),
-        vpn_wizard.step_keyboard(vpn_wizard.CONNECT, platform, key, page_url=page_url),
+        vpn_wizard.connect_text(label, subscription_link(answer)),
+        vpn_wizard.step_keyboard(
+            vpn_wizard.CONNECT,
+            platform,
+            key,
+            page_url=str(answer["page_url"]),
+            cfg=ctx.config.vpn,
+        ),
     )
 
 
@@ -144,8 +152,8 @@ async def show(ctx: Ctx, value: str) -> None:
         await _check(ctx, platform, key, device)
         return
     await callback.answer()
-    page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
-    await _show_connect_step(ctx, platform, key, device.label, page_url)
+    answer = await subscription_answer(ctx.node_link, ctx.chat_id, device)
+    await _show_connect_step(ctx, platform, key, device.label, answer)
 
 
 async def _check(
@@ -161,7 +169,8 @@ async def _check(
         return
     found = vpn_wizard.online_connection(answered)
     if found is None:
-        page_url = await subscription_page_url(ctx.node_link, ctx.chat_id, device)
+        answer = await subscription_answer(ctx.node_link, ctx.chat_id, device)
+        page_url = str(answer["page_url"]) if answer else None
         await ctx.edit(
             vpn_wizard.not_connected_text(device.label),
             vpn_wizard.not_connected_keyboard(platform.code, key, page_url=page_url),
