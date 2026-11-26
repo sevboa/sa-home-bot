@@ -79,7 +79,7 @@ def red_tests_note(tests: Sequence[str]) -> str:
 
 
 def _label(index: int, task: PlanTask) -> str:
-    return f"задача {index + 1} ({task.title or 'без названия'})"
+    return f"задача {index} ({task.title or 'без названия'})"
 
 
 def _length_reasons(tasks: Sequence[PlanTask]) -> list[str]:
@@ -110,12 +110,12 @@ def _graph_reasons(tasks: Sequence[PlanTask]) -> list[str]:
         valid[i] = []
         for dep in t.depends_on:
             if not 0 <= dep < len(tasks):
-                reasons.append(f"{_label(i, t)}: зависимости {dep + 1} нет в плане")
+                reasons.append(f"{_label(i, t)}: зависимости {dep} нет в плане")
             else:
                 valid[i].append(dep)
                 if dep > i:
-                    reasons.append(f"{_label(i, t)}: ссылка вперёд на задачу {dep + 1}")
-    reasons.extend(f"{_label(i, tasks[i])}: цикл через задачу {i + 1}" for i in _in_cycle(valid))
+                    reasons.append(f"{_label(i, t)}: ссылка вперёд на задачу {dep}")
+    reasons.extend(f"{_label(i, tasks[i])}: цикл через задачу {i}" for i in _in_cycle(valid))
     return reasons
 
 
@@ -146,8 +146,8 @@ def _test_reasons(tasks: Sequence[PlanTask], existing: Collection[str]) -> list[
             name = PurePosixPath(path).name
             if name in owner and owner[name][0] != i:
                 reasons.append(
-                    f"тест-файл {name}: в задаче {owner[name][0] + 1} ({owner[name][1]}) и в "
-                    f"задаче {i + 1} ({path})"
+                    f"тест-файл {name}: в задаче {owner[name][0]} ({owner[name][1]}) и в "
+                    f"задаче {i} ({path})"
                 )
             owner.setdefault(name, (i, path))
             clash = existing_by_name.get(name, set()) - {path}

@@ -16,7 +16,7 @@ from sa_home_bot.devlab.agent.sandbox import (
 from sa_home_bot.devlab.agent.spec import AgentSpec
 from sa_home_bot.devlab.agent.tools import changed_test_files, without_xdist
 from sa_home_bot.devlab.hub.epic_plan import PlanTask, check_plan, plan_test_files
-from sa_home_bot.devlab.protocol import RED_TESTS_ITEM, RED_TESTS_MARKER
+from sa_home_bot.devlab.protocol import RED_TESTS_ITEM, RED_TESTS_MARKER, TASK_LONG_CHARS
 
 VERDICT_ACCEPTED = "ВЕРДИКТ: принято"
 VERDICT_REWORK = "ВЕРДИКТ: доработать"
@@ -56,15 +56,15 @@ def _plan_tasks(name: str, raw: bytes) -> tuple[list[PlanTask], str]:
     tasks = []
     for index, item in enumerate(data):
         if not isinstance(item, dict):
-            return [], f"{name}: элемент {index + 1} не объект"
+            return [], f"{name}: элемент {index} не объект"
         missing = [key for key in PLAN_FIELDS if key not in item]
         if missing:
-            return [], f"{name}: в элементе {index + 1} нет полей {', '.join(missing)}"
+            return [], f"{name}: в элементе {index} нет полей {', '.join(missing)}"
         paths, deps = item["paths"], item.get("depends_on", [])
         if not isinstance(item["title"], str) or not isinstance(item["task"], str):
-            return [], f"{name}: в элементе {index + 1} title и task должны быть строками"
+            return [], f"{name}: в элементе {index} title и task должны быть строками"
         if not _is_list_of(paths, str) or not _is_list_of(deps, int):
-            return [], f"{name}: в элементе {index + 1} paths и depends_on должны быть списками"
+            return [], f"{name}: в элементе {index} paths и depends_on должны быть списками"
         fields = {"profile": item["profile"]} if isinstance(item.get("profile"), str) else {}
         tasks.append(
             PlanTask(
@@ -162,7 +162,11 @@ class FinishGuard:
                 continue
             tasks, error = _plan_tasks(path, raw)
             reasons = [error] if error else check_plan(tasks, existing)
-            failures += [f"план {reason}. {PLAN_HINT}" for reason in reasons]
+            long = sum(len(task.task) > TASK_LONG_CHARS for task in tasks)
+            failures += [
+                f"план {reason}. {PLAN_HINT}" if i < long else f"план {reason}"
+                for i, reason in enumerate(reasons)
+            ]
         return failures
 
     async def verify(self) -> list[str]:

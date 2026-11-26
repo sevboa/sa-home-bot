@@ -48,6 +48,12 @@ def test_each_refusal_reason(plan, existing, fragment):
     assert any(fragment in reason for reason in reasons), reasons
 
 
+def test_reasons_number_tasks_like_depends_on():
+    reasons = check_plan([task("a"), task("b", depends_on=[1])])
+    expected = "задача 1 (b): цикл через задачу 1"
+    assert any(expected in reason for reason in reasons), reasons
+
+
 def test_existing_test_path_may_be_edited():
     assert check_plan([task(paths=["tests/unit/test_old.py"])], ["tests/unit/test_old.py"]) == []
 

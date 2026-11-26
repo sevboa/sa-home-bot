@@ -462,22 +462,43 @@ async def test_job_outside_epic_has_no_skip_or_locked(store):
     assert S.PARAM_EPIC_LOCKED not in job.params
 
 
+async def finish_tester(store, job_id, tests):
+    items = "".join(f"\n- {test}" for test in tests)
+    summary = "готово\n\n" + S.RED_TESTS_MARKER + items
+    job = await store.queue.get_job(job_id)
+    parent = await git(store, "rev-parse", S.HEADS_REF_PREFIX + job.base_branch)
+    sha = await commit(store, parent, f"{job_id}.txt", "x")
+    await git(store, "update-ref", S.HEADS_REF_PREFIX + S.AGENT_BRANCH_PREFIX + job_id, sha)
+    await store.queue.post_from_executor(
+        job_id, S.MSG_DONE, {S.PAYLOAD_SUMMARY: summary}, executor=EXECUTOR
+    )
+
+
 async def test_developer_after_tester_gets_red_tests_of_tester(store):
     tasks = plan(2)
     tasks[0]["profile"] = S.PROFILE_TESTER
     await submit(store, tasks)
     first = await claim(store)
     assert first.params[S.PARAM_EPIC_RED_TESTS] == []
-    items = "\n- tests/unit/test_m0.py::test_a\n- tests/unit/test_m0.py::test_b"
-    summary = "готово\n\n" + S.RED_TESTS_MARKER + items
-    job = await store.queue.get_job(first.id)
-    parent = await git(store, "rev-parse", S.HEADS_REF_PREFIX + job.base_branch)
-    sha = await commit(store, parent, "f.txt", "x")
-    await git(store, "update-ref", S.HEADS_REF_PREFIX + S.AGENT_BRANCH_PREFIX + first.id, sha)
-    await store.queue.post_from_executor(
-        first.id, S.MSG_DONE, {S.PAYLOAD_SUMMARY: summary}, executor=EXECUTOR
+    await finish_tester(
+        store, first.id, ["tests/unit/test_m0.py::test_a", "tests/unit/test_m0.py::test_b"]
     )
     second = await claim(store)
     expected = ["tests/unit/test_m0.py::test_a", "tests/unit/test_m0.py::test_b"]
     assert second.params[S.PARAM_EPIC_RED_TESTS] == expected
     assert "tests/unit/test_m0.py::test_b" in second.task
+
+
+async def test_developer_gets_red_tests_only_of_testers_it_depends_on(store):
+    tasks = plan(3)
+    tasks[0]["profile"] = S.PROFILE_TESTER
+    tasks[1]["profile"] = S.PROFILE_TESTER
+    tasks[1]["depends_on"] = []
+    tasks[2]["depends_on"] = [1]
+    await submit(store, tasks)
+    for test in ("tests/unit/test_m0.py::test_a", "tests/unit/test_m1.py::test_b"):
+        tester = await claim(store)
+        await finish_tester(store, tester.id, [test])
+    developer = await claim(store)
+    assert developer.params[S.PARAM_EPIC_RED_TESTS] == ["tests/unit/test_m1.py::test_b"]
+    assert "test_m0.py" not in developer.task
