@@ -50,6 +50,13 @@ async def test_long_task_rejected_with_reason(tmp_path):
     assert failures[0].endswith(PLAN_HINT)
 
 
+async def test_dependency_reason_without_split_hint(tmp_path):
+    plan = good_plan()
+    plan[1]["depends_on"] = [1]
+    failures = await make_guard(tmp_path, plan).verify()
+    assert failures == ["план задача 1 (вторая): цикл через задачу 1"]
+
+
 async def test_broken_json_rejected(tmp_path):
     failures = await make_guard(tmp_path, "{не json").verify()
     assert len(failures) == 1
