@@ -96,6 +96,10 @@ ASK_SKIPPED = "не выполнено: задан вопрос владельц
 CRANE_QUESTION = (
     "Стоп-кран: {reason}. Продолжить (тогда выдаётся новый отрезок лимитов) или остановить?"
 )
+PARK_QUESTION = (
+    "Парковка исполнителя: агент остановлен между вызовами модели и продолжит сам. Остановить?"
+)
+PARK_REASON = "парковка исполнителя"
 NUMBERS = re.compile(r"\d+")
 SPACES = re.compile(r"\s+")
 NUMBER_PLACEHOLDER = "#"
@@ -130,6 +134,7 @@ class Crane(StrEnum):
     COST = "cost"
     TOKENS = "tokens"
     PAID_FREE = "paid_free"
+    PARK = "park"
     REPEAT = "repeat"
 
 
@@ -267,8 +272,10 @@ class AgentLoop:
         clock: Callable[[], float] = time.monotonic,
         overflow_hint: str = "",
         on_fold: Callable[[], None] | None = None,
+        park: Callable[[], bool] | None = None,
     ) -> None:
         self._on_fold = on_fold
+        self._park = park
         self._model = model
         self._tools = tools
         self._guard = guard
@@ -376,6 +383,14 @@ class AgentLoop:
             crane = self._crane(seg)
             if crane is not None:
                 return self._crane_result(seg, messages, *crane)
+            if self._park is not None and self._park():
+                return self._result(
+                    AgentStatus.ASKED,
+                    seg,
+                    reason=PARK_REASON,
+                    dialog=Dialog(messages=messages, question=PARK_QUESTION, parked=True),
+                    crane=Crane.PARK,
+                )
             before = (
                 estimate_tokens(messages)
                 if self._trace is not None or self._on_fold is not None

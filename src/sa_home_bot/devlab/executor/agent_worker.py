@@ -162,6 +162,7 @@ class ParkedEntry(BaseModel):
     answered: bool = False
     released: bool = False
     asked_at: float = Field(default_factory=time.time)
+    parked_for_restart: bool = False
 
 
 class AgentState(BaseModel):
@@ -234,7 +235,7 @@ class AgentWorker(WorkerLoops):
             }
         )
         for key, entry in self._state.parked.items():
-            if entry.answered:
+            if entry.answered and not entry.parked_for_restart:
                 self._busy.started(key)
         if self._resume:
             self._busy.started(self._resume.id)
@@ -419,9 +420,18 @@ class AgentWorker(WorkerLoops):
         await self.send(job_id, kind, payload)
 
     async def claim_once(self) -> bool:
+        if self._settings.park.active:
+            return False
         resumed, self._resume = self._resume, None
         if resumed is None:
-            ready = next((key for key, entry in self._state.parked.items() if entry.answered), None)
+            ready = next(
+                (
+                    key
+                    for key, entry in self._state.parked.items()
+                    if entry.answered or entry.parked_for_restart
+                ),
+                None,
+            )
             if ready is not None:
                 resumed = Job(**self._state.parked[ready].job)
         available: list[str] = []
@@ -582,6 +592,7 @@ class AgentWorker(WorkerLoops):
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
             on_fold=spend.note_fold,
+            park=lambda: self._settings.park.active,
         )
         system = build_system(
             rules,
@@ -624,7 +635,7 @@ class AgentWorker(WorkerLoops):
         if not path.exists():
             return None
         dialog = load_model(Dialog, path)
-        return dialog if dialog.answer is not None else None
+        return dialog if dialog.answer is not None or dialog.parked else None
 
     def _profile_of(self, job: Job) -> tuple[str, DevlabProfileConfig | None]:
         name = job.params.get(protocol.PARAM_PROFILE, protocol.DEFAULT_PROFILE)
@@ -723,21 +734,26 @@ class AgentWorker(WorkerLoops):
         job = run.job
         assert run.repo is not None
         spend = self._spend_of(job)
-        usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
         await self._upload_steps(job.id, run.root)
         if result.status is AgentStatus.ASKED:
             assert result.dialog is not None
             if result.crane in SPEND_CRANES:
                 spend.extend()
-            await self._park(run, result.dialog, usage)
+            if result.crane is Crane.PARK:
+                await self._park_for_restart(run, result.dialog)
+            else:
+                usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
+                await self._park(run, result.dialog, usage)
             return
         if result.status is AgentStatus.FINISHED:
             self._notes_of(job.id).discard()
             await self._retry(lambda: run.repo.finish(result.summary), None)
+            usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
             await self.send(
                 job.id, protocol.MSG_DONE, {protocol.PAYLOAD_SUMMARY: result.summary, **usage}
             )
             return
+        usage = {**spend.take_report(), protocol.PAYLOAD_MODEL: job.model}
         reason = f"{FAILURE_PREFIX[result.status]}: {result.reason}"
         if result.status is AgentStatus.MODEL_FAILED:
             await self._retry(lambda: run.repo.flush(), None)
@@ -764,6 +780,24 @@ class AgentWorker(WorkerLoops):
         await self.send(
             job.id, protocol.MSG_QUESTION, {protocol.PAYLOAD_TEXT: dialog.question, **usage}
         )
+
+    async def _park_for_restart(self, run: JobRun, dialog: Dialog) -> None:
+        job = run.job
+        assert run.repo is not None and run.sandbox is not None
+        save_model(dialog, run.root / DIALOG_FILE)
+        try:
+            await run.sandbox.stop()
+        except Exception as exc:
+            log.warning("Контейнер задания %s не остановлен: %s", job.id, self.scrub(str(exc)))
+        await self._retry(lambda: run.repo.milestone("парковка перед рестартом"), None)
+        self._parked_sandboxes[job.id] = run.sandbox
+        run.parked = True
+        parked = {
+            **self._state.parked,
+            job.id: ParkedEntry(job=asdict(job), answered=True, parked_for_restart=True),
+        }
+        self._save(job=None, parked=parked)
+        self._busy.finished(job.id)
 
     async def _fail_or_stop(self, run: JobRun, kind: str, text: str) -> None:
         await self._upload_steps(run.job.id, run.root)
