@@ -65,7 +65,7 @@ class HubStore:
         self._db = Database(data_dir / HUB_DB_NAME)
         self.git_root = data_dir / GIT_DIR_NAME
         self.logs_root = data_dir / LOGS_DIR_NAME
-        self.queue = queue.HubQueue(self._db, self.logs_root, bench_windows)
+        self.queue = queue.HubQueue(self._db, self.logs_root, self.git_root, bench_windows)
         self.epics = epics.HubEpics(self._db, self.queue, self.git_root)
 
     async def open(self) -> None:

@@ -175,3 +175,28 @@ async def merge_branch(
         "update-ref",
     )
     return new
+
+
+async def list_wip_branches(git_root: Path, project: str) -> list[str]:
+    repo = repo_path(git_root, project)
+    if not repo.is_dir():
+        return []
+    result = await run(
+        [
+            "git",
+            "--git-dir",
+            str(repo),
+            "for-each-ref",
+            "--format=%(refname:short)",
+            f"{protocol.HEADS_REF_PREFIX}{protocol.WIP_BRANCH_PREFIX}",
+        ],
+        timeout=GIT_TIMEOUT_S,
+    )
+    if result.returncode != 0:
+        return []
+    branches = []
+    for line in result.stdout_text.splitlines():
+        branch = line.strip()
+        if branch.startswith(protocol.WIP_BRANCH_PREFIX):
+            branches.append(branch[len(protocol.WIP_BRANCH_PREFIX) :])
+    return branches
