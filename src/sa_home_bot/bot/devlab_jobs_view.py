@@ -135,6 +135,13 @@ def _tokens_text(job: dict[str, Any], tokens: int) -> str:
     return str(tokens)
 
 
+def _active_text(job: dict[str, Any]) -> str | None:
+    active = job.get(protocol.FIELD_ACTIVE_S)
+    if not active:
+        return None
+    return f"акт {format_dhms(active if active < 60 else active // 60 * 60)}"
+
+
 def _epic_position(job: dict[str, Any]) -> tuple[str, int, int] | None:
     params = job.get(protocol.FIELD_PARAMS) or {}
     epic_id = params.get(protocol.PARAM_EPIC)
@@ -237,6 +244,9 @@ def job_line(n: int, job: dict[str, Any], offset: int, now: datetime) -> str:
         steps = job.get(protocol.FIELD_MODEL_STEPS) or job.get(protocol.FIELD_STEPS, 0)
         if steps:
             parts.append(f"· шаг {steps}")
+        active_text = _active_text(job)
+        if active_text:
+            parts.append(f"· {active_text}")
 
     dep_id = _first_waiting_dep(job)
     if dep_id:
@@ -444,6 +454,9 @@ def render_card(
         lines.append(f"<p>Взята вместо: {escape(str(original_model))}</p>")
 
     lines.append(f"<p>Создано / начато: {_format_dt(created)} / {_format_dt(started)}</p>")
+    active_text = _active_text(job)
+    if active_text:
+        lines.append(f"<p>В работе: {active_text[len('акт '):]}</p>")
     lines.append(f"<p>Токены: {_tokens_text(job, tokens)}</p>")
     model_steps = job.get(protocol.FIELD_MODEL_STEPS)
     if model_steps:

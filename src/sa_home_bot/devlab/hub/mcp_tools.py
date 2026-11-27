@@ -78,6 +78,8 @@ class Tool:
 
 def job_view(job: Any, with_task: bool = True) -> dict[str, Any]:
     data = asdict(job)
+    del data["active_seconds"], data["active_since"]
+    data[protocol.FIELD_ACTIVE_S] = job.active_s()
     if not with_task:
         del data["task"]
     return data

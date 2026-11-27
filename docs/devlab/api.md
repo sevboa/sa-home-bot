@@ -62,7 +62,7 @@ JSON-RPC 2.0 через POST, ответ `application/json` (без SSE и бе�
 | `devlab_submit` | `project`, `model`, `task`, `base_branch` (`base/...`), `priority` | ставит задание; `warnings`, если модели нет в каталоге (задание всё равно ждёт её); `task` длиннее `TASK_LONG_CHARS` (1500 знаков) — ошибка, задание не создаётся; кроме `purpose=bench` (экзамены стенда) |
 | `devlab_test` | `project`, `ref`, `cmd`, `args`, `wait` | ставит задание `test`; `wait` секунд (0..1800) ждёт результата |
 | `devlab_test_log` | `id`, `file` | хвост лога своего `test` (64 КиБ); для `agent` — `file=steps.jsonl`, журнал шагов |
-| `devlab_list` | `statuses` | свои задания без текста task.md |
+| `devlab_list` | `statuses` | свои задания без текста task.md; у каждого `active_s` — секунды в работе у исполнителя, без очереди и ожидания владельца ([queue.md](queue.md), 2026-11-27) |
 | `devlab_status` | `id` | своё задание целиком; у `test` поле `result` (как у `devlab_test`, `null` до завершения) |
 | `devlab_inbox` | `since`, `limit` | сообщения к клиенту с курсором `cursor` |
 | `devlab_ack` | `upto` | помечает прочитанным |

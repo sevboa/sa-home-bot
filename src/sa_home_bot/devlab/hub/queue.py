@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished TEXT,
     tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
-    params TEXT NOT NULL DEFAULT '{}'
+    params TEXT NOT NULL DEFAULT '{}',
+    active_seconds REAL NOT NULL DEFAULT 0,
+    active_since TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs (status, priority DESC, seq);
 CREATE TABLE IF NOT EXISTS messages (
@@ -102,9 +104,15 @@ CREATE TABLE IF NOT EXISTS reviews (
 PARAMS_COLUMN = "params"
 ADD_PARAMS_COLUMN = "ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{}'"
 
+ACTIVE_COLUMN = "active_seconds"
+ADD_ACTIVE_COLUMNS = (
+    "ALTER TABLE jobs ADD COLUMN active_seconds REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN active_since TEXT",
+)
+
 JOB_COLUMNS = (
     "id, kind, project, client, model, task, base_branch, priority, status, executor, "
-    "created, started, finished, tokens, cost_usd, params"
+    "created, started, finished, tokens, cost_usd, params, active_seconds, active_since"
 )
 
 
@@ -145,6 +153,13 @@ class Job:
     tokens: int
     cost_usd: float
     params: dict[str, Any]
+    active_seconds: float = 0.0
+    active_since: str | None = None
+
+    def active_s(self, now: datetime | None = None) -> int:
+        if self.status == protocol.STATUS_RUNNING:
+            return int(_closed(self, now or utc_now()))
+        return int(self.active_seconds)
 
 
 @dataclass(frozen=True)
@@ -162,6 +177,13 @@ def _job(row: aiosqlite.Row) -> Job:
     data = {key: row[key] for key in row.keys()}
     data["params"] = json.loads(data["params"])
     return Job(**data)
+
+
+def _closed(job: Job, now: datetime) -> float:
+    if not job.active_since:
+        return job.active_seconds
+    elapsed = (now - datetime.fromisoformat(job.active_since)).total_seconds()
+    return job.active_seconds + max(0.0, elapsed)
 
 
 def _message(row: aiosqlite.Row) -> Message:
@@ -720,6 +742,7 @@ class HubQueue:
             if row is None:
                 return None
             job = _job(row)
+            now_dt = utc_now()
             self._check_transition(job, protocol.STATUS_RUNNING)
             if protocol.PARAM_FALLBACK in job.params and job.model not in models:
                 params = {**job.params, protocol.PARAM_ORIGINAL_MODEL: job.model}
@@ -733,8 +756,14 @@ class HubQueue:
                 )
             await conn.execute(
                 "UPDATE jobs SET status = ?, executor = ?, started = COALESCE(started, ?),"
-                " finished = NULL WHERE id = ?",
-                (protocol.STATUS_RUNNING, executor, utc_now().isoformat(), job.id),
+                " finished = NULL, active_seconds = ?, active_since = ? WHERE id = ?",
+                (
+                    protocol.STATUS_RUNNING,
+                    executor,
+                    now_dt.isoformat(),
+                    *HubQueue._active_after(job, protocol.STATUS_RUNNING, now_dt),
+                    job.id,
+                ),
             )
             return await self._load(conn, job.id)
 
@@ -833,10 +862,12 @@ class HubQueue:
             return protocol.MSG_FAILED, {protocol.PAYLOAD_TEXT: text}
         params = {**job.params, protocol.PARAM_ATTEMPTS: attempts + 1}
         await conn.execute(
-            "UPDATE jobs SET status = ?, executor = NULL, finished = NULL, params = ? WHERE id = ?",
+            "UPDATE jobs SET status = ?, executor = NULL, finished = NULL, params = ?,"
+            " active_seconds = ?, active_since = ? WHERE id = ?",
             (
                 protocol.STATUS_QUEUED,
                 json.dumps(params, ensure_ascii=False),
+                *HubQueue._active_after(job, protocol.STATUS_QUEUED, utc_now()),
                 job.id,
             ),
         )
@@ -1315,10 +1346,23 @@ class HubQueue:
 
     @staticmethod
     async def _set_status(conn: aiosqlite.Connection, job: Job, target: str) -> None:
-        finished = utc_now().isoformat() if target in protocol.TERMINAL_STATUSES else None
+        now = utc_now()
+        finished = now.isoformat() if target in protocol.TERMINAL_STATUSES else None
         await conn.execute(
-            "UPDATE jobs SET status = ?, finished = ? WHERE id = ?", (target, finished, job.id)
+            "UPDATE jobs SET status = ?, finished = ?, active_seconds = ?, active_since = ?"
+            " WHERE id = ?",
+            (target, finished, *HubQueue._active_after(job, target, now), job.id),
         )
+
+    @staticmethod
+    def _active_after(job: Job, target: str, now: datetime) -> tuple[float, str | None]:
+        if target == protocol.STATUS_RUNNING:
+            if job.status == protocol.STATUS_RUNNING and job.active_since:
+                return job.active_seconds, job.active_since
+            return job.active_seconds, now.isoformat()
+        if job.status == protocol.STATUS_RUNNING:
+            return _closed(job, now), None
+        return job.active_seconds, None
 
     @staticmethod
     async def _notify_dependents(

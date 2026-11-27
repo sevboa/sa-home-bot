@@ -82,6 +82,9 @@ class HubStore:
             await self._db.conn.execute(f"DROP TABLE {table}_legacy")
         if not await self._has_column("jobs", queue.PARAMS_COLUMN):
             await self._db.conn.execute(queue.ADD_PARAMS_COLUMN)
+        if not await self._has_column("jobs", queue.ACTIVE_COLUMN):
+            for statement in queue.ADD_ACTIVE_COLUMNS:
+                await self._db.conn.execute(statement)
         await self._db.conn.commit()
 
     async def _has_column(self, table: str, column: str) -> bool:
