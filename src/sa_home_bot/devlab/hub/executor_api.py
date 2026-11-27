@@ -10,6 +10,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import joblogs
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.http import NODES_KEY, PRINCIPAL_KEY, STORE_KEY, roles, silence_state
+from sa_home_bot.devlab.hub.queue import wire_job
 
 LOG_CHUNK_BYTES = 64 * 1024
 
@@ -54,7 +55,7 @@ async def claim(request: web.Request) -> web.Response:
         busy_bases,
         live_models=live_models,
     )
-    return web.json_response({protocol.FIELD_JOB: asdict(job) if job else None})
+    return web.json_response({protocol.FIELD_JOB: wire_job(job) if job else None})
 
 
 @roles(protocol.ROLE_EXECUTOR)

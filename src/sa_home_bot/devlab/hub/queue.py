@@ -8,7 +8,7 @@ import re
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -109,6 +109,8 @@ ADD_ACTIVE_COLUMNS = (
     "ALTER TABLE jobs ADD COLUMN active_seconds REAL NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN active_since TEXT",
 )
+OPEN_RUNNING_ACTIVE = "UPDATE jobs SET active_since = ? WHERE status = ?"
+ACTIVE_FIELDS = ("active_seconds", "active_since")
 
 JOB_COLUMNS = (
     "id, kind, project, client, model, task, base_branch, priority, status, executor, "
@@ -177,6 +179,13 @@ def _job(row: aiosqlite.Row) -> Job:
     data = {key: row[key] for key in row.keys()}
     data["params"] = json.loads(data["params"])
     return Job(**data)
+
+
+def wire_job(job: Job) -> dict[str, Any]:
+    data = asdict(job)
+    for name in ACTIVE_FIELDS:
+        del data[name]
+    return data
 
 
 def _closed(job: Job, now: datetime) -> float:

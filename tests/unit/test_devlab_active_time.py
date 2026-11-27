@@ -6,7 +6,7 @@ import pytest
 
 from sa_home_bot.devlab import protocol as S
 from sa_home_bot.devlab.hub import mcp_tools
-from sa_home_bot.devlab.hub.queue import ADD_ACTIVE_COLUMNS
+from sa_home_bot.devlab.hub.queue import ACTIVE_FIELDS, ADD_ACTIVE_COLUMNS, wire_job
 from sa_home_bot.devlab.hub.store import HubStore
 
 CLIENT = "claude-laptop"
@@ -103,3 +103,8 @@ async def test_old_database_gets_columns(tmp_path, clock):
     assert (await second.queue.get_job(job.id)).active_seconds == 0
     assert len(ADD_ACTIVE_COLUMNS) == 2
     await second.close()
+
+
+async def test_executor_wire_job_has_no_active_fields(store):
+    job = await store.queue.submit(CLIENT, PROJECT, MODEL, "# цель", 0)
+    assert not set(ACTIVE_FIELDS) & set(wire_job(job))

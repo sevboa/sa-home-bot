@@ -85,6 +85,9 @@ class HubStore:
         if not await self._has_column("jobs", queue.ACTIVE_COLUMN):
             for statement in queue.ADD_ACTIVE_COLUMNS:
                 await self._db.conn.execute(statement)
+            await self._db.conn.execute(
+                queue.OPEN_RUNNING_ACTIVE, (utc_now().isoformat(), protocol.STATUS_RUNNING)
+            )
         await self._db.conn.commit()
 
     async def _has_column(self, table: str, column: str) -> bool:

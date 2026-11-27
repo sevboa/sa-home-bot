@@ -8,6 +8,7 @@ from typing import Any
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.hub import joblogs, repos
 from sa_home_bot.devlab.hub.errors import HubError
+from sa_home_bot.devlab.hub.queue import wire_job
 from sa_home_bot.devlab.hub.store import HubStore
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -77,8 +78,7 @@ class Tool:
 
 
 def job_view(job: Any, with_task: bool = True) -> dict[str, Any]:
-    data = asdict(job)
-    del data["active_seconds"], data["active_since"]
+    data = wire_job(job)
     data[protocol.FIELD_ACTIVE_S] = job.active_s()
     if not with_task:
         del data["task"]
