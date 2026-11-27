@@ -14,7 +14,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, Field
 
 from sa_home_bot.config import DevlabProfileConfig
-from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab import protocol, task_template
 from sa_home_bot.devlab.agent.context import estimate_tokens
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.guard import FinishGuard
@@ -644,7 +644,10 @@ class AgentWorker(WorkerLoops):
     def _role_text(self, name: str, profile: DevlabProfileConfig | None) -> str | None:
         if profile is None or not profile.prompt_file:
             return None
-        return read_profile_file(name, "файл роли", profile.prompt_file)
+        role = read_profile_file(name, "файл роли", profile.prompt_file)
+        if not profile.plan_check:
+            return role
+        return f"{role}\n\n{task_template.architect_section()}"
 
     def _code_mode_overrides(
         self, name: str, profile: DevlabProfileConfig | None

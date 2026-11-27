@@ -75,7 +75,11 @@ def red_tests_note(tests: Sequence[str]) -> str:
     if not tests:
         return ""
     body = "\n".join(protocol.RED_TESTS_ITEM + test for test in tests)
-    return f"\n\n**Красные тесты тестера, твоя цель их озеленить:**\n{body}\n"
+    return (
+        "\n\n**Проверка:** тесты тестера, сейчас красные, после твоей правки проходят:\n"
+        f"{body}\n"
+        "Тест не меняй; если считаешь, что он расходится с поведением из задачи, спроси.\n"
+    )
 
 
 def _label(index: int, task: PlanTask) -> str:

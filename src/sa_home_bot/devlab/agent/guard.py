@@ -26,7 +26,7 @@ PhaseListener = Callable[[bool], None]
 PLANS_DIR = "plans/"
 PLAN_SUFFIX = ".json"
 PLAN_HINT = (
-    "Задача говорит, что должно работать и какой тест станет зелёным; "
+    "Задача говорит, что должно работать, и чем это проверить (тест-файл); "
     "длинную — раздели на несколько"
 )
 PLAN_FIELDS = ("title", "task", "paths")

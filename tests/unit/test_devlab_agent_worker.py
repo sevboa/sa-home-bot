@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from sa_home_bot.config import DevlabProfileConfig
-from sa_home_bot.devlab import protocol
+from sa_home_bot.devlab import protocol, task_template
 from sa_home_bot.devlab.agent.dialog import Dialog
 from sa_home_bot.devlab.agent.loop import AgentLimits, AgentLoop, AgentResult, AgentStatus
 from sa_home_bot.devlab.agent.model import ModelError
@@ -497,6 +497,22 @@ async def test_profile_role_text_joins_system_prompt(env):
     system, task = model.seen[0]
     assert system["content"].split("\n\n")[-1] == "роль-текст"
     assert task["content"] == "# сделай out.txt"
+
+
+async def test_plan_check_role_gets_task_template(env):
+    path = env.tmp_path / "role.md"
+    path.write_text("роль архитектора\n", encoding="utf-8")
+    job_id = await submit_profile(env, "architect")
+    model = ScriptedChatModel(WRITE_DONE, FINISH)
+    profile = DevlabProfileConfig(prompt_file=str(path), plan_check=True)
+    worker = make_worker(env, model, profiles={"architect": profile})
+
+    await worker.claim_once()
+
+    system = model.seen[0][0]["content"]
+    assert system.index("роль архитектора") < system.index(task_template.ARCHITECT_HEADER)
+    assert system.endswith(task_template.TEMPLATE_PATH.read_text(encoding="utf-8").strip())
+    assert job_id
 
 
 @pytest.mark.parametrize(
