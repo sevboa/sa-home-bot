@@ -6,13 +6,16 @@ import json
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from sa_home_bot.config import Settings
 from sa_home_bot.devlab import connect as devlab_connect
+from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab import snapshot as devlab_snapshot
+from sa_home_bot.devlab.drain import drain_command
 from sa_home_bot.node.fixups import build_fixups, run_fixups
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
@@ -119,7 +122,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("devlab", help="мастерская devlab: подключение этой ноды к хабу")
     p.add_argument(
         "devlab_command",
-        choices=("connect", "snapshot", "base", "fetch", "drop", "wait", "watch", "reviews"),
+        choices=(
+            "connect", "snapshot", "base", "fetch", "drop", "wait", "watch", "reviews", "drain",
+        ),
         help="connect: получить токен, подключить MCP, поставить скилы; "
         "snapshot: снять рабочую копию и запушить на хаб, вывести ref для devlab_test; "
         "base <имя>: запушить коммит (--ref, по умолчанию HEAD) в base/<имя>; "
@@ -128,7 +133,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "wait <id>: дождаться done|failed|stopped|waiting_owner, последняя строка — JSON; "
         "watch: печатать новые сообщения ящика по строке JSON, до --timeout; "
         "тайм-аут — код 124; "
-        "reviews: сводка журнала приёмки по моделям",
+        "reviews: сводка журнала приёмки по моделям; "
+        "drain: парковать исполнителя devlab, дождаться свободы и перезапустить службу",
     )
     p.add_argument(
         "devlab_names",
@@ -147,14 +153,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="wait: период опроса хаба, с (по умолчанию 20); watch: то же для новых сообщений"
-        " (по умолчанию 10)",
+        " (по умолчанию 10); drain: период опроса исполнителя",
     )
     p.add_argument(
         "--timeout",
         type=float,
         default=devlab_snapshot.WAIT_TIMEOUT_S,
         help="wait: предел ожидания, с (по умолчанию 1800), по истечении код 124; "
-        "watch: предел наблюдения (по умолчанию тот же)",
+        "watch: предел наблюдения (по умолчанию тот же); drain: предел ожидания свободы "
+        "исполнителя (по умолчанию тот же), код 124 — рестарт отложен",
     )
     p.add_argument(
         "--kinds",
@@ -577,6 +584,50 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 since=args.since,
             )
+        if args.devlab_command == "drain":
+            endpoint, token = _resolve_endpoint(args)
+            dst = Address(node=args.node, service="node") if args.node else None
+            service_dst = Address(service=protocol.EXECUTOR_SERVICE)
+
+            async def once(call: Callable[[ProtoClient], Awaitable[Any]]) -> Any:
+                client = ProtoClient(endpoint, token=token)
+                try:
+                    await client.connect()
+                    return await call(client)
+                finally:
+                    await client.close()
+
+            def park() -> dict[str, Any]:
+                return asyncio.run(
+                    once(lambda c: c.command(protocol.ACTION_PARK, {}, dst=service_dst))
+                )
+
+            def state() -> dict[str, Any]:
+                return asyncio.run(once(lambda c: c.get_state(dst=service_dst)))
+
+            def restart() -> None:
+                asyncio.run(
+                    once(
+                        lambda c: c.command(
+                            "restart", {"name": protocol.EXECUTOR_SERVICE}, dst=dst
+                        )
+                    )
+                )
+
+            code = drain_command(
+                park=park,
+                state=state,
+                restart=restart,
+                sleep=time.sleep,
+                clock=time.monotonic,
+                interval=(
+                    args.interval if args.interval is not None else devlab_snapshot.WAIT_INTERVAL_S
+                ),
+                timeout=args.timeout,
+            )
+            if code == 0:
+                print(f"Перезапущено: {protocol.EXECUTOR_SERVICE}")
+            return code
         if args.devlab_command in ("base", "fetch", "drop"):
             return devlab_snapshot.branch_command(
                 settings,

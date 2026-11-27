@@ -456,3 +456,26 @@
 в `parked` запись с `answered=false`, задача в `waiting_owner` до ответа/релиз/рестарт; после ответа
 `_accept_answer` ставит `answered=true`, `busy.started`, задача продолжается как обычно. Рестарт
 поднимает только `answered=true` (ответ уже есть), `parked_for_restart` не используется.
+
+## Drain исполнителя (2026-11-27)
+
+Выкат: `nodectl devlab drain` — исполнитель паркуется, дожидается свободы и перезапускается (смена
+выката требует рестарта службы `devlab`, а начатые задания до него надо закрыть).
+
+- Протокол: `protocol.ACTION_PARK` (`park`) и `protocol.FIELD_PARKED` (`parked`).
+- `ExecutorService.run_command` (`executor/service.py`): действие `park` переводит `ParkMode`
+  в активный (`self._park.active = True`) и помечает трекер (`BusyTracker.set_parked(True)`) —
+  в проде `run_executor` передаёт один и тот же `ParkMode` и трекеру, и службе, так что это одна
+  метка, записанная через обе двери (тестовая сборка держит два экземпляра); ответ
+  `{"parked": true}` одинаковый при повторе. Прочие действия — прежний `ERR_UNKNOWN_ACTION`.
+- `drain_command` (`devlab/drain.py`) — чистая функция с инъекциями `park`/`state`/`restart`/
+  `sleep`/`clock`, `interval` (`WAIT_INTERVAL_S`, 20 с) и `timeout` (`WAIT_TIMEOUT_S`, 1800 с)
+  как у `wait`. После `park` сразу опрашивает состояние и спит `interval` только между опросами,
+  пока исполнитель занят; свободный — `restart` и код 0. Таймаут — код 124 (`EXIT_TIMEOUT`),
+  рестарта нет, причина в stderr. Ошибка связи (`OSError`, `ProtoError` — нода недоступна, старый
+  исполнитель без действия `park`) — код 1, рестарта нет.
+- `nodectl`: подкоманда `devlab drain` с теми же флагами `--timeout`/`--interval`, что у `wait`.
+  Каждый шаг (`park`, опрос `state`, `restart`) — отдельное соединение `ProtoClient` к ноде:
+  `park` и опрос идут прямо на службу `devlab` (`Address(service="devlab")`, как у `nodectl call`),
+  рестарт — команда `restart` службы `devlab` через ноду. Успех печатает «Перезапущено: devlab».
+- Тесты: `tests/unit/test_devlab_drain.py`.

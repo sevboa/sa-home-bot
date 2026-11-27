@@ -5,6 +5,7 @@ from typing import Any
 from sa_home_bot import __version__
 from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab.executor.busy import BusyTracker
+from sa_home_bot.devlab.executor.park import ParkMode
 from sa_home_bot.proto.messages import (
     ERR_UNKNOWN_ACTION,
     ProtoError,
@@ -14,9 +15,12 @@ from sa_home_bot.proto.messages import (
 
 
 class ExecutorService:
-    def __init__(self, node: str, busy: BusyTracker) -> None:
+    def __init__(
+        self, node: str, busy: BusyTracker, park: ParkMode | None = None
+    ) -> None:
         self._node = node
         self._busy = busy
+        self._park = park
 
     def describe(self) -> ServiceDescription:
         return ServiceDescription(
@@ -38,4 +42,9 @@ class ExecutorService:
         }
 
     async def run_command(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == protocol.ACTION_PARK:
+            if self._park is not None:
+                self._park.active = True
+            self._busy.set_parked(True)
+            return {protocol.FIELD_PARKED: True}
         raise ProtoError(ERR_UNKNOWN_ACTION, f"нет такого действия: {action}")

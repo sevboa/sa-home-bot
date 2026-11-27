@@ -159,7 +159,7 @@ async def run_executor(
                 busy,
             )
         )
-    service = ExecutorService(settings.node.id or socket.gethostname(), busy)
+    service = ExecutorService(settings.node.id or socket.gethostname(), busy, park=park)
     relay = SilenceRelay(cfg.switch_url) if cfg.switch_url else None
     server = ProtoServer(cfg.socket, service, token=settings.swarm.token)
     lifespan = Lifespan()
