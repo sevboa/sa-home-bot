@@ -54,3 +54,8 @@ Magic packet: 6 x 0xFF + MAC x 16 (102 байта), UDP-broadcast, нескол�
 эвристика по имени. Интерфейс по умолчанию определяется UDP-`connect()` трюком (пакет не уходит,
 сеть не нужна). Виртуальные/туннельные интерфейсы (docker, tailscale, wg, tun, vmware и т.п.) не годятся
 ни целью, ни отправителем — шире, чем `proto/endpoints.is_virtual_iface`.
+
+Находка 2026-11-26 (нода alucard, Android + Termux + proot Debian): `stat` на `/sys/class/net/<iface>` даёт
+`PermissionError`, а `wol._is_wireless` вызывается из `describe` через `detect_local_wake_info`. Исключение роняло
+`describe`, и рой видел ноду недоступной. Теперь при `OSError` на sysfs тип интерфейса берётся по имени
+(`_WIRELESS_NAME_RE`), как на машинах без sysfs.

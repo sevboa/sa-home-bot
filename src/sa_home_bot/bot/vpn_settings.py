@@ -63,8 +63,10 @@ def pick_text(label: str) -> str:
     return f"📥 <b>{html.escape(label)}</b> — чем подключаться?"
 
 
-def pick_keyboard(key: str) -> InlineKeyboardMarkup:
+def pick_keyboard(key: str, *, page_url: str | None = None) -> InlineKeyboardMarkup:
+    page_rows = [[InlineKeyboardButton(text=vd.PAGE_CARD_BUTTON, url=page_url)]] if page_url else []
     return markup(
+        *page_rows,
         [button("⚡ AmneziaVPN", vpn_callbacks.card_cb(vpn_callbacks.SCREEN_AWG, key))],
         [button(f"🛡 {vd.TRANSPORT_NAME[vd.REALITY]}", _issue_cb(vpn_callbacks.KIND_VLESS, key))],
         back_row(_device_cb(key)),

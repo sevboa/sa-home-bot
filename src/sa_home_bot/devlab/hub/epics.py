@@ -131,28 +131,28 @@ def parse_tasks(raw: Sequence[Any]) -> list[PlanTask]:
         raise HubError(f"в эпике больше {protocol.EPIC_MAX_TASKS} задач")
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
-            reasons.append(f"задача {i + 1}: ожидался объект")
+            reasons.append(f"задача {i}: ожидался объект")
             continue
         unknown = sorted(set(item) - set(protocol.EPIC_TASK_KEYS))
         if unknown:
-            reasons.append(f"задача {i + 1}: неизвестные поля {', '.join(unknown)}")
+            reasons.append(f"задача {i}: неизвестные поля {', '.join(unknown)}")
         title, task, model = item.get("title", ""), item.get("task", ""), item.get("model", "")
         profile = item.get("profile", protocol.DEFAULT_PROFILE)
         paths, deps = item.get("paths", []), item.get("depends_on", [])
         if not all(isinstance(v, str) for v in (title, task, model, profile)):
-            reasons.append(f"задача {i + 1}: title, task, model, profile — строки")
+            reasons.append(f"задача {i}: title, task, model, profile — строки")
             continue
         if not task.strip() or not model.strip() or not title.strip():
-            reasons.append(f"задача {i + 1}: нужны title, task и model")
+            reasons.append(f"задача {i}: нужны title, task и model")
         if not PROJECT_NAME_RE.match(profile.strip()):
-            reasons.append(f"задача {i + 1}: профиль {profile!r} недопустим")
+            reasons.append(f"задача {i}: профиль {profile!r} недопустим")
         if not _str_list(paths):
-            reasons.append(f"задача {i + 1}: paths — список строк")
+            reasons.append(f"задача {i}: paths — список строк")
             continue
         if not isinstance(deps, list) or not all(
             isinstance(d, int) and not isinstance(d, bool) for d in deps
         ):
-            reasons.append(f"задача {i + 1}: depends_on — список целых индексов")
+            reasons.append(f"задача {i}: depends_on — список целых индексов")
             continue
         tasks.append(
             PlanTask(
@@ -356,19 +356,31 @@ class HubEpics:
             if epic.status == protocol.EPIC_DONE:
                 raise HubError(f"эпик {epic_id!r} уже завершён")
             await self._set_epic(epic_id, protocol.EPIC_STOPPED)
-            tasks = await self._tasks(epic_id)
-            current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
-            if current is not None and current.job_id is not None:
-                job = await self._queue.get_job(current.job_id)
-                if job.status in (
-                    protocol.STATUS_QUEUED,
-                    protocol.STATUS_RUNNING,
-                    protocol.STATUS_WAITING_OWNER,
-                ):
-                    await self._queue.post_from_client(
-                        job.client, job.id, protocol.MSG_STOP, observe=False
-                    )
+            await self._stop_current(epic_id)
             return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: protocol.EPIC_STOPPED}
+
+    async def delete(self, epic_id: str) -> dict[str, Any]:
+        async with self._lock:
+            epic = await self._load(epic_id)
+            await self._stop_current(epic_id)
+            async with self._db.transaction() as conn:
+                await conn.execute("DELETE FROM epic_tasks WHERE epic_id = ?", (epic_id,))
+                await conn.execute("DELETE FROM epics WHERE id = ?", (epic_id,))
+            await repos.delete_branch(self._git_root, epic.project, epic.branch)
+            return {protocol.FIELD_ID: epic_id, protocol.FIELD_STATUS: protocol.EPIC_DELETED}
+
+    async def _stop_current(self, epic_id: str) -> None:
+        tasks = await self._tasks(epic_id)
+        current = next((t for t in tasks if t.outcome != OUTCOME_DONE), None)
+        if current is None or current.job_id is None:
+            return
+        job = await self._queue.get_job(current.job_id)
+        if job.status in (
+            protocol.STATUS_QUEUED,
+            protocol.STATUS_RUNNING,
+            protocol.STATUS_WAITING_OWNER,
+        ):
+            await self._queue.post_from_client(job.client, job.id, protocol.MSG_STOP, observe=False)
 
     async def sync(self, job_id: str) -> None:
         cur = await self._db.conn.execute(
@@ -408,7 +420,7 @@ class HubEpics:
 
     async def _red_tests_before(self, task: EpicTask, tasks: Sequence[EpicTask]) -> list[str]:
         red: list[str] = []
-        for earlier in tasks[: task.idx]:
+        for earlier in (tasks[i] for i in task.depends_on):
             if earlier.profile != protocol.PROFILE_TESTER or earlier.job_id is None:
                 continue
             message = await self._queue.last_message(earlier.job_id, protocol.MSG_DONE)
@@ -486,13 +498,13 @@ class HubEpics:
                 epic.project,
                 epic.branch,
                 source,
-                f"epic {epic.id}: задача {task.idx + 1} ({task.title}), задание {job.id}",
+                f"epic {epic.id}: задача {task.idx} ({task.title}), задание {job.id}",
             )
         except HubError as exc:
             await self._wait(
                 epic,
                 job,
-                f"Эпик {epic.id}, задача {task.idx + 1}: слить {source} в {epic.branch} не "
+                f"Эпик {epic.id}, задача {task.idx}: слить {source} в {epic.branch} не "
                 f"вышло ({exc}). Исправь ветку и верни задание в очередь или останови.",
             )
             return False
@@ -530,7 +542,7 @@ class HubEpics:
                 failures=failures,
                 marked=utc_now().isoformat(),
             )
-        number = f"Эпик {epic.id}, задача {task.idx + 1} ({task.title}), задание {job.id}"
+        number = f"Эпик {epic.id}, задача {task.idx} ({task.title}), задание {job.id}"
         if outcome == OUTCOME_STOPPED:
             await self._wait(
                 epic, job, f"{number}: остановлено. Верни в очередь (devlab_resume) или правь план."

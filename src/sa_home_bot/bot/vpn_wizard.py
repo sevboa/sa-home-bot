@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from sa_home_bot.bot import vpn_callbacks, vpn_keyboards
 from sa_home_bot.bot.ui.keyboards import back_row, button, markup
+from sa_home_bot.config import VpnConfig
 from sa_home_bot.vpn import protocol as vpn_protocol
 
 PREFIX = "w"
@@ -21,22 +22,19 @@ INTRO_TEXT = (
     "📶 <b>VPN</b>\n\nПодключим ваш телефон или компьютер?\nПроведу по шагам — займёт пару минут."
 )
 PICK_TEXT = "Какое у вас устройство?"
-CHECK_TEXT = (
-    "Включите VPN: в Hiddify — «Нажмите для подключения», в AmneziaVPN — «Подключиться».\n"
-    "Затем на странице настроек нажмите «🔄 Проверить ещё раз».\n"
-    "Загорелось зелёное «✅ VPN включён»?"
-)
-DONE_TEXT = (
-    "🎉 Готово! VPN включается в приложении: в Hiddify — «Нажмите для подключения», "
-    "в AmneziaVPN — «Подключиться». Пользуйтесь AmneziaVPN — он быстрее, а Hiddify включайте, "
-    "если AmneziaVPN не подключается."
-)
+CHECK_TEXT = "Включите VPN в Hiddify — «Нажмите для подключения». Подключилось?"
+DONE_TEXT = "🎉 Готово! VPN включается в Hiddify — «Нажмите для подключения»."
 FAIL_TEXT = "Ничего страшного."
 RECHECK_TEXT = "🔄 Проверить ещё раз"
 OTHER_TEXT = (
-    "Выберите другую страну: в Hiddify — нажмите на название подключения, "
-    "в AmneziaVPN — выберите другое подключение на главном экране."
+    "Обновите подписку в Hiddify: откройте приложение и нажмите значок обновления на "
+    "подключении «VPN». В подписке сразу все страны — Hiddify сам выберет рабочую.\n"
+    "Не помогло — позовите на помощь."
 )
+REFRESH_BUTTON = "🔄 Обновить подписку в Hiddify"
+ADD_BUTTON = "➕ Добавить в Hiddify"
+LINK_BUTTON = "🔗 Ссылка подписки"
+STORE_BUTTONS = {"i": "🍎 App Store", "a": "🤖 Google Play", "c": "💻 hiddify.com"}
 CREATE_FAILED_TEXT = (
     "Не получилось подготовить подключение — серверы сейчас не отвечают.\n"
     "Попробуйте ещё раз чуть позже или позовите на помощь."
@@ -67,7 +65,7 @@ PLATFORMS: dict[str, Platform] = {
     "a": Platform("a", "🤖", "Android"),
     "c": Platform("c", "💻", "Компьютер"),
 }
-PICK_BUTTONS = {"i": "🍎 iPhone", "a": "🤖 Android", "c": "💻 Компьютер"}
+PICK_BUTTONS = {"i": "🍎 iPhone / iPad / Mac", "a": "🤖 Android", "c": "💻 Компьютер"}
 
 
 def next_label(platform: Platform, existing: set[str]) -> str:
@@ -100,10 +98,9 @@ def not_connected_text(label: str) -> str:
     return (
         f"Пока не вижу подключения устройства «{name}».\n\n"
         "Проверка видит только VPN, включённый подключением этого устройства:\n"
-        f"• в Hiddify — профиль «VPN · {name}»;\n"
-        f"• в AmneziaVPN — подключение «{name}» с флагом страны.\n\n"
-        "Включите его (в Hiddify — «Нажмите для подключения», в AmneziaVPN — «Подключиться») "
-        f"и нажмите «{RECHECK_TEXT}». Не выходит — позовите на помощь."
+        f"• в Hiddify — профиль «VPN · {name}».\n\n"
+        f"Включите его — в Hiddify «Нажмите для подключения» — и нажмите «{RECHECK_TEXT}». "
+        "Не выходит — позовите на помощь."
     )
 
 
@@ -111,9 +108,7 @@ def connected_text(method: str, server: str) -> str:
     return (
         f"🎉 Готово! Подключено через <b>{html.escape(method)}</b>, сервер "
         f"<b>{html.escape(server)}</b>.\n"
-        "Включать VPN — в приложении: в Hiddify — «Нажмите для подключения», в AmneziaVPN — "
-        "«Подключиться». Пользуйтесь AmneziaVPN — он быстрее, а Hiddify включайте, если "
-        "AmneziaVPN не подключается."
+        "Включать VPN — в Hiddify: «Нажмите для подключения»."
     )
 
 
@@ -176,15 +171,86 @@ def page_link_text(label: str, page_url: str) -> str:
     return (
         f"📶 <b>Настройки VPN · {html.escape(label)}</b>\n"
         "Откройте ссылку на устройстве, которое подключаете (телефон или компьютер) — там всё "
-        "по шагам: сначала резервный Hiddify, потом основной AmneziaVPN (он быстрее) и проверка, "
-        "что VPN включён.\n"
+        "по шагам: Hiddify и, если нужно, AmneziaVPN, и проверка, что VPN включён.\n"
         f"{html.escape(page_url)}\n"
         "Ссылку можно переслать. Не делитесь ей с чужими: по ней подключается это устройство."
     )
 
 
+def add_url(page_url: str) -> str:
+    return f"{page_url.rstrip('/')}/{vpn_protocol.SUB_BRIDGE_HIDDIFY}"
+
+
+def platform_of_label(label: str) -> str | None:
+    for code, platform in PLATFORMS.items():
+        if label.startswith(platform.emoji):
+            return code
+    return None
+
+
+def store_url(code: str, cfg: VpnConfig) -> str:
+    if code == "i":
+        return cfg.hiddify_ios_app_store_url
+    if code == "a":
+        return cfg.hiddify_google_play_url
+    return cfg.hiddify_site_url
+
+
+def install_row(code: str | None, cfg: VpnConfig) -> list[InlineKeyboardButton]:
+    codes = [code] if code in STORE_BUTTONS else ["i", "a"]
+    return [InlineKeyboardButton(text=STORE_BUTTONS[c], url=store_url(c, cfg)) for c in codes]
+
+
+def add_row(page_url: str) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text=ADD_BUTTON, url=add_url(page_url))]
+
+
+def connect_text(label: str, sub_link: str | None) -> str:
+    lines = [
+        f"📶 <b>VPN · {html.escape(label)}</b>",
+        "",
+        "① Поставьте Hiddify — кнопка ниже.",
+        f"② Нажмите «{ADD_BUTTON}» и подтвердите добавление. В Hiddify нажмите "
+        "«Нажмите для подключения».",
+    ]
+    if sub_link:
+        lines += [
+            "③ Не добавилось? Нажмите на ссылку — она скопируется, затем в Hiddify нажмите «+» → "
+            "«Добавить из буфера обмена»:",
+            f"<code>{html.escape(sub_link)}</code>",
+        ]
+    lines += ["", "Ссылка личная: не делитесь ею с чужими."]
+    return "\n".join(lines)
+
+
+def sub_link_text(label: str, sub_link: str) -> str:
+    return (
+        f"🔗 <b>Подписка · {html.escape(label)}</b>\n"
+        "Нажмите на ссылку — она скопируется, затем в Hiddify нажмите «+» → "
+        "«Добавить из буфера обмена»:\n"
+        f"<code>{html.escape(sub_link)}</code>\n"
+        "Ссылка личная: не делитесь ею с чужими."
+    )
+
+
+SUB_QR_CAPTION = "QR для другого устройства: в Hiddify нажмите «+» → «Сканировать QR-код»."
+
+
+def add_keyboard(code: str | None, cfg: VpnConfig, page_url: str) -> InlineKeyboardMarkup:
+    return markup(install_row(code, cfg), add_row(page_url))
+
+
+def sub_link_keyboard(page_url: str) -> InlineKeyboardMarkup:
+    return markup(add_row(page_url))
+
+
 def step_keyboard(
-    code: str, platform: Platform, key: str, *, page_url: str | None = None
+    code: str,
+    platform: Platform,
+    key: str,
+    *,
+    page_url: str | None = None,
+    cfg: VpnConfig | None = None,
 ) -> InlineKeyboardMarkup:
     p = platform.code
     stuck_callback = card_cb(FAIL, f"{code}{ctx(p, key)}")
@@ -192,7 +258,9 @@ def step_keyboard(
         return markup([button("✅ Да!", card_cb(DONE)), button("❌ Нет", stuck_callback)])
     rows: list[list[InlineKeyboardButton]] = []
     if code == CONNECT and page_url:
-        rows.append([InlineKeyboardButton(text="📶 Открыть настройки", url=page_url)])
+        if cfg is not None:
+            rows.append(install_row(p, cfg))
+        rows.append(add_row(page_url))
     stuck = button("🙋 Не получается", stuck_callback)
     ready = button("✅ Готово", card_cb(CHECK, ctx(p, key)))
     rows.append([ready, stuck] if not (code == CONNECT and not page_url) else [stuck])
@@ -204,7 +272,7 @@ def not_connected_keyboard(
 ) -> InlineKeyboardMarkup:
     rows = [[button(RECHECK_TEXT, card_cb(CHECK, ctx(platform, key)))]]
     if page_url:
-        rows.append([InlineKeyboardButton(text="📶 Открыть настройки", url=page_url)])
+        rows.append(add_row(page_url))
     return markup(
         *rows,
         _help_button(CHECK, platform, key),
@@ -216,7 +284,7 @@ def fail_keyboard(step: str, platform: str, key: str) -> InlineKeyboardMarkup:
     rows = []
     if step != NOT_CREATED:
         tail = f"{step}{ctx(platform, key)}"
-        rows.append([button("🔁 Попробовать другую страну", card_cb(OTHER, tail))])
+        rows.append([button(REFRESH_BUTTON, card_cb(OTHER, tail))])
     rows.append(_help_button(step, platform, key))
     rows.append(back_row(_step_callback(step, platform, key), BACK_TO_STEP_TEXT))
     return markup(*rows)

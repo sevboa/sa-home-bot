@@ -154,8 +154,12 @@ async def test_executor_actions_follow_transition_table(queue, status, kind):
     job = await SETUPS[status](queue)
     target = EXECUTOR_ACTIONS[kind]
     confirms_stop = kind == S.MSG_STOPPED and status == S.STATUS_STOPPED
+    late_stop = kind == S.MSG_STOPPED and status == S.STATUS_QUEUED
     repeats_question = kind == S.MSG_QUESTION and status == S.STATUS_WAITING_OWNER
-    if target in S.TRANSITIONS[status] or confirms_stop or repeats_question:
+    if late_stop:
+        await queue.post_from_executor(job.id, kind)
+        assert (await queue.get_job(job.id)).status == S.STATUS_QUEUED
+    elif target in S.TRANSITIONS[status] or confirms_stop or repeats_question:
         await queue.post_from_executor(job.id, kind)
         assert (await queue.get_job(job.id)).status == target
     else:
@@ -376,6 +380,24 @@ async def test_fallback_taken_when_primary_not_live(queue):
     assert claimed.params[S.PARAM_ORIGINAL_MODEL] == MODEL
 
 
+async def test_fallback_local_not_taken_by_remote_claimant(queue):
+    job = await submit(queue, fallback="local")
+    assert await queue.claim(EXECUTOR, ["other-remote"], live_models=[MODEL, "local"]) is None
+    claimed = await queue.claim(EXECUTOR, [MODEL], live_models=[MODEL, "local"])
+    assert claimed.id == job.id
+    assert claimed.model == MODEL
+    assert S.PARAM_ORIGINAL_MODEL not in claimed.params
+
+
+async def test_fallback_local_goes_to_claimant_with_local_models(queue):
+    await running_job(queue)
+    job = await submit(queue, fallback="local")
+    assert await queue.claim(EXECUTOR, ["other-remote"], live_models=[MODEL, "local"]) is None
+    claimed = await queue.claim(EXECUTOR, ["local"], live_models=[MODEL, "local"])
+    assert claimed.id == job.id
+    assert claimed.model == "local"
+
+
 async def test_normal_claim_no_model_swap(queue):
     job = await submit(queue)
     claimed = await queue.claim(EXECUTOR, [MODEL])
@@ -549,6 +571,17 @@ async def test_poll_stop_not_filtered_when_resume_then_later_stop(queue):
     kinds = [m.kind for m in await queue.poll(executor=EXECUTOR)]
     assert S.MSG_STOP in kinds
     assert S.MSG_RESUME in kinds
+
+
+async def test_late_stopped_after_resume_keeps_job_queued(queue):
+    job = await running_job(queue)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_STOP)
+    await queue.post_from_client(CLIENT, job.id, S.MSG_RESUME)
+    await queue.post_from_executor(job.id, S.MSG_STOPPED, {S.PAYLOAD_TOKENS: 7}, executor=EXECUTOR)
+    after = await queue.get_job(job.id)
+    assert after.status == S.STATUS_QUEUED
+    assert after.tokens == 7
+    assert (await queue.claim(EXECUTOR, [MODEL])).id == job.id
 
 
 async def test_stop_queued_notifies_client_without_executor(queue):

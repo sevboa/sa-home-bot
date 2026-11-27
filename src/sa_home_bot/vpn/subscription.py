@@ -23,7 +23,7 @@ from sa_home_bot.reality.client_config import (
     render_vless_url,
 )
 from sa_home_bot.vpn import qr
-from sa_home_bot.vpn.protocol import GB, country_flag
+from sa_home_bot.vpn.protocol import GB, SUB_BRIDGE_HIDDIFY, country_flag
 
 TOKEN_LEN = 32
 _TOKEN_RE = re.compile(rf"^[A-Za-z0-9_-]{{{TOKEN_LEN}}}$")
@@ -351,7 +351,7 @@ def page_csp(nodes: tuple[NodeInfo, ...]) -> str:
 
 
 def sort_entries(entries: list[SubEntry]) -> list[SubEntry]:
-    return sorted(entries, key=lambda e: (e.is_xhttp, e.is_alt, e.name, e.node))
+    return sorted(entries, key=lambda e: (not e.is_xhttp, e.is_alt, e.name, e.node))
 
 
 def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[SubEntry]:
@@ -371,9 +371,11 @@ def expand_spares(entries: list[SubEntry], fingerprints: Sequence[str]) -> list[
 
 def render_body(sub: Subscription, fmt: str) -> tuple[str, str]:
     if fmt == FORMAT_SINGBOX:
+        xhttp = next((e for e in sub.entries if e.is_xhttp), None)
         text = render_singbox_multi(
             [(e.name, e.params, e.uuid) for e in sub.entries],
             endpoints=[e.singbox_endpoint() for e in sub.awg_entries],
+            default_outbound=xhttp.name if xhttp else None,
         )
         return text, "application/json; charset=utf-8"
     lines = [e.url for e in sub.entries]
@@ -1041,7 +1043,7 @@ def render_page(
     return _layout(title, body, script)
 
 
-BRIDGE_HIDDIFY = "hiddify"
+BRIDGE_HIDDIFY = SUB_BRIDGE_HIDDIFY
 BRIDGE_AMNEZIA = "amnezia"
 
 _BRIDGE_HIDDIFY_JS = r"""(function () {

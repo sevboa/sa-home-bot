@@ -70,13 +70,13 @@ def test_subentry_tcp_wire_has_no_network_key():
     assert "network" not in wire["params"]
 
 
-def test_sort_entries_puts_xhttp_last():
+def test_sort_entries_puts_xhttp_first():
     entries = [_entry(), _xhttp_entry(), _entry("🇳🇱 Нидерланды · 2", is_alt=True)]
-    assert [e.is_xhttp for e in subs.sort_entries(entries)] == [False, False, True]
+    assert [e.is_xhttp for e in subs.sort_entries(entries)] == [True, False, False]
     assert [e.name for e in subs.sort_entries(entries)] == [
+        "🇳🇱 Нидерланды · XHTTP",
         "🇳🇱 Нидерланды",
         "🇳🇱 Нидерланды · 2",
-        "🇳🇱 Нидерланды · XHTTP",
     ]
 
 
@@ -103,14 +103,14 @@ def test_render_body_singbox_includes_xhttp():
     assert "🇳🇱 XHTTP 2087" in outbounds["proxy"]["outbounds"]
 
 
-def test_render_body_plain_xhttp_last():
+def test_render_body_plain_xhttp_first():
     sub = _sub([_entry(), _xhttp_entry()])
     body, mime = subs.render_body(sub, subs.FORMAT_PLAIN)
     assert mime == "text/plain; charset=utf-8"
     lines = body.splitlines()
     assert len(lines) == 2
-    assert "type=xhttp" in lines[1]
-    assert "path=%2Fring" in lines[1] or "path=/ring" in lines[1]
+    assert "type=xhttp" in lines[0]
+    assert "path=%2Fring" in lines[0] or "path=/ring" in lines[0]
 
 
 def test_countries_card_skips_xhttp_entries():

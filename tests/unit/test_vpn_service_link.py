@@ -304,7 +304,9 @@ async def test_check_scopes_returns_scopes_and_links(scope_env):
     assert "announced" in row
 
 
-async def _report_net(svc, node: str, ok: bool, net_ok: bool, *, server: str = "jeeves"):
+async def _report_net(
+    svc, node: str, ok: bool, net_ok: bool, *, server: str = "jeeves", ping: bool | None = None
+):
     return await svc.run_command(
         vpn_protocol.ACTION_REPORT_CHECK,
         {
@@ -319,13 +321,28 @@ async def _report_net(svc, node: str, ok: bool, net_ok: bool, *, server: str = "
                     "error": None if ok else "timeout",
                 }
             ],
-            "net": {server: {"ok": net_ok, "ms": 40 if net_ok else None, "error": None}},
+            "net": {
+                server: {
+                    "ok": net_ok,
+                    "ms": 40 if net_ok else None,
+                    "error": None,
+                    **({} if ping is None else {"ping": ping}),
+                }
+            },
         },
     )
 
 
 def _layer(events: list[tuple[str, dict]], layer: str) -> list[dict]:
     return [data for data in _outages(events) if data.get("layer") == layer]
+
+
+async def test_net_outage_carries_ping_only_when_reported(scope_env):
+    svc, events, _ = scope_env
+    await _report_net(svc, "osip", True, True)
+    for _ in range(3):
+        await _report_net(svc, "osip", False, False, ping=True)
+    assert [o.get("ping") for o in _layer(events, "net")] == [True]
 
 
 async def test_net_failure_gives_net_outage_and_freezes_link(scope_env):

@@ -244,18 +244,21 @@ class AgentRepo:
             self._pushed = ""
         await asyncio.to_thread(shutil.rmtree, self._git_dir, True)
 
-    async def _close(self, headline: str) -> str | None:
+    async def _close(self, headline: str, keep_wip: bool) -> str | None:
         async with self._lock:
             self._cancel_timer()
             sha = await self._squash(headline)
-            await self._drop_wip()
+            if keep_wip:
+                await asyncio.to_thread(shutil.rmtree, self._git_dir, True)
+            else:
+                await self._drop_wip()
             return sha
 
     async def finish(self, summary: str) -> str | None:
-        return await self._close(summary)
+        return await self._close(summary, keep_wip=False)
 
     async def abandon(self, reason: str) -> str | None:
-        return await self._close(f"{ABANDONED_PREFIX}{reason}")
+        return await self._close(f"{ABANDONED_PREFIX}{reason}", keep_wip=True)
 
     async def aclose(self) -> None:
         timer, self._timer = self._timer, None

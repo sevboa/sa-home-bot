@@ -39,6 +39,7 @@ TOOL_NAMES = {
     protocol.TOOL_EPIC,
     protocol.TOOL_EPIC_RESUME,
     protocol.TOOL_EPIC_STOP,
+    protocol.TOOL_EPIC_DELETE,
 }
 
 

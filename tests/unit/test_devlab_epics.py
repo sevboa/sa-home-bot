@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub import mcp_tools
+from sa_home_bot.devlab.hub import mcp_tools, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.devlab.hub.service import HubService
 from sa_home_bot.devlab.hub.store import HubStore
@@ -211,6 +211,7 @@ async def test_first_failure_retries_second_stops_epic(store):
     assert len(waiting) == 1
     assert view["id"] in waiting[0].payload[S.PARAM_EPIC]
     assert waiting[0].payload[S.PAYLOAD_TEXT] == now["question"]
+    assert f"Эпик {view['id']}, задача 0 (" in now["question"]
 
 
 async def test_owner_resume_after_wait_continues_epic(store):
@@ -462,22 +463,71 @@ async def test_job_outside_epic_has_no_skip_or_locked(store):
     assert S.PARAM_EPIC_LOCKED not in job.params
 
 
+async def finish_tester(store, job_id, tests):
+    items = "".join(f"\n- {test}" for test in tests)
+    summary = "готово\n\n" + S.RED_TESTS_MARKER + items
+    job = await store.queue.get_job(job_id)
+    parent = await git(store, "rev-parse", S.HEADS_REF_PREFIX + job.base_branch)
+    sha = await commit(store, parent, f"{job_id}.txt", "x")
+    await git(store, "update-ref", S.HEADS_REF_PREFIX + S.AGENT_BRANCH_PREFIX + job_id, sha)
+    await store.queue.post_from_executor(
+        job_id, S.MSG_DONE, {S.PAYLOAD_SUMMARY: summary}, executor=EXECUTOR
+    )
+
+
 async def test_developer_after_tester_gets_red_tests_of_tester(store):
     tasks = plan(2)
     tasks[0]["profile"] = S.PROFILE_TESTER
     await submit(store, tasks)
     first = await claim(store)
     assert first.params[S.PARAM_EPIC_RED_TESTS] == []
-    items = "\n- tests/unit/test_m0.py::test_a\n- tests/unit/test_m0.py::test_b"
-    summary = "готово\n\n" + S.RED_TESTS_MARKER + items
-    job = await store.queue.get_job(first.id)
-    parent = await git(store, "rev-parse", S.HEADS_REF_PREFIX + job.base_branch)
-    sha = await commit(store, parent, "f.txt", "x")
-    await git(store, "update-ref", S.HEADS_REF_PREFIX + S.AGENT_BRANCH_PREFIX + first.id, sha)
-    await store.queue.post_from_executor(
-        first.id, S.MSG_DONE, {S.PAYLOAD_SUMMARY: summary}, executor=EXECUTOR
+    await finish_tester(
+        store, first.id, ["tests/unit/test_m0.py::test_a", "tests/unit/test_m0.py::test_b"]
     )
     second = await claim(store)
     expected = ["tests/unit/test_m0.py::test_a", "tests/unit/test_m0.py::test_b"]
     assert second.params[S.PARAM_EPIC_RED_TESTS] == expected
     assert "tests/unit/test_m0.py::test_b" in second.task
+
+
+async def test_developer_gets_red_tests_only_of_testers_it_depends_on(store):
+    tasks = plan(3)
+    tasks[0]["profile"] = S.PROFILE_TESTER
+    tasks[1]["profile"] = S.PROFILE_TESTER
+    tasks[1]["depends_on"] = []
+    tasks[2]["depends_on"] = [1]
+    await submit(store, tasks)
+    for test in ("tests/unit/test_m0.py::test_a", "tests/unit/test_m1.py::test_b"):
+        tester = await claim(store)
+        await finish_tester(store, tester.id, [test])
+    developer = await claim(store)
+    assert developer.params[S.PARAM_EPIC_RED_TESTS] == ["tests/unit/test_m1.py::test_b"]
+    assert "test_m0.py" not in developer.task
+
+
+async def test_delete_stops_live_job_and_removes_epic_and_branch(store):
+    view = await submit(store)
+    job = await claim(store)
+    with pytest.raises(HubError, match="нет"):
+        await mcp_tools.epic_delete(mcp_tools.Context(store, OTHER), view["id"])
+    result = await mcp_tools.epic_delete(mcp_tools.Context(store, CLIENT), view["id"])
+    assert result == {S.FIELD_ID: view["id"], S.FIELD_STATUS: S.EPIC_DELETED}
+    assert (await store.queue.get_job(job.id)).status == S.STATUS_STOPPED
+    assert not await repos.branch_exists(store.git_root, PROJECT, view["branch"])
+    with pytest.raises(HubError, match="нет"):
+        await store.epics.view(CLIENT, view["id"])
+    await store.queue.post_from_executor(job.id, S.MSG_STOPPED, {}, executor=EXECUTOR)
+    assert await store.queue.claim(EXECUTOR, [MODEL]) is None
+
+
+async def test_submit_with_replaces_deletes_old_epic_only_after_new_one_is_accepted(store):
+    old = await submit(store)
+    ctx = mcp_tools.Context(store, CLIENT)
+    with pytest.raises(HubError, match="план отклонён"):
+        await mcp_tools.epic_submit(ctx, PROJECT, BASE, plan(1) * 2, replaces=old["id"])
+    assert (await store.epics.view(CLIENT, old["id"]))["id"] == old["id"]
+    new = (await mcp_tools.epic_submit(ctx, PROJECT, BASE, plan(2), replaces=old["id"]))["epic"]
+    assert new["id"] != old["id"]
+    with pytest.raises(HubError, match="нет"):
+        await store.epics.view(CLIENT, old["id"])
+    assert not await repos.branch_exists(store.git_root, PROJECT, old["branch"])

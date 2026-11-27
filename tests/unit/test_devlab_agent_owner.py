@@ -160,6 +160,17 @@ async def test_stop_cranes_ask_owner_with_reason(tmp_path, limits, spec_tests, e
     assert len(model.script) > 5
 
 
+async def test_zero_red_runs_limit_turns_off_red_crane(tmp_path):
+    spec = AgentSpec(test_argv=RED_TEST, diff_prefixes=("src/",))
+    model = ScriptedChatModel(*RUN_TESTS)
+    loop, _ = make_loop(tmp_path, model, spec=spec, limits=AgentLimits(max_red_runs=0, max_steps=8))
+
+    result = await loop.run("s", "t")
+
+    assert result.status is AgentStatus.ASKED
+    assert "лимит шагов" in result.reason
+
+
 async def test_green_run_resets_red_streak_and_answer_grants_new_segment(tmp_path):
     spec = AgentSpec(test_argv=GREEN_TEST, diff_prefixes=("src/",))
     model = ScriptedChatModel(*RUN_TESTS[:2], tool_reply(TOOL_FINISH, "f", summary="x"), edit())
@@ -291,7 +302,7 @@ async def test_stop_while_waiting_owner_keeps_partial_branch(env):
 
     assert await env.status(job_id) == protocol.STATUS_STOPPED
     assert not worker.parked_jobs
-    assert await hub_branch(env, wip_of(job_id)) is None
+    assert await hub_branch(env, wip_of(job_id))
     assert await hub_branch(env, agent_of(job_id))
     assert not (env.tmp_path / "exec" / AGENT_DIR / job_id).exists()
     assert not worker.pending_messages

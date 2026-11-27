@@ -213,7 +213,7 @@ async def test_stop_closes_job_and_keeps_partial_branch(env):
     assert await running
 
     assert await env.status(job_id) == protocol.STATUS_STOPPED
-    assert await hub_branch(env, wip_of(job_id)) is None
+    assert await hub_branch(env, wip_of(job_id))
     assert await hub_branch(env, agent_of(job_id))
     assert worker.cursor > 0
     assert not worker.pending_messages
@@ -404,6 +404,15 @@ async def test_limits_for_token_ceiling(env, entries, expected):
     worker = make_worker(env, ScriptedChatModel(), limits=AgentLimits(max_tokens=1000))
     spend = JobSpend(SpendState(extensions=2), lambda state: None)
     assert worker._limits_for(spend, entries).max_tokens == expected
+
+
+@pytest.mark.parametrize(("expect_red", "expected"), [(True, 0), (False, 5)])
+async def test_limits_for_expect_red_turns_off_red_runs_crane(env, expect_red, expected):
+    worker = make_worker(env, ScriptedChatModel(), limits=AgentLimits(max_red_runs=5))
+    spend = JobSpend(SpendState(), lambda state: None)
+    profile = DevlabProfileConfig(expect_red=expect_red)
+    entries = [CatalogEntry(MODEL, "or", "http://o", remote=True, free=True)]
+    assert worker._limits_for(spend, entries, profile).max_red_runs == expected
 
 
 async def submit_profile(env, profile) -> str:

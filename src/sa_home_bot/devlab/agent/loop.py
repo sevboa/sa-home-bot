@@ -351,7 +351,7 @@ class AgentLoop:
 
     def _crane(self, seg: Segment) -> tuple[Crane, str] | None:
         limits = self._limits
-        if seg.red_runs >= limits.max_red_runs:
+        if limits.max_red_runs and seg.red_runs >= limits.max_red_runs:
             return Crane.RED_RUNS, f"{seg.red_runs} красных прогонов тестов подряд"
         if seg.steps >= limits.max_steps:
             return Crane.STEPS, f"исчерпан лимит шагов {limits.max_steps}"

@@ -174,6 +174,7 @@ class DevlabProfileConfig(BaseModel):
     write_prefixes: list[str] = Field(default_factory=list)
     allow_no_changes: bool = False
     expect_red: bool = False
+    plan_check: bool = False
     draft_after_reads: int = Field(default=0, ge=0)
     require_verdict: bool = False
     code_mode: bool = False
@@ -793,6 +794,7 @@ class VpnConfig(BaseModel):
     sub_secret: str = ""
     sub_update_interval_h: int = Field(default=12, ge=1)
     sub_support_url: str = ""
+    sub_hide_blocked_from_russia: bool = True
 
 
 class VpnCheckConfig(BaseModel):

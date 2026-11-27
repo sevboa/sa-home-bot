@@ -769,7 +769,10 @@ class HubQueue:
                     )
                 kind, payload = await self._requeue(conn, job, payload)
             elif not (
-                (kind == protocol.MSG_STOPPED and job.status == protocol.STATUS_STOPPED)
+                (
+                    kind == protocol.MSG_STOPPED
+                    and job.status in (protocol.STATUS_STOPPED, protocol.STATUS_QUEUED)
+                )
                 or (kind == protocol.MSG_QUESTION and job.status == protocol.STATUS_WAITING_OWNER)
             ):
                 target = protocol.MESSAGE_TARGET_STATUS[kind]

@@ -538,6 +538,19 @@ def test_job_spend_live_counts_total_segment_and_reasoning():
     assert live[protocol.FIELD_REASONING_TOKENS] == 3
 
 
+def test_segment_tokens_ignore_base_and_keep_growing_through_parking():
+    saved = []
+    spend = JobSpend(SpendState(base_tokens=5_000_000), saved.append)
+    assert spend.segment_tokens() == 0
+    assert spend.total_tokens() == 5_000_000
+    spend.record(ModelReply("", tokens_in=10, tokens_out=5))
+    spend.extend()
+    resumed = JobSpend(saved[-1], saved.append)
+    resumed.record(ModelReply("", tokens_in=20, tokens_out=5))
+    assert resumed.segment_tokens() == 40
+    assert resumed.extensions == 1
+
+
 def test_job_spend_live_reports_context_window_and_folds():
     spend = JobSpend(SpendState(), lambda state: None)
     assert protocol.FIELD_CONTEXT_TOKENS not in spend.live()

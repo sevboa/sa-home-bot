@@ -125,6 +125,8 @@ def _patch_curl(
     tunnel_up_err: bytes = b"",
     reality_up_ok: bool = True,
     reality_up_err: bytes = b"",
+    ping_code: int = 0,
+    ping_err: bytes = b"",
 ) -> list[tuple]:
     calls: list[tuple] = []
 
@@ -144,6 +146,8 @@ def _patch_curl(
             if route_dev is None:
                 return _FakeProc(b"", route_err, 2)
             return _FakeProc(f"1.1.1.1 dev {route_dev} src 10.9.0.14\n".encode(), b"", 0)
+        if "ping" in cmd:
+            return _FakeProc(b"", ping_err, ping_code)
         if cmd[-1] == _IP_ECHO:
             ip = netns_ip if "netns" in cmd else host_ip
             return _FakeProc(ip.encode(), b"", 0)
@@ -708,6 +712,42 @@ async def test_report_carries_net_probe_from_reality_netns(monkeypatch, probe, o
     assert (net["ok"], net["ms"]) == (ok, ms)
 
 
+@pytest.mark.parametrize(
+    ("ping_code", "ping_err", "ping", "tail"),
+    [
+        (0, b"", True, ", ping есть — режут TCP"),
+        (1, b"", False, ", ping нет — IP закрыт целиком"),
+        (1, b"sudo: a password is required", None, ""),
+    ],
+)
+async def test_tcp_failure_adds_ping_hint(monkeypatch, ping_code, ping_err, ping, tail):
+    node_link = _FakeNodeLink()
+    calls = _patch_curl(
+        monkeypatch,
+        {"https://1.1.1.1": (b"200", b"", 0), _NET_URL: (b"0.000000", b"", 28)},
+        ping_code=ping_code,
+        ping_err=ping_err,
+    )
+    service = _service(node_link, slots=[_slot(), _reality_slot()])
+    service._remember_net_target(PROBE_SERVER, {"host": "203.0.113.5", "port": 8443})
+    await service._run_and_report(PROBE_SERVER, service._slots, ["https://1.1.1.1"])
+    net = node_link.calls[0]["args"]["net"][PROBE_SERVER]
+    assert net["ping"] is ping
+    assert net["error"] == "нет TCP до 203.0.113.5:8443" + tail
+    assert len([c for c in calls if "ping" in c]) == 1
+
+
+async def test_tcp_ok_does_not_ping(monkeypatch):
+    node_link = _FakeNodeLink()
+    service = _net_service(monkeypatch, node_link, (b"0.045000", b"", 52))
+    calls = _patch_curl(
+        monkeypatch, {"https://1.1.1.1": (b"200", b"", 0), _NET_URL: (b"0.045000", b"", 52)}
+    )
+    await service._run_and_report(PROBE_SERVER, service._slots, ["https://1.1.1.1"])
+    assert not [c for c in calls if "ping" in c]
+    assert "ping" not in node_link.calls[0]["args"]["net"][PROBE_SERVER]
+
+
 async def test_no_tcp_skips_tunnels_and_reports_all_failed(monkeypatch):
     node_link = _FakeNodeLink()
     service = _net_service(monkeypatch, node_link, (b"0.000000", b"", 28))
@@ -727,7 +767,7 @@ async def test_no_tcp_skips_tunnels_and_reports_all_failed(monkeypatch):
     assert len(args["results"]) == 4
     for r in args["results"]:
         assert r["ok"] is False and r["ms"] is None
-        assert r["error"] == "пропущено: нет TCP до 203.0.113.5:8443"
+        assert r["error"].startswith("пропущено: нет TCP до 203.0.113.5:8443")
         assert {"server", "transport", "entry", "target"} <= set(r)
 
 
