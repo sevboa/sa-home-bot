@@ -65,7 +65,8 @@ class BusyTracker:
         )
 
     def working(self) -> bool:
-        return bool(self._running or self._queued > 0 or self.outbox_size() > 0)
+        queued = self._queued > 0 and not self._parked.active
+        return bool(self._running or queued or self.outbox_size() > 0)
 
     def busy(self) -> bool:
         if self._parked.active:

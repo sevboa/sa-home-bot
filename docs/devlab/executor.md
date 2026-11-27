@@ -458,6 +458,10 @@
 
 ## Drain исполнителя (2026-11-27)
 
+С v0.236.11 то же делает сам `restart_node` без `--force`, если devlab занят (см.
+[node-core/lifecycle.md](../node-core/lifecycle.md), NodeService). `working()` запаркованного
+трекера не считает очередь — иначе рестарт после drain всё равно ждал 30 мин.
+
 Находка при выкате v0.236.9 (2026-11-27): в v0.236.8 `drain` отвечал `unknown_action: park` —
 протокольный сервер (`proto/server.py`, `_run_command`) пускает только действия из
 `describe().actions`, а `ExecutorService.describe` их не объявлял; тесты звали `run_command`

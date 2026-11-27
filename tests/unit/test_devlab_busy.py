@@ -14,7 +14,7 @@ from sa_home_bot.node import peers as peers_mod
 from sa_home_bot.node import service as service_module
 from sa_home_bot.node.peers import NodeRouter, PeerLink
 from sa_home_bot.node.service import NodeService
-from sa_home_bot.proto.messages import ServiceInfo
+from sa_home_bot.proto.messages import ServiceInfo, make_response
 from sa_home_bot.proto.server import ProtoServer
 from tests.unit.support.waiting import wait_for
 from tests.unit.test_node_service import _fake_supervisor
@@ -424,3 +424,73 @@ def test_service_info_working_roundtrip_and_old_payload():
     old = ServiceInfo(node="n", service="s", version="1").to_payload()
     assert "working" not in old
     assert ServiceInfo.from_payload(old).working is None
+
+
+class ExecutorLink:
+    def __init__(self, tracker: BusyTracker) -> None:
+        self.alive = True
+        self.busy = True
+        self.tracker = tracker
+        self.service = ExecutorService("n", tracker)
+        self.actions: list[str] = []
+
+    @property
+    def working(self) -> bool:
+        return self.tracker.working()
+
+    async def forward(self, request):
+        action = request.payload["action"]
+        assert self.service.describe().find_action(action) is not None
+        self.actions.append(action)
+        return make_response(request, await self.service.run_command(action, {}))
+
+
+def queued_executor() -> ExecutorLink:
+    tracker = BusyTracker()
+    tracker.set_queued(3)
+    return ExecutorLink(tracker)
+
+
+def test_parked_tracker_is_not_working_with_queue():
+    tracker = BusyTracker()
+    tracker.set_queued(3)
+    tracker.set_parked(True)
+    assert not tracker.working()
+    tracker.started("a")
+    assert tracker.working()
+
+
+async def test_restart_node_parks_busy_executor_and_restarts(monkeypatch):
+    calls: list[str] = []
+    link = queued_executor()
+    svc = _restart_service(monkeypatch, link, calls)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    result = await svc.run_command("restart_node", {})
+    assert result["deferred"] == ["devlab"]
+    assert await wait_for(lambda: calls == ["restart"])
+    assert link.actions == [protocol.ACTION_PARK]
+
+
+async def test_restart_node_force_does_not_park(monkeypatch):
+    calls: list[str] = []
+    link = queued_executor()
+    svc = _restart_service(monkeypatch, link, calls)
+    await svc.run_command("restart_node", {"force": True})
+    await asyncio.sleep(0.02)
+    assert calls == ["restart"]
+    assert link.actions == []
+
+
+async def test_restart_node_other_busy_service_does_not_park(monkeypatch):
+    monkeypatch.setattr(service_module, "RESTART_DEFER_POLL_S", 0.01)
+    monkeypatch.setattr(service_module, "RESTART_DEFER_MAX_S", 10.0)
+    executor = ExecutorLink(BusyTracker())
+    other = StubLink(True, True, working=True)
+    sup, _ = _fake_supervisor()
+    router = NodeRouter("n", local_services={"devlab": executor, "llm": other})
+    svc = NodeService(sup, router, restart_node=lambda: None)
+    result = await svc.run_command("restart_node", {})
+    assert result["deferred"] == ["llm"]
+    await asyncio.sleep(0.03)
+    assert executor.actions == []
+    svc._restart_wait_task.cancel()

@@ -9,6 +9,7 @@ from typing import Any
 
 from sa_home_bot import __version__, wol
 from sa_home_bot.config import PowerRuleConfig
+from sa_home_bot.devlab import protocol as devlab_protocol
 from sa_home_bot.node import assignments as assignments_mod
 from sa_home_bot.node import kind as node_kinds
 from sa_home_bot.node import power_rule as power_rules
@@ -750,7 +751,8 @@ class NodeService:
                     RESTART_DEFER_MAX_S,
                 )
                 self._restart_wait_task = asyncio.create_task(
-                    self._restart_when_idle(), name="restart-node-wait"
+                    self._restart_when_idle(park=devlab_protocol.EXECUTOR_SERVICE in busy),
+                    name="restart-node-wait",
                 )
             busy = busy or self._busy_services_safe()
             return {
@@ -783,8 +785,29 @@ class NodeService:
             log.exception("Не удалось узнать занятость служб")
             return []
 
-    async def _restart_when_idle(self) -> None:
+    async def _park_executor(self) -> None:
+        if self._router is None:
+            return
+        env = make_request(
+            MSG_COMMAND,
+            {"action": devlab_protocol.ACTION_PARK, "args": {}},
+            dst=Address(service=devlab_protocol.EXECUTOR_SERVICE),
+            timeout_s=5.0,
+        )
         try:
+            response = await self._router.route(env)
+        except Exception as exc:
+            log.warning("Не удалось запарковать исполнитель devlab: %s", exc)
+            return
+        if response is None or response.ok is not True:
+            log.warning("Исполнитель devlab не принял парковку: %s", response)
+            return
+        log.warning("Исполнитель devlab запаркован перед рестартом ноды")
+
+    async def _restart_when_idle(self, park: bool = False) -> None:
+        try:
+            if park:
+                await self._park_executor()
             waited = 0.0
             while waited < RESTART_DEFER_MAX_S:
                 await asyncio.sleep(RESTART_DEFER_POLL_S)
