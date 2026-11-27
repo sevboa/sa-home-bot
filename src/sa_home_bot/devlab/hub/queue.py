@@ -17,7 +17,7 @@ import aiosqlite
 
 from sa_home_bot.db.connection import Database
 from sa_home_bot.devlab import protocol
-from sa_home_bot.devlab.hub import joblogs
+from sa_home_bot.devlab.hub import joblogs, repos
 from sa_home_bot.devlab.hub.errors import HubError
 from sa_home_bot.utils.clock import utc_now
 
@@ -1304,6 +1304,25 @@ class HubQueue:
             expired = [row["id"] for row in await cur.fetchall()]
         for job_id in expired:
             joblogs.remove(self.logs_root, job_id)
+
+        projects = await self.projects()
+        git_root = self.logs_root.parent / "git"
+        for project in projects:
+            wip_branches = await repos.list_wip_branches(git_root, project)
+            for job_id in wip_branches:
+                async with self._tx() as conn:
+                    cur = await conn.execute(
+                        "SELECT status, finished FROM jobs WHERE id = ?", (job_id,)
+                    )
+                    row = await cur.fetchone()
+                if row is None:
+                    branch = f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
+                    await repos.delete_branch(git_root, project, branch)
+                elif row["status"] in (protocol.STATUS_STOPPED, protocol.STATUS_FAILED):
+                    finished = row["finished"]
+                    if finished and finished < border:
+                        branch = f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
+                        await repos.delete_branch(git_root, project, branch)
         return removed
 
     @staticmethod
