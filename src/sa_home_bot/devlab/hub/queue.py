@@ -254,10 +254,17 @@ def in_windows(windows: Collection[str], moment: time) -> bool:
 
 
 class HubQueue:
-    def __init__(self, db: Database, logs_root: Path, bench_windows: Collection[str] = ()) -> None:
+    def __init__(
+        self,
+        db: Database,
+        logs_root: Path,
+        git_root: Path,
+        bench_windows: Collection[str] = (),
+    ) -> None:
         self.observers: list[Callable[[str], Awaitable[None]]] = []
         self._db = db
         self.logs_root = logs_root
+        self._git_root = git_root
         self._bench_windows = list(bench_windows)
         in_windows(self._bench_windows, time(0, 0))
         self._lock = asyncio.Lock()
@@ -1304,26 +1311,25 @@ class HubQueue:
             expired = [row["id"] for row in await cur.fetchall()]
         for job_id in expired:
             joblogs.remove(self.logs_root, job_id)
-
-        projects = await self.projects()
-        git_root = self.logs_root.parent / "git"
-        for project in projects:
-            wip_branches = await repos.list_wip_branches(git_root, project)
-            for job_id in wip_branches:
-                async with self._tx() as conn:
-                    cur = await conn.execute(
-                        "SELECT status, finished FROM jobs WHERE id = ?", (job_id,)
-                    )
-                    row = await cur.fetchone()
-                if row is None:
-                    branch = f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
-                    await repos.delete_branch(git_root, project, branch)
-                elif row["status"] in (protocol.STATUS_STOPPED, protocol.STATUS_FAILED):
-                    finished = row["finished"]
-                    if finished and finished < border:
-                        branch = f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
-                        await repos.delete_branch(git_root, project, branch)
+        await self._sweep_wip(border)
         return removed
+
+    async def _sweep_wip(self, border: str) -> None:
+        for project in await self.projects():
+            for job_id in await repos.list_wip_branches(self._git_root, project):
+                if await self._wip_abandoned(job_id, border):
+                    await repos.delete_branch(
+                        self._git_root, project, f"{protocol.WIP_BRANCH_PREFIX}{job_id}"
+                    )
+
+    async def _wip_abandoned(self, job_id: str, border: str) -> bool:
+        async with self._tx() as conn:
+            cur = await conn.execute("SELECT status, finished FROM jobs WHERE id = ?", (job_id,))
+            row = await cur.fetchone()
+        if row is None:
+            return True
+        ended = row["status"] in (protocol.STATUS_STOPPED, protocol.STATUS_FAILED)
+        return ended and bool(row["finished"]) and row["finished"] < border
 
     @staticmethod
     def _check_transition(job: Job, target: str) -> None:

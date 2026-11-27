@@ -57,7 +57,7 @@ class Env:
         added = await self.mcp.call(protocol.TOOL_PROJECT_ADD, name=PROJECT)
         self.git_url = str(self.client.make_url(added["git_path"]))
 
-    async def push(self, branch: str, files: dict[str, bytes]) -> str:
+    async def push(self, branch: str, files: dict[str, bytes], token: str | None = None) -> str:
         work = self.tmp_path / f"snap-{branch.replace('/', '-')}"
         work.mkdir()
         run_git(work, "init", "-q", "-b", "main")
@@ -66,7 +66,7 @@ class Env:
         run_git(work, "add", "-A")
         run_git(work, "commit", "-q", "-m", "snap")
         pushed = await arun_git(
-            work, *auth(self.client_token), "push", self.git_url, f"main:refs/heads/{branch}"
+            work, *auth(token or self.client_token), "push", self.git_url, f"main:refs/heads/{branch}"
         )
         assert pushed.returncode == 0, pushed.stderr
         return run_git(work, "rev-parse", "HEAD").stdout.strip()
