@@ -592,6 +592,7 @@ class AgentWorker(WorkerLoops):
             trace=self._steps_trace(run.root).record,
             overflow_hint=rules_hint(rules),
             on_fold=spend.note_fold,
+            park=lambda: self._settings.park.active,
         )
         system = build_system(
             rules,

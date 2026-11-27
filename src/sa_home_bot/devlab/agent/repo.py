@@ -219,11 +219,9 @@ class AgentRepo:
     async def _squash(self, headline: str) -> str | None:
         await self._commit(LEFTOVER_MESSAGE, allow_empty=False)
         await self._push()
-        base_rev = await self._git("rev-parse", self._base)
-        head_rev = await self._git("rev-parse", HEAD_REF)
-        if base_rev == head_rev:
-            return None
         tree = await self._git("rev-parse", f"{HEAD_REF}^{{tree}}")
+        if tree == await self._git("rev-parse", f"{self._base}^{{tree}}"):
+            return None
         message = await self._compose(headline)
         sha = await self._git(
             "commit-tree", tree, "-p", self._base, "-m", message, extra_env=self._author_env()

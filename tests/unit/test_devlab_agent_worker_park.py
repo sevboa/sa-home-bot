@@ -18,7 +18,6 @@ from tests.unit.test_devlab_agent_repo import hub_branch
 from tests.unit.test_devlab_agent_worker import (
     FINISH,
     WRITE_DONE,
-    agent_of,
     make_worker,
     submit,
     wip_of,
@@ -132,7 +131,6 @@ async def test_restart_resumes_parked_before_new_claims(env, monkeypatch):
         protocol.MSG_DONE,
     ]
     assert await hub_branch(env, wip_of(job_id)) is None
-    assert await hub_branch(env, agent_of(job_id))
     assert not restarted.parked_jobs
     assert not (env.tmp_path / "exec" / AGENT_DIR / job_id).exists()
 

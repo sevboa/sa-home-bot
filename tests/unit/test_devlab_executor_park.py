@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from sa_home_bot.devlab import protocol
@@ -6,27 +5,19 @@ from sa_home_bot.devlab.agent.sandbox import LocalSandbox
 from sa_home_bot.devlab.executor.agent_worker import AgentSettings, AgentWorker
 from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.hub import ExecutorHub
+from sa_home_bot.devlab.executor.park import ParkMode
 from sa_home_bot.devlab.executor.worker import TestWorker, WorkerSettings
 from tests.unit import test_devlab_executor as executor_tests
 from tests.unit.support.fakes import FakeTestRunner, ScriptedChatModel, StaticCatalog, local_entry
-from tests.unit.test_devlab_agent_worker import BASE_FILES, FINISH
+from tests.unit.test_devlab_agent_worker import BASE_FILES, FINISH, WRITE_DONE
 
 env = executor_tests.env
 PROJECT = executor_tests.PROJECT
 CLIENT = executor_tests.CLIENT
 
 
-def park(active: bool):
-    from sa_home_bot.devlab.executor.park import ParkMode
-
+def park(active: bool) -> ParkMode:
     return ParkMode(active=active)
-
-
-def test_park_mode_holds_active_flag():
-    from sa_home_bot.devlab.executor.park import ParkMode
-
-    assert ParkMode(active=True).active
-    assert not ParkMode(active=False).active
 
 
 def test_parked_busy_counts_only_running_and_outbox():
@@ -101,7 +92,7 @@ def make_test_worker(env, runner, active: bool = True) -> TestWorker:
     return TestWorker(hub, runner, settings)
 
 
-def make_agent_worker(env, model, active: bool = True) -> AgentWorker:
+def make_agent_worker(env, model, active: bool = True, mode: ParkMode | None = None) -> AgentWorker:
     hub = ExecutorHub(env.hub_url, env.executor_token)
     env.hubs.append(hub)
     settings = AgentSettings(
@@ -112,7 +103,7 @@ def make_agent_worker(env, model, active: bool = True) -> AgentWorker:
         heartbeat_interval_s=0.01,
         push_interval_s=0.0,
         retry_interval_s=0.01,
-        park=park(active),
+        park=mode or park(active),
     )
     return AgentWorker(
         hub,
@@ -179,6 +170,28 @@ async def test_parked_agent_worker_claims_nothing(env):
 async def test_unparked_agent_worker_claims_as_before(env):
     base = "base/park-b"
     job_id = await submit_agent(env, base)
-    worker = make_agent_worker(env, ScriptedChatModel(FINISH), active=False)
+    worker = make_agent_worker(env, ScriptedChatModel(WRITE_DONE, FINISH), active=False)
     assert await worker.claim_once()
     assert await env.status(job_id) == protocol.STATUS_DONE
+
+
+class ParkingModel(ScriptedChatModel):
+    def __init__(self, mode: ParkMode, *script) -> None:
+        super().__init__(*script)
+        self.mode = mode
+
+    async def complete(self, messages, tools):
+        reply = await super().complete(messages, tools)
+        self.mode.active = True
+        return reply
+
+
+async def test_running_job_parks_between_model_calls(env):
+    job_id = await submit_agent(env, "base/park-c")
+    mode = park(False)
+    model = ParkingModel(mode, WRITE_DONE, FINISH)
+    worker = make_agent_worker(env, model, mode=mode)
+    assert await worker.claim_once()
+    assert len(model.seen) == 1
+    assert worker.parked_jobs == [job_id]
+    assert await env.status(job_id) == protocol.STATUS_RUNNING

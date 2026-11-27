@@ -15,9 +15,7 @@ from sa_home_bot.proto.messages import (
 
 
 class ExecutorService:
-    def __init__(
-        self, node: str, busy: BusyTracker, park: ParkMode | None = None
-    ) -> None:
+    def __init__(self, node: str, busy: BusyTracker, park: ParkMode | None = None) -> None:
         self._node = node
         self._busy = busy
         self._park = park

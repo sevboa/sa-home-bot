@@ -17,6 +17,7 @@ from sa_home_bot.devlab import protocol
 from sa_home_bot.devlab import snapshot as devlab_snapshot
 from sa_home_bot.devlab.drain import drain_command
 from sa_home_bot.node.fixups import build_fixups, run_fixups
+from sa_home_bot.node.service import ACTION_RESTART
 from sa_home_bot.proto.client import ProtoClient
 from sa_home_bot.proto.endpoints import Endpoint, parse_endpoint, resolve_endpoint
 from sa_home_bot.proto.messages import (
@@ -587,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.devlab_command == "drain":
             endpoint, token = _resolve_endpoint(args)
             dst = Address(node=args.node, service="node") if args.node else None
-            service_dst = Address(service=protocol.EXECUTOR_SERVICE)
+            service_dst = Address(node=args.node, service=protocol.EXECUTOR_SERVICE)
 
             async def once(call: Callable[[ProtoClient], Awaitable[Any]]) -> Any:
                 client = ProtoClient(endpoint, token=token)
@@ -609,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(
                     once(
                         lambda c: c.command(
-                            "restart", {"name": protocol.EXECUTOR_SERVICE}, dst=dst
+                            ACTION_RESTART, {"name": protocol.EXECUTOR_SERVICE}, dst=dst
                         )
                     )
                 )
