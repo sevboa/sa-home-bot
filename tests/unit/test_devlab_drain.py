@@ -115,3 +115,8 @@ def test_drain_connection_error_exits_1_without_restart(park_error, state_error,
     assert drain(node, interval=5.0, timeout=60.0) == 1
     assert "restart" not in node.calls
     assert capsys.readouterr().err
+
+
+def test_executor_service_declares_park_for_proto_server():
+    service = ExecutorService("mycraft", BusyTracker())
+    assert service.describe().find_action(protocol.ACTION_PARK) is not None

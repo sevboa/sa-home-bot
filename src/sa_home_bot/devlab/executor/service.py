@@ -8,6 +8,7 @@ from sa_home_bot.devlab.executor.busy import BusyTracker
 from sa_home_bot.devlab.executor.park import ParkMode
 from sa_home_bot.proto.messages import (
     ERR_UNKNOWN_ACTION,
+    ActionSpec,
     ProtoError,
     ServiceDescription,
     ServiceInfo,
@@ -28,7 +29,8 @@ class ExecutorService:
                 version=__version__,
                 busy=self._busy.busy(),
                 working=self._busy.working(),
-            )
+            ),
+            actions=(ActionSpec(id=protocol.ACTION_PARK, title="Запарковать исполнитель"),),
         )
 
     async def get_state(self) -> dict[str, Any]:
