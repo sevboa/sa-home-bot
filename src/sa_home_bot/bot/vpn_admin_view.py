@@ -128,6 +128,10 @@ def _access_mark(server: dict) -> str:
     return "✅" if server.get("allowed") else "⬜"
 
 
+def is_owner_sub(sub: Subscription) -> bool:
+    return sub.is_owner and sub.chat_id > 0
+
+
 def has_any_vpn_right(sub: Subscription) -> bool:
     group = guest_rights.group(_VPN_GROUP_KEY)
     if group is None:
@@ -160,7 +164,8 @@ def toggle_by_key(key: str) -> RightToggle | None:
 
 
 def sort_guests(guests: Sequence[Subscription]) -> list[Subscription]:
-    return sorted(guests, key=lambda sub: not has_any_vpn_right(sub))
+    filtered = [s for s in guests if s.is_guest or is_owner_sub(s)]
+    return sorted(filtered, key=lambda sub: (not is_owner_sub(sub), not has_any_vpn_right(sub)))
 
 
 def visible_guests(guests: Sequence[Subscription], offset: int) -> list[Subscription]:
@@ -186,7 +191,8 @@ def build_guests_view(
             )
         else:
             where = "доступа нет"
-        lines.append(f"• {escape(guest.name)} — {escape(where)}")
+        prefix = "👑 " if is_owner_sub(guest) else ""
+        lines.append(f"• {prefix}{escape(guest.name)} — {escape(where)}")
     buttons = [
         [button(f"👤 {guest.name}"[:_MAX_NAME_LEN], guest_cb(guest.chat_id))] for guest in page
     ]
@@ -236,7 +242,8 @@ def build_guest_view(
         for server in servers
         if server.get("node")
     ]
-    buttons.append([button("🔐 Права VPN", rights_cb(guest.chat_id))])
+    if not is_owner_sub(guest):
+        buttons.append([button("🔐 Права VPN", rights_cb(guest.chat_id))])
     buttons.append([button("⬅️ К списку", guests_cb(0))])
     return "\n".join(lines), markup(*buttons)
 

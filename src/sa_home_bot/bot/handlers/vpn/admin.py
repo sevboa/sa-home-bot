@@ -29,7 +29,10 @@ _GUESTS_UNAVAILABLE = "⚠️ Список гостей сейчас недос�
 
 
 def _find_guest(ctx: Ctx, chat_id: int):
-    return next((g for g in ctx.book.guests() if g.chat_id == chat_id), None)
+    sub = ctx.book.for_chat(chat_id) if ctx.book else None
+    if sub is not None and (sub.is_guest or vpn_admin_view.is_owner_sub(sub)):
+        return sub
+    return None
 
 
 def parse_offset(value: str | None) -> int:
@@ -43,12 +46,13 @@ async def handle_admin_screen(ctx: Ctx, value: str | None, node_id: str | None) 
     if ctx.book is None:
         await ctx.alert(_GUESTS_UNAVAILABLE)
         return
-    guests = ctx.book.guests()
+    all_subs = ctx.book.all()
+    guests = vpn_admin_view.sort_guests(all_subs)
 
     rights_chat_id = vpn_admin_view.parse_rights_value(value)
     if rights_chat_id is not None:
-        guest = next((g for g in guests if g.chat_id == rights_chat_id), None)
-        if guest is None:
+        guest = _find_guest(ctx, rights_chat_id)
+        if guest is None or vpn_admin_view.is_owner_sub(guest):
             await ctx.alert(GUEST_GONE)
             return
         text, keyboard = vpn_admin_view.build_rights_view(guest)
@@ -70,7 +74,7 @@ async def handle_admin_screen(ctx: Ctx, value: str | None, node_id: str | None) 
         await ctx.edit(text, keyboard)
         return
 
-    guest = next((g for g in guests if g.chat_id == chat_id), None)
+    guest = _find_guest(ctx, chat_id)
     if guest is None:
         await ctx.alert(GUEST_GONE)
         return
@@ -95,7 +99,7 @@ async def handle_set_rights(ctx: Ctx, value: str | None) -> None:
     chat_id, key = parsed
     toggle = vpn_admin_view.toggle_by_key(key)
     guest = _find_guest(ctx, chat_id)
-    if toggle is None or guest is None:
+    if toggle is None or guest is None or vpn_admin_view.is_owner_sub(guest):
         await ctx.alert(GUEST_GONE)
         return
     updated = ctx.gate.set_guest_rights(chat_id, vpn_admin_view.toggle_rights(guest, toggle))
